@@ -26,7 +26,7 @@ const RATE_H: f32 = 48.0;
 /// The histogram above the photo.
 const HIST_H: f32 = 104.0;
 /// The slider rows' height: a finger-sized track under its label.
-const ROW_H: f32 = 64.0;
+const ROW_H: f32 = 70.0;
 /// Gap between thumbnails.
 const GAP: f32 = 2.0;
 
@@ -525,16 +525,8 @@ fn paint_tile(app: &LightcraftApp, ui: &egui::Ui, t: &Tokens, id: lightcraft_cat
 // ---------------------------------------------------------------- photo
 
 fn photo(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens, safe: Rect, shell: &mut Shell) {
-    if shell.tool == Some(Tool::Crop) {
-        return crop_mode(app, ui, t, safe, shell);
-    }
-    if shell.tool == Some(Tool::Curve) {
-        return curve_mode(app, ui, t, safe, shell);
-    }
-    if shell.tool == Some(Tool::Grading) {
-        return grading_mode(app, ui, t, safe, shell);
-    }
-    if shell.hidden {
+    // turned sideways the phone is for looking: the photo alone, whatever was open
+    if shell.hidden || safe.width() > safe.height() {
         // only the photo, edge to edge; a tap brings the bars back
         let full = ui.max_rect();
         app.ui.filmstrip = false;
@@ -548,6 +540,15 @@ fn photo(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens, safe: Rect, she
         gestures(app, ui.ctx(), full, shell);
         return;
     }
+    if shell.tool == Some(Tool::Crop) {
+        return crop_mode(app, ui, t, safe, shell);
+    }
+    if shell.tool == Some(Tool::Curve) {
+        return curve_mode(app, ui, t, safe, shell);
+    }
+    if shell.tool == Some(Tool::Grading) {
+        return grading_mode(app, ui, t, safe, shell);
+    }
     let header = Rect::from_min_size(safe.min, vec2(safe.width(), HEADER_H));
     let main = Rect::from_min_max(pos2(safe.left(), safe.bottom() - STRIP_H), safe.max);
     // the second row (Auto and the edit groups) belongs to Edit; Presets and Crop replace it
@@ -556,7 +557,7 @@ fn photo(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens, safe: Rect, she
     let sheet_h = if shell.tool.is_some_and(|t| t != Tool::Assist) { (safe.height() * 0.4).min(360.0) } else { 0.0 };
     let sheet = Rect::from_min_max(pos2(safe.left(), sub.top() - sheet_h), pos2(safe.right(), sub.top()));
     // the histogram shows while no sheet covers the photo
-    let hist_h = if sheet_h == 0.0 { HIST_H } else { 0.0 };
+    let hist_h = if safe.height() > 640.0 || sheet_h == 0.0 { HIST_H } else { 0.0 };
     let hist = Rect::from_min_size(pos2(safe.left(), header.bottom()), vec2(safe.width(), hist_h));
     let canvas = Rect::from_min_max(pos2(safe.left(), hist.bottom()), pos2(safe.right(), sheet.top()));
 
@@ -768,13 +769,17 @@ fn assist(app: &mut LightcraftApp, ctx: &egui::Context, name: &str) {
 
 /// The edit row: Auto, then one tab per group of sliders.
 fn edit_row(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens, strip: Rect, shell: &mut Shell) {
+    let edited: Vec<Tool> = match app.session.active().and_then(|id| app.session.develop_of(id)) {
+        Some(d) => Tool::ALL.into_iter().filter(|tool| tool_edited(*tool, &d)).collect(),
+        None => Vec::new(),
+    };
     ui.set_clip_rect(strip.intersect(ui.clip_rect()));
     egui::ScrollArea::horizontal().scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden).auto_shrink([false, false]).show(
         ui,
         |ui| {
             ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
             ui.horizontal(|ui| {
-                let item = |ui: &mut egui::Ui, label: &str, on: bool| -> bool {
+                let item = |ui: &mut egui::Ui, label: &str, on: bool, dot: bool| -> bool {
                     let text = crate::i18n::tr(label);
                     let color = if on { t.text } else { t.text_dim };
                     let galley = ui.painter().layout_no_wrap(text.to_string(), t.font(11.5), color);
@@ -783,6 +788,10 @@ fn edit_row(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens, strip: Rect,
                         ui.painter().rect_filled(r.shrink2(vec2(3.0, 4.0)), 10.0, Color32::from_white_alpha(22));
                     }
                     paint_icon(ui.painter(), label, r.center_top() + vec2(0.0, 22.0), color);
+                    if dot {
+                        // this tool has changed the photo
+                        ui.painter().circle_filled(pos2(r.center().x, r.bottom() - 2.0), 2.2, t.text_dim);
+                    }
                     ui.painter().galley(pos2(r.center().x - galley.size().x / 2.0, r.bottom() - galley.size().y - 8.0), galley, color);
                     resp.clicked()
                 };
@@ -800,19 +809,20 @@ fn edit_row(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens, strip: Rect,
                             divider(ui);
                         }
                         for name in group {
-                            if item(ui, name, false) {
+                            if item(ui, name, false, false) {
                                 assist(app, ui.ctx(), name);
                             }
                         }
                     }
                     return;
                 }
-                if item(ui, "Auto", false) {
+                if item(ui, "Auto", false, false) {
                     assist(app, ui.ctx(), "Auto");
                 }
                 divider(ui);
                 for tool in Tool::ALL.into_iter().filter(|t| !matches!(t, Tool::Presets | Tool::Crop | Tool::Curve | Tool::Mixer | Tool::Grading)) {
-                    if item(ui, tool.label(), shell.tool == Some(tool) || (tool == Tool::Color && shell.tool == Some(Tool::Mixer))) {
+                    let on = shell.tool == Some(tool) || (tool == Tool::Color && matches!(shell.tool, Some(Tool::Mixer | Tool::Grading)));
+                    if item(ui, tool.label(), on, edited.contains(&tool)) {
                         shell.tool = if shell.tool == Some(tool) { None } else { Some(tool) };
                     }
                 }
@@ -821,14 +831,29 @@ fn edit_row(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens, strip: Rect,
     );
 }
 
+/// Whether any control the tool shows (for Color, its Grading and Color mix steps too) is off its default.
+fn tool_edited(tool: Tool, d: &lightcraft_develop::DevelopSettings) -> bool {
+    let extra: &[Section] = match tool {
+        Tool::Color => &[Section::Mixer, Section::Grading],
+        Tool::Light => &[Section::Curve],
+        _ => &[],
+    };
+    tool.sections()
+        .iter()
+        .map(|(s, _)| *s)
+        .chain(extra.iter().copied())
+        .flat_map(controls::in_section)
+        .any(|spec| controls::get(d, spec.id).is_some_and(|v| (v - spec.default).abs() > 1e-9))
+}
+
 /// The bars (header, rating row, tool strip): darker than the desktop chrome, so the photo leads.
 fn bar(t: &Tokens) -> Color32 {
-    t.chrome.lerp_to_gamma(Color32::BLACK, 0.55)
+    t.chrome.lerp_to_gamma(Color32::BLACK, 0.42)
 }
 
 /// The sheet that slides over the photo: a step lighter than the bars.
 fn panel(t: &Tokens) -> Color32 {
-    t.chrome.lerp_to_gamma(Color32::BLACK, 0.3)
+    bar(t)
 }
 
 // ---------------------------------------------------------------- sliders
@@ -869,7 +894,7 @@ fn sheet_of(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens, tool: Tool, 
         Some((_, prefixes)) => specs.into_iter().filter(|(_, s)| prefixes.iter().any(|p| s.id.starts_with(p))).collect(),
         None => specs,
     };
-    let title = Rect::from_min_size(ui.max_rect().min, vec2(ui.max_rect().width(), 40.0));
+    let title = Rect::from_min_size(ui.max_rect().min, vec2(ui.max_rect().width(), 48.0));
     if tool == Tool::Mixer {
         // the Color mix is a step inside Color: back goes there
         let c = pos2(title.left() + 22.0, title.center().y);
@@ -880,18 +905,10 @@ fn sheet_of(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens, tool: Tool, 
         if tap(ui, "mixer-back", Rect::from_min_size(title.min, vec2(170.0, title.height()))).clicked() {
             shell.tool = Some(Tool::Color);
         }
-    } else if tool.subtabs().is_empty() {
-        ui.painter().text(
-            pos2(title.left() + 18.0, title.center().y + 2.0),
-            Align2::LEFT_CENTER,
-            crate::i18n::tr(tool.label()),
-            t.semibold(17.0),
-            t.text,
-        );
     }
     if tool == Tool::Light {
         // the point curve has a screen of its own
-        let pill = Rect::from_min_size(pos2(title.right() - 192.0, title.top() + 6.0), vec2(104.0, 32.0));
+        let pill = Rect::from_min_size(pos2(title.right() - 16.0 - 116.0, title.top() + 8.0), vec2(116.0, 36.0));
         ui.painter().rect_filled(pill, 8.0, Color32::from_white_alpha(10));
         ui.painter().rect_stroke(pill, 8.0, Stroke::new(1.0, Color32::from_white_alpha(46)), egui::StrokeKind::Inside);
         paint_icon(ui.painter(), "Curve", pill.left_center() + vec2(18.0, 0.0), t.text);
@@ -900,26 +917,11 @@ fn sheet_of(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens, tool: Tool, 
             shell.tool = Some(Tool::Curve);
         }
     }
-    let changed = specs.iter().any(|(_, s)| controls::get(&d, s.id).is_some_and(|v| (v - s.default).abs() > 1e-9));
-    let reset = Rect::from_min_size(pos2(title.right() - 80.0, title.top()), vec2(80.0, 40.0));
-    ui.painter().text(
-        reset.center() + vec2(0.0, 2.0),
-        Align2::CENTER_CENTER,
-        crate::i18n::tr("Reset"),
-        t.font(14.0),
-        if changed { t.text } else { t.text_dim.gamma_multiply(0.6) },
-    );
-    if changed && tap(ui, "reset-tool", reset).clicked() {
-        let _ = app.run("develop.beginInteraction", json!({"label": tool.label()}));
-        for (_, spec) in &specs {
-            let _ = app.run("develop.set", json!({"control": spec.id, "value": spec.default}));
-        }
-        let _ = app.run("develop.endInteraction", json!({}));
-    }
-    let mut top = title.bottom();
+    // double-tap a slider to reset it; the whole edit resets from the menu
+    let mut top = if matches!(tool, Tool::Light | Tool::Mixer) || !tabs.is_empty() { title.bottom() } else { title.top() + 4.0 };
     if !tabs.is_empty() {
         // the tool's own tabs: names across, the open one bright and underlined
-        let row = Rect::from_min_size(pos2(title.left(), title.top() + 2.0), vec2(title.width(), 40.0));
+        let row = Rect::from_min_size(pos2(title.left(), title.top() + 4.0), vec2(title.width(), 44.0));
         let galleys: Vec<_> =
             tabs.iter().map(|(name, _)| ui.painter().layout_no_wrap(crate::i18n::tr(name).to_string(), t.font(15.0), t.text)).collect();
         let gap = 28.0;
@@ -1034,12 +1036,12 @@ fn touch_slider(ui: &mut egui::Ui, t: &Tokens, spec: &ControlSpec, value: f64) -
     let shown = out.value.unwrap_or(value);
     let changed = (shown - spec.default).abs() > 1e-9;
     let p = ui.painter();
-    p.text(pos2(row.left() + pad, row.top() + 20.0), Align2::LEFT_CENTER, crate::i18n::tr(spec.label), t.font(15.0), t.text.gamma_multiply(0.92));
+    p.text(pos2(row.left() + pad, row.top() + 20.0), Align2::LEFT_CENTER, crate::i18n::tr(spec.label), t.font(16.0), t.text.gamma_multiply(0.92));
     p.text(
         pos2(row.right() - pad, row.top() + 20.0),
         Align2::RIGHT_CENTER,
         spec.format(shown),
-        t.font(15.0),
+        t.font(16.0),
         if changed { t.text } else { t.text_dim },
     );
     let y = track.center().y;
@@ -1055,7 +1057,7 @@ fn touch_slider(ui: &mut egui::Ui, t: &Tokens, spec: &ControlSpec, value: f64) -
         }
     }
     // a ring, open in the middle like the track runs under it
-    p.circle_filled(thumb, r, panel(t));
+    p.circle_filled(thumb, r + 4.0, panel(t));
     p.circle_stroke(thumb, r, Stroke::new(2.0, Color32::from_gray(if resp.dragged() { 250 } else { 215 })));
     out
 }
@@ -2478,5 +2480,22 @@ mod tests {
             text.iter().any(|t| t == "Sharpening") && text.iter().any(|t| t == "Color noise") && !text.iter().any(|t| t == "Smoothness"),
             "{text:?}"
         );
+    }
+
+    #[test]
+    fn sideways_the_phone_shows_the_photo_alone() {
+        let mut app = LightcraftApp::new(lightcraft_engine::Session::with_demo(), crate::Services::default());
+        app.mobile = Some(Shell::preview());
+        app.ui.seen_version = Some(env!("CARGO_PKG_VERSION").to_string());
+        let mut h = crate::headless::Headless::new(app, [852.0, 393.0], 1.0);
+        h.step();
+        let (_, ids) = h.app.session.visible_shared();
+        let id = *ids.first().expect("demo photos");
+        h.app.run("library.select", serde_json::json!({"ids": [id.0], "mode": "replace"})).expect("select");
+        h.app.mobile.as_mut().expect("phone").open_photo(Some("Light"));
+        h.step();
+        h.step();
+        let text = h.painted_text();
+        assert!(!text.iter().any(|t| t == "Light" || t == "Exposure"), "{text:?}");
     }
 }
