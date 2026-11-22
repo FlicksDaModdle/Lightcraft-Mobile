@@ -127,6 +127,14 @@ pub struct Shell {
     preset_group: Option<String>,
     /// The "more" card (rating, flags, reset) is open.
     menu: bool,
+    /// Crop mode: how many undo steps there were on entering (Cancel goes back to it).
+    crop_mark: usize,
+    /// Crop mode: 0 Aspect, 1 Geometry.
+    crop_tab: u8,
+    /// Crop mode: the open list of ratios, social sizes or more actions.
+    crop_popup: Option<CropPopup>,
+    /// Crop mode: the name of the last aspect chosen.
+    crop_label: String,
     /// The colour band the Mixer sheet shows.
     mixer_band: usize,
     /// The phone's Photos picker, when the host has one.
@@ -143,6 +151,14 @@ impl std::fmt::Debug for PhotoPicker {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("PhotoPicker")
     }
+}
+
+/// A list open in crop mode.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum CropPopup {
+    Ratios,
+    Social,
+    More,
 }
 
 /// What input the shell has seen, for the status line.
@@ -170,6 +186,10 @@ impl Default for Shell {
             press: None,
             preset_group: None,
             menu: false,
+            crop_mark: 0,
+            crop_tab: 0,
+            crop_popup: None,
+            crop_label: String::new(),
             mixer_band: 0,
             photo_picker: None,
             picked: Default::default(),
@@ -474,6 +494,9 @@ fn paint_tile(app: &LightcraftApp, ui: &egui::Ui, t: &Tokens, id: lightcraft_cat
 // ---------------------------------------------------------------- photo
 
 fn photo(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens, safe: Rect, shell: &mut Shell) {
+    if shell.tool == Some(Tool::Crop) {
+        return crop_mode(app, ui, t, safe, shell);
+    }
     let header = Rect::from_min_size(safe.min, vec2(safe.width(), HEADER_H));
     let main = Rect::from_min_max(pos2(safe.left(), safe.bottom() - STRIP_H), safe.max);
     // the second row (Auto and the edit groups) belongs to Edit; Presets and Crop replace it
@@ -662,7 +685,13 @@ fn main_row(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens, row: Rect, s
             match name {
                 "Assist" => shell.tool = if on { None } else { Some(Tool::Assist) },
                 "Presets" => shell.tool = if on { None } else { Some(Tool::Presets) },
-                "Crop" => shell.tool = if on { None } else { Some(Tool::Crop) },
+                "Crop" => {
+                    shell.tool = Some(Tool::Crop);
+                    shell.crop_mark = app.session.undo.len();
+                    shell.crop_tab = 0;
+                    shell.crop_popup = None;
+                    shell.crop_label.clear();
+                }
                 "Edit" => shell.tool = None,
                 _ => app.toast(ui.ctx(), crate::i18n::tr("That isn't available on the phone yet")),
             }
@@ -772,7 +801,7 @@ const BANDS: [(&str, Color32); 8] = [
 fn sheet_of(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens, tool: Tool, shell: &mut Shell) {
     match tool {
         Tool::Presets => return presets_sheet(app, ui, t, shell),
-        Tool::Crop => return crop_sheet(app, ui, t),
+        Tool::Crop => return,
         _ => {}
     }
     let Some(id) = app.session.active() else { return };
@@ -1061,41 +1090,6 @@ fn presets_sheet(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens, shell: 
     }
 }
 
-/// Aspect-ratio buttons, a rotate and the straighten angle. Dragging the crop box itself is the
-/// loupe's (the crop overlay), so the sheet only sets what the box is locked to.
-fn crop_sheet(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens) {
-    let area = ui.max_rect();
-    let ratios: [(&str, &str); 8] = [
-        ("Original", "original"),
-        ("Free", "free"),
-        ("1:1", "1x1"),
-        ("4:5", "4x5"),
-        ("2:3", "2x3"),
-        ("4:3", "4x3"),
-        ("16:9", "16x9"),
-        ("Rotate", "rotate"),
-    ];
-    let cell = vec2(area.width() / 4.0, 52.0);
-    for (i, (label, arg)) in ratios.iter().enumerate() {
-        let r = Rect::from_min_size(area.min + vec2((i % 4) as f32 * cell.x, 8.0 + (i / 4) as f32 * cell.y), cell);
-        ui.painter().text(r.center(), Align2::CENTER_CENTER, crate::i18n::tr(label), t.font(16.0), t.text);
-        if tap(ui, &format!("crop-{arg}"), r).clicked() {
-            let _ = if *arg == "rotate" { app.run("crop.rotateAspect", json!({})) } else { app.run("crop.aspect", json!({"aspect": arg})) };
-        }
-    }
-    let angle_area = Rect::from_min_max(pos2(area.left(), area.top() + 8.0 + 2.0 * cell.y), area.max);
-    ui.scope_builder(UiBuilder::new().max_rect(angle_area), |ui| {
-        let Some(id) = app.session.active() else { return };
-        let d = app.session.develop_of(id).unwrap_or_default();
-        if let Some(spec) = controls::find("crop.angle").filter(|s| controls::get(&d, s.id).is_some())
-            && let Some(v) = controls::get(&d, spec.id)
-        {
-            let out = touch_slider(ui, t, spec, v);
-            crate::panels::edit::apply_slider_out(app, spec, out, |app, v| app.run("develop.set", json!({"control": spec.id, "value": v})));
-        }
-    });
-}
-
 /// A small line icon for a tool, about 22 pt across, drawn from shapes so it follows the theme.
 fn paint_icon(p: &egui::Painter, name: &str, c: egui::Pos2, color: Color32) {
     let st = Stroke::new(1.8, color);
@@ -1174,6 +1168,61 @@ fn paint_icon(p: &egui::Painter, name: &str, c: egui::Pos2, color: Color32) {
         "Fix angle" => {
             line(vec2(-11.0, 4.0), vec2(11.0, -4.0));
             line(vec2(-11.0, 10.0), vec2(11.0, 10.0));
+        }
+        "Lock" | "Unlock" => {
+            p.rect_filled(Rect::from_center_size(c + vec2(0.0, 4.0), vec2(16.0, 12.0)), 2.0, color);
+            let top = c + vec2(0.0, -3.0);
+            p.add(egui::Shape::line(
+                vec![
+                    top + vec2(-5.0, 4.0),
+                    top + vec2(-5.0, -2.0),
+                    top + vec2(0.0, -6.0),
+                    top + vec2(5.0, -2.0),
+                    top + vec2(5.0, if name == "Lock" { 4.0 } else { -1.0 }),
+                ],
+                st,
+            ));
+        }
+        "Rotate" => {
+            let pts: Vec<egui::Pos2> = (0..=14)
+                .map(|i| {
+                    let a = -std::f32::consts::FRAC_PI_2 + i as f32 * std::f32::consts::PI * 1.5 / 14.0;
+                    c + vec2(a.cos(), a.sin()) * 9.0
+                })
+                .collect();
+            p.add(egui::Shape::line(pts, st));
+            line(vec2(0.0, -9.0), vec2(5.0, -13.0));
+            line(vec2(0.0, -9.0), vec2(5.0, -5.0));
+        }
+        "More" => {
+            for dx in [-7.0, 0.0, 7.0] {
+                p.circle_filled(c + vec2(dx, 0.0), 2.2, color);
+            }
+        }
+        "Original" => {
+            p.rect_stroke(Rect::from_center_size(c, vec2(24.0, 18.0)), 2.0, st, egui::StrokeKind::Middle);
+            p.add(egui::Shape::line(
+                vec![c + vec2(-10.0, 6.0), c + vec2(-3.0, -1.0), c + vec2(2.0, 4.0), c + vec2(6.0, 0.0), c + vec2(10.0, 5.0)],
+                st,
+            ));
+        }
+        "Free" => {
+            for i in 0..4 {
+                let a = -11.0 + i as f32 * 6.0;
+                line(vec2(a, -8.0), vec2(a + 3.0, -8.0));
+                line(vec2(a, 8.0), vec2(a + 3.0, 8.0));
+            }
+            line(vec2(-11.0, -5.0), vec2(-11.0, 5.0));
+            line(vec2(11.0, -5.0), vec2(11.0, 5.0));
+        }
+        "Ratios" => {
+            p.rect_stroke(Rect::from_min_size(c + vec2(-11.0, -8.0), vec2(16.0, 12.0)), 2.0, st, egui::StrokeKind::Middle);
+            p.rect_stroke(Rect::from_min_size(c + vec2(-5.0, -2.0), vec2(16.0, 12.0)), 2.0, st, egui::StrokeKind::Middle);
+        }
+        "Social" => {
+            // a tall frame and a wide one, the sizes a photo is shared in
+            p.rect_stroke(Rect::from_center_size(c + vec2(-5.0, 0.0), vec2(12.0, 20.0)), 3.0, st, egui::StrokeKind::Middle);
+            p.rect_stroke(Rect::from_center_size(c + vec2(6.0, 4.0), vec2(14.0, 10.0)), 2.0, st, egui::StrokeKind::Middle);
         }
         "Export" => {
             line(vec2(0.0, -11.0), vec2(0.0, 5.0));
@@ -1254,6 +1303,295 @@ fn paint_arrow(p: &egui::Painter, c: egui::Pos2, color: Color32, flip: bool) {
     p.line_segment([tip, tip + vec2(sx * 1.0, 6.0)], st);
 }
 
+// ---------------------------------------------------------------- crop mode
+
+/// Ratios in the Ratios list: label, the engine's name for it, and the shape drawn beside it.
+const RATIOS: [(&str, &str, f32, f32); 9] = [
+    ("1 × 1", "1x1", 1.0, 1.0),
+    ("2 × 1", "2x1", 2.0, 1.0),
+    ("3 × 2", "3x2", 3.0, 2.0),
+    ("4 × 3", "4x3", 4.0, 3.0),
+    ("5 × 4", "5x4", 5.0, 4.0),
+    ("7 × 5", "7x5", 7.0, 5.0),
+    ("11 × 8.5", "11x8.5", 11.0, 8.5),
+    ("16 × 9", "16x9", 16.0, 9.0),
+    ("16 × 10", "16x10", 16.0, 10.0),
+];
+
+/// Sizes for sharing a photo: label and width, height as given (a taller size is portrait).
+const SOCIAL: [(&str, f32, f32); 4] = [("Square", 1.0, 1.0), ("Story", 9.0, 16.0), ("Portrait", 4.0, 5.0), ("Landscape", 1.91, 1.0)];
+
+/// The crop editor: the photo with the desktop's crop box, a straighten dial, aspect choices and a
+/// Cancel / Done bar. Done keeps the edit (it is already in the photo's history); Cancel undoes back
+/// to where crop mode began.
+fn crop_mode(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens, safe: Rect, shell: &mut Shell) {
+    let aspect = app.session.active().and_then(|id| app.session.develop_of(id)).and_then(|d| d.crop.aspect);
+    if shell.crop_label.is_empty() {
+        shell.crop_label = if aspect.is_some() { "Custom" } else { "Free" }.to_string();
+    }
+    let top = Rect::from_min_size(safe.min, vec2(safe.width(), HEADER_H));
+    let bottom = Rect::from_min_max(pos2(safe.left(), safe.bottom() - 56.0), safe.max);
+    let panel_h = if shell.crop_tab == 0 { 48.0 + 84.0 } else { 48.0 + 190.0 };
+    let panel = Rect::from_min_max(pos2(safe.left(), bottom.top() - panel_h), pos2(safe.right(), bottom.top()));
+    let buttons = Rect::from_min_max(pos2(safe.left(), panel.top() - 72.0), pos2(safe.right(), panel.top()));
+    let dial = Rect::from_min_max(pos2(safe.left(), buttons.top() - 60.0), pos2(safe.right(), buttons.top()));
+    let canvas = Rect::from_min_max(pos2(safe.left(), top.bottom()), pos2(safe.right(), dial.top()));
+
+    app.ui.filmstrip = false;
+    app.ui.fullscreen = false;
+    app.ui.right = RightPanel::Crop;
+    ui.painter().rect_filled(safe, 0.0, Color32::BLACK);
+    ui.scope_builder(UiBuilder::new().max_rect(canvas), |ui| {
+        ui.set_clip_rect(canvas.intersect(ui.clip_rect()));
+        crate::panels::detail::show(app, ui);
+    });
+
+    // top: the aspect's name, and Undo
+    ui.painter().text(top.center(), Align2::CENTER_CENTER, crate::i18n::tr(&shell.crop_label), t.font(17.0), t.text);
+    let undo = Rect::from_min_size(pos2(top.right() - 60.0, top.top()), vec2(60.0, HEADER_H));
+    paint_arrow(ui.painter(), undo.center(), t.text, false);
+    if tap(ui, "crop-undo", undo).clicked() {
+        let _ = app.run("edit.undo", json!({}));
+    }
+
+    angle_dial(app, ui, t, dial);
+    crop_buttons(app, ui, t, buttons, aspect.is_some(), shell);
+
+    // tabs and what they hold
+    ui.painter().rect_filled(Rect::from_min_max(panel.min, bottom.max), 0.0, bar(t));
+    for (i, (label, x)) in [("Aspect", 0.38), ("Geometry", 0.64)].into_iter().enumerate() {
+        let c = pos2(panel.left() + panel.width() * x, panel.top() + 24.0);
+        let on = shell.crop_tab == i as u8;
+        let color = if on { t.text } else { t.text_dim };
+        let rect = ui.painter().text(c, Align2::CENTER_CENTER, crate::i18n::tr(label), t.font(17.0), color);
+        if on {
+            ui.painter().line_segment([rect.left_bottom() + vec2(0.0, 6.0), rect.right_bottom() + vec2(0.0, 6.0)], Stroke::new(2.0, t.text));
+        }
+        if tap(ui, &format!("crop-tab-{label}"), Rect::from_center_size(c, vec2(120.0, 48.0))).clicked() {
+            shell.crop_tab = i as u8;
+            shell.crop_popup = None;
+        }
+    }
+    let body = Rect::from_min_max(pos2(panel.left(), panel.top() + 48.0), panel.max);
+    if shell.crop_tab == 0 {
+        aspect_row(app, ui, t, body, aspect, shell);
+    } else {
+        ui.scope_builder(UiBuilder::new().max_rect(body), |ui| {
+            ui.set_clip_rect(body.intersect(ui.clip_rect()));
+            sheet_of(app, ui, t, Tool::Geometry, shell);
+        });
+    }
+
+    // the bottom bar: Cancel, the mode's name, Done
+    ui.painter().line_segment([bottom.left_top(), bottom.right_top()], Stroke::new(1.0, t.text_dim.gamma_multiply(0.2)));
+    let (cancel, done) =
+        (Rect::from_min_size(bottom.min, vec2(64.0, 56.0)), Rect::from_min_size(pos2(bottom.right() - 64.0, bottom.top()), vec2(64.0, 56.0)));
+    ui.painter().text(bottom.center() - vec2(0.0, 0.0), Align2::CENTER_CENTER, crate::i18n::tr("Crop"), t.font(19.0), t.text);
+    let x = Stroke::new(2.2, t.text);
+    let c = cancel.center();
+    ui.painter().line_segment([c + vec2(-8.0, -8.0), c + vec2(8.0, 8.0)], x);
+    ui.painter().line_segment([c + vec2(-8.0, 8.0), c + vec2(8.0, -8.0)], x);
+    let c = done.center();
+    ui.painter().line_segment([c + vec2(-9.0, 0.0), c + vec2(-3.0, 7.0)], x);
+    ui.painter().line_segment([c + vec2(-3.0, 7.0), c + vec2(9.0, -8.0)], x);
+    if tap(ui, "crop-cancel", cancel).clicked() {
+        // back to the history as it was on entering
+        for _ in 0..500 {
+            if app.session.undo.len() <= shell.crop_mark {
+                break;
+            }
+            if app.run("edit.undo", json!({})).is_err() {
+                break;
+            }
+        }
+        shell.tool = None;
+        shell.crop_popup = None;
+    }
+    if tap(ui, "crop-done", done).clicked() {
+        shell.tool = None;
+        shell.crop_popup = None;
+    }
+
+    if let Some(popup) = shell.crop_popup {
+        crop_popup(app, ui, t, popup, panel.top() + 48.0, safe, shell);
+    }
+}
+
+/// A ruler under the photo that turns it: drag sideways to straighten, a degree every few points.
+fn angle_dial(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens, r: Rect) {
+    let (Some(id), Some(spec)) = (app.session.active(), controls::find("crop.angle")) else { return };
+    let v = app.session.develop_of(id).and_then(|d| controls::get(&d, spec.id)).unwrap_or(0.0);
+    const PX_PER_DEG: f64 = 9.0;
+    let resp = ui.interact(r, ui.scope_id().with("angle-dial"), Sense::click_and_drag());
+    let mut out = SliderOut::default();
+    if resp.drag_started() {
+        out.drag_started = true;
+    }
+    if resp.dragged() {
+        let to = (v - f64::from(resp.drag_delta().x) / PX_PER_DEG).clamp(spec.min, spec.max);
+        let snapped = spec.clamp((to * 10.0).round() / 10.0);
+        if (snapped - v).abs() > 1e-9 {
+            out.value = Some(snapped);
+        }
+    }
+    if resp.drag_stopped() {
+        out.drag_stopped = true;
+    }
+    if resp.double_clicked() {
+        out.reset = true;
+        out.value = Some(spec.default);
+    }
+    let shown = out.value.unwrap_or(v);
+    let cx = r.center().x;
+    let p = ui.painter();
+    let base = r.top() + 40.0;
+    for k in (shown.floor() as i32 - 25)..=(shown.ceil() as i32 + 25) {
+        let x = cx + ((f64::from(k) - shown) * PX_PER_DEG) as f32;
+        if x < r.left() + 8.0 || x > r.right() - 8.0 {
+            continue;
+        }
+        let fade = (1.0 - ((x - cx).abs() / (r.width() / 2.0)).powi(2)).clamp(0.0, 1.0);
+        let major = k % 5 == 0;
+        let h = if major { 11.0 } else { 3.0 };
+        let color = t.text.gamma_multiply(0.25 + 0.75 * fade);
+        if major {
+            p.line_segment([pos2(x, base - h), pos2(x, base)], Stroke::new(1.8, color));
+        } else {
+            p.circle_filled(pos2(x, base - 1.5), 1.2, color);
+        }
+    }
+    p.line_segment([pos2(cx, base - 14.0), pos2(cx, base + 2.0)], Stroke::new(2.0, t.text));
+    p.text(pos2(cx, r.top() + 12.0), Align2::CENTER_CENTER, format!("{shown:.1}°"), t.font(14.0), t.text);
+    crate::panels::edit::apply_slider_out(app, spec, out, |app, v| app.run("develop.set", json!({"control": spec.id, "value": v})));
+}
+
+/// The four round buttons: straighten and lock at the left, rotate and more at the right.
+fn crop_buttons(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens, row: Rect, locked: bool, shell: &mut Shell) {
+    let centers = [
+        ("Fix angle", pos2(row.left() + 52.0, row.center().y)),
+        (if locked { "Lock" } else { "Unlock" }, pos2(row.left() + 52.0 + 60.0, row.center().y)),
+        ("Rotate", pos2(row.right() - 52.0 - 60.0, row.center().y)),
+        ("More", pos2(row.right() - 52.0, row.center().y)),
+    ];
+    for (name, c) in centers {
+        ui.painter().circle_filled(c, 24.0, Color32::from_gray(34));
+        ui.painter().circle_stroke(c, 24.0, Stroke::new(1.0, t.text_dim.gamma_multiply(0.35)));
+        paint_icon(ui.painter(), name, c, t.text);
+        if tap(ui, &format!("crop-btn-{name}"), Rect::from_center_size(c, vec2(60.0, 60.0))).clicked() {
+            match name {
+                "Fix angle" => assist(app, ui.ctx(), "Fix angle"),
+                "Lock" | "Unlock" => {
+                    let _ = app.run("crop.aspect", json!({"aspect": "toggle"}));
+                    shell.crop_label = if locked { "Free" } else { "Custom" }.to_string();
+                }
+                "Rotate" => {
+                    let _ = app.run("photo.rotateRight", json!({}));
+                }
+                _ => shell.crop_popup = if shell.crop_popup == Some(CropPopup::More) { None } else { Some(CropPopup::More) },
+            }
+        }
+    }
+}
+
+/// The Aspect tab: Original and Free, then the two lists.
+fn aspect_row(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens, row: Rect, aspect: Option<(u32, u32)>, shell: &mut Shell) {
+    let items = [("Original", false), ("Free", false), ("Ratios", true), ("Social", true)];
+    let w = (row.width() / items.len() as f32).min(96.0);
+    let x0 = row.center().x - w * items.len() as f32 / 2.0;
+    for (i, (name, list)) in items.into_iter().enumerate() {
+        let cell = Rect::from_min_size(pos2(x0 + i as f32 * w, row.top() + 4.0), vec2(w, row.height() - 8.0));
+        let on = match name {
+            "Free" => aspect.is_none(),
+            "Ratios" => shell.crop_popup == Some(CropPopup::Ratios),
+            "Social" => shell.crop_popup == Some(CropPopup::Social),
+            _ => false,
+        };
+        if on {
+            ui.painter().rect_filled(cell.shrink2(vec2(4.0, 0.0)), 10.0, Color32::from_gray(42));
+        }
+        paint_icon(ui.painter(), name, cell.center_top() + vec2(0.0, 24.0), t.text);
+        ui.painter().text(cell.center_bottom() - vec2(0.0, 14.0), Align2::CENTER_CENTER, crate::i18n::tr(name), t.font(12.0), t.text);
+        if tap(ui, &format!("aspect-{name}"), cell).clicked() {
+            if list {
+                let which = if name == "Ratios" { CropPopup::Ratios } else { CropPopup::Social };
+                shell.crop_popup = if shell.crop_popup == Some(which) { None } else { Some(which) };
+            } else {
+                shell.crop_popup = None;
+                let _ = app.run("crop.aspect", json!({"aspect": if name == "Free" { "free" } else { "original" }}));
+                shell.crop_label = name.to_string();
+            }
+        }
+    }
+}
+
+/// A list floating over the photo: Ratios, Social sizes, or the more actions.
+fn crop_popup(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens, popup: CropPopup, above: f32, safe: Rect, shell: &mut Shell) {
+    const ROW: f32 = 48.0;
+    let n = match popup {
+        CropPopup::Ratios => RATIOS.len(),
+        CropPopup::Social => SOCIAL.len(),
+        CropPopup::More => 3,
+    };
+    let size = vec2(if popup == CropPopup::Ratios { 250.0 } else { 270.0 }, ROW * n as f32 + 12.0);
+    let x = if popup == CropPopup::Social { safe.left() + 12.0 } else { safe.right() - 12.0 - size.x };
+    let card = Rect::from_min_size(pos2(x, above - 8.0 - size.y), size);
+    ui.painter().rect_filled(card.translate(vec2(0.0, 4.0)), 16.0, Color32::from_black_alpha(90));
+    ui.painter().rect_filled(card, 16.0, Color32::from_gray(36));
+    ui.painter().rect_stroke(card, 16.0, Stroke::new(1.0, t.text_dim.gamma_multiply(0.3)), egui::StrokeKind::Inside);
+    let mut chosen: Option<(String, serde_json::Value)> = None;
+    for i in 0..n {
+        let r = Rect::from_min_size(card.min + vec2(0.0, 6.0 + i as f32 * ROW), vec2(card.width(), ROW));
+        let (label, shape): (String, Option<(f32, f32)>) = match popup {
+            CropPopup::Ratios => (RATIOS[i].0.to_string(), Some((RATIOS[i].2, RATIOS[i].3))),
+            CropPopup::Social => (SOCIAL[i].0.to_string(), Some((SOCIAL[i].1, SOCIAL[i].2))),
+            CropPopup::More => (["Flip horizontal", "Flip vertical", "Rotate left"][i].to_string(), None),
+        };
+        if let Some((w, h)) = shape {
+            // the shape of the ratio, fitted in a 30 × 24 box
+            let k = (30.0 / w).min(24.0 / h);
+            ui.painter().rect_stroke(
+                Rect::from_center_size(pos2(r.left() + 36.0, r.center().y), vec2(w * k, h * k)),
+                3.0,
+                Stroke::new(1.6, t.text),
+                egui::StrokeKind::Middle,
+            );
+        }
+        ui.painter().text(
+            pos2(r.left() + if shape.is_some() { 66.0 } else { 22.0 }, r.center().y),
+            Align2::LEFT_CENTER,
+            crate::i18n::tr(&label),
+            t.font(18.0),
+            t.text,
+        );
+        if tap(ui, &format!("popup-{label}"), r).clicked() {
+            chosen = Some(match popup {
+                CropPopup::Ratios => (label, json!({"aspect": RATIOS[i].1})),
+                CropPopup::Social => (label, json!({"aspect": [SOCIAL[i].1, SOCIAL[i].2]})),
+                CropPopup::More => (label, json!(i)),
+            });
+        }
+    }
+    let outside = ui.input(|i| i.pointer.any_click().then(|| i.pointer.interact_pos()).flatten());
+    if let Some((label, arg)) = chosen {
+        match popup {
+            CropPopup::More => {
+                let cmd = ["photo.flipHorizontal", "photo.flipVertical", "photo.rotateLeft"][arg.as_u64().unwrap_or(0) as usize];
+                let _ = app.run(cmd, json!({}));
+            }
+            _ => {
+                let _ = app.run("crop.aspect", arg);
+                shell.crop_label = label;
+            }
+        }
+        shell.crop_popup = None;
+    } else if let Some(p) = outside
+        && !card.contains(p)
+        && p.y < above
+    {
+        shell.crop_popup = None;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1328,13 +1666,23 @@ mod tests {
     }
 
     #[test]
-    fn the_crop_sheet_offers_ratios_and_a_locked_ratio_sticks() {
+    fn crop_mode_has_its_own_screen_and_cancel_undoes_what_it_changed() {
         let mut h = open_tool("Crop");
+        h.app.mobile.as_mut().expect("phone").crop_mark = h.app.session.undo.len();
         let text = h.painted_text();
-        assert!(text.iter().any(|t| t == "16:9") && text.iter().any(|t| t == "Original"), "{text:?}");
-        h.app.run("crop.aspect", serde_json::json!({"aspect": "1x1"})).expect("aspect");
+        assert!(text.iter().any(|t| t == "Ratios") && text.iter().any(|t| t == "Original") && text.iter().any(|t| t == "Geometry"), "{text:?}");
+        assert!(!text.iter().any(|t| t == "Exposure"));
         let id = h.app.session.active().expect("active");
+        let before = h.app.session.develop_of(id);
+        h.app.run("crop.aspect", serde_json::json!({"aspect": "1x1"})).expect("aspect");
         assert!(h.app.session.develop_of(id).is_some_and(|d| d.crop.aspect.is_some()));
+        // Cancel: bottom left of the screen, above the home indicator
+        let r = h.request("ui.click", serde_json::json!({"x": 32.0, "y": 790.0}), std::time::Duration::from_secs(5));
+        assert_eq!(r["ok"], true, "{r}");
+        h.step();
+        h.step();
+        assert_eq!(h.app.session.develop_of(id), before, "Cancel leaves the crop as it was");
+        assert!(h.app.mobile.as_ref().is_some_and(|m| m.tool.is_none()), "and leaves crop mode");
     }
 
     #[test]
