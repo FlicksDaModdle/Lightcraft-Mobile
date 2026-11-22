@@ -4201,6 +4201,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "lightcraft-ios"
+version = "0.21.1"
+dependencies = [
+ "eframe",
+ "egui",
+ "lightcraft-codecs",
+ "lightcraft-engine",
+ "lightcraft-raster",
+ "lightcraft-ui-egui",
+ "log",
+ "objc2-foundation 0.3.2",
+ "serde_json",
+]
+
+[[package]]
 name = "lightcraft-lensdb"
 version = "0.21.1"
 dependencies = [

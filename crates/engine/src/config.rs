@@ -37,7 +37,8 @@ enum Platform {
 /// platform default. The override is the complete directory; no application-name suffix is appended. An
 /// explicitly empty value disables the settings directory instead of falling back to a personal profile.
 pub fn config_dir() -> Option<PathBuf> {
-    let platform = if cfg!(target_os = "macos") {
+    // iOS keeps app settings in the same place as macOS: <container>/Library/Application Support
+    let platform = if cfg!(any(target_os = "macos", target_os = "ios")) {
         Platform::Mac
     } else if cfg!(windows) {
         Platform::Windows

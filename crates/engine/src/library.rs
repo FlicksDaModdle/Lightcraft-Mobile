@@ -85,7 +85,9 @@ pub fn default_dir() -> Option<PathBuf> {
         return Some(PathBuf::from(p));
     }
     let home = if cfg!(windows) { std::env::var_os("USERPROFILE") } else { std::env::var_os("HOME") }?;
-    Some(PathBuf::from(home).join("Pictures").join(DEFAULT_NAME))
+    // iOS apps have no Pictures folder: Documents is the one the Files app can show
+    let parent = if cfg!(target_os = "ios") { "Documents" } else { "Pictures" };
+    Some(PathBuf::from(home).join(parent).join(DEFAULT_NAME))
 }
 
 /// The user's home folder (`%USERPROFILE%` on Windows, `$HOME` elsewhere); `None` when the host has

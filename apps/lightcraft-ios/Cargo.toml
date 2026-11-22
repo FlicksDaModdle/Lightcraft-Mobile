@@ -1,0 +1,31 @@
+[package]
+name = "lightcraft-ios"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "LightCraft for iPhone and iPad. Also runs on a desktop, in a phone-sized window, for development."
+
+[lints]
+workspace = true
+
+[features]
+default = ["heif"]
+# Open HEIC/HEIF photos (what an iPhone takes). Pure Rust, but HEVC is patent-encumbered: build with
+# --no-default-features to leave it out.
+heif = ["lightcraft-codecs/heif"]
+
+[dependencies]
+lightcraft-engine = { workspace = true }
+lightcraft-ui-egui = { workspace = true }
+lightcraft-codecs = { workspace = true }
+lightcraft-raster = { workspace = true }
+# wgpu draws through Metal on iOS. No `glow`: iOS has no GL context for it to use.
+eframe = { workspace = true, features = ["default_fonts", "wgpu", "accesskit"] }
+egui = { workspace = true }
+serde_json = { workspace = true }
+log = { workspace = true }
+
+# iOS and macOS: how much memory the device has, to size the caches (iOS ends apps that use too much)
+[target.'cfg(target_vendor = "apple")'.dependencies]
+objc2-foundation = { workspace = true, features = ["NSProcessInfo"] }

@@ -1,0 +1,72 @@
+# Builds LightCraft for iPhone and iPad on a macOS runner and, when the signing secrets are set,
+# signs it into LightCraft.ipa (a build artifact) that you install on your own device.
+# Setup and secrets: docs/ios/BUILD.md
+name: iOS
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: "Cargo profile (release is faster to build; dist is thin-LTO and smaller)"
+        type: choice
+        options: [release, dist]
+        default: release
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # The oldest iOS the app supports; must match MinimumOSVersion in Info.plist.in
+  IPHONEOS_DEPLOYMENT_TARGET: "16.0"
+
+jobs:
+  # Fast: the app crate type-checks, lints and passes its tests on Linux (it also runs on a desktop).
+  host:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt -p lightcraft-ios -- --check
+      - run: cargo clippy -p lightcraft-ios --all-targets -- -D warnings
+      - run: cargo test -p lightcraft-ios
+
+  ios:
+    runs-on: macos-15
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ios-${{ inputs.profile || 'release' }}
+      - name: Build for iPhone and iPad
+        run: cargo build --profile "${{ inputs.profile || 'release' }}" --target aarch64-apple-ios -p lightcraft-ios
+      - name: Package and sign
+        env:
+          IOS_CERT_P12: ${{ secrets.IOS_CERT_P12 }}
+          IOS_CERT_PASSWORD: ${{ secrets.IOS_CERT_PASSWORD }}
+          IOS_PROVISION_PROFILE: ${{ secrets.IOS_PROVISION_PROFILE }}
+          IOS_BUNDLE_ID: ${{ vars.IOS_BUNDLE_ID }}
+        run: |
+          mkdir -p out
+          apps/lightcraft-ios/ios/package.sh "target/aarch64-apple-ios/${{ inputs.profile || 'release' }}/lightcraft-ios" out
+      - uses: actions/upload-artifact@v4
+        with:
+          name: LightCraft-iOS
+          path: |
+            out/LightCraft.ipa
+            out/LightCraft-unsigned.zip
+          if-no-files-found: error
