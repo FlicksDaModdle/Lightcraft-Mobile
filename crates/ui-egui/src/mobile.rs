@@ -79,6 +79,8 @@ pub struct Shell {
     /// device does not respond.
     pub debug: bool,
     stats: Stats,
+    /// The lens-profile download offer (folder, mirrors), shown as a sheet of the phone's own.
+    lens_offer: Option<(String, Vec<String>)>,
     /// Simulated safe-area insets (top, right, bottom, left) for a run on a desktop; `None` uses what
     /// the device reports.
     insets: Option<[f32; 4]>,
@@ -97,7 +99,7 @@ struct Stats {
 
 impl Default for Shell {
     fn default() -> Self {
-        Shell { screen: Screen::Library, tool: None, debug: true, stats: Stats::default(), insets: None }
+        Shell { screen: Screen::Library, tool: None, debug: true, stats: Stats::default(), lens_offer: None, insets: None }
     }
 }
 
@@ -134,6 +136,16 @@ pub(crate) fn show(app: &mut LightcraftApp, ui: &mut egui::Ui) {
         log::warn!("notice: {notice}");
         app.toast(&ctx, notice);
     }
+    // The desktop dialogs are laid out for a window several times wider than a phone: the lens offer
+    // gets a sheet of its own here, any other one is closed with a word, never left to trap input.
+    match app.ui.dialog.take() {
+        Some(crate::state::Dialog::LensDatabase { dir, mirrors }) => shell.lens_offer = Some((dir, mirrors)),
+        Some(other) => {
+            log::warn!("dialog not shown on the phone: {other:?}");
+            app.toast(&ctx, crate::i18n::tr("That isn't available on the phone yet"));
+        }
+        None => {}
+    }
     let [top, right, bottom, left] = insets(&ctx, &shell);
     let safe = Rect::from_min_max(full.min + vec2(left, top), full.max - vec2(right, bottom));
     if shell.screen == Screen::Photo && app.session.active().is_none() {
@@ -143,10 +155,58 @@ pub(crate) fn show(app: &mut LightcraftApp, ui: &mut egui::Ui) {
         Screen::Library => library(app, ui, &t, safe, &mut shell),
         Screen::Photo => photo(app, ui, &t, safe, &mut shell),
     }
+    if let Some(offer) = shell.lens_offer.take() {
+        shell.lens_offer = lens_sheet(app, &ctx, &t, full, bottom, offer);
+    }
     if shell.debug {
         status_line(app, &ctx, &t, full, &mut shell);
     }
     app.mobile = Some(shell);
+}
+
+/// The lens-profile offer as a bottom sheet over a dimmed screen. Returns the offer while it stays up.
+fn lens_sheet(
+    app: &mut LightcraftApp,
+    ctx: &egui::Context,
+    t: &Tokens,
+    full: Rect,
+    bottom_inset: f32,
+    offer: (String, Vec<String>),
+) -> Option<(String, Vec<String>)> {
+    let mut keep = Some(offer);
+    egui::Area::new(egui::Id::unique("mobile-lens-offer")).order(egui::Order::Foreground).fixed_pos(full.min).show(ctx, |ui| {
+        // the dim takes every touch outside the card
+        ui.interact(full, ui.scope_id().with("dim"), Sense::click());
+        ui.painter().rect_filled(full, 0.0, Color32::from_black_alpha(150));
+        let card_h = 230.0 + bottom_inset;
+        let card = Rect::from_min_max(pos2(full.left(), full.bottom() - card_h), full.max);
+        ui.painter().rect_filled(card, egui::CornerRadius { nw: 16, ne: 16, sw: 0, se: 0 }, t.chrome);
+        let x = card.left() + 20.0;
+        ui.painter().text(pos2(x, card.top() + 30.0), Align2::LEFT_CENTER, crate::i18n::tr("Lens corrections"), t.semibold(18.0), t.text);
+        let body = crate::i18n::tr("Download the lens profile database to correct distortion and vignetting for your lenses?");
+        let galley = ui.painter().layout(body.to_string(), t.font(15.0), t.text_dim, card.width() - 40.0);
+        ui.painter().galley(pos2(x, card.top() + 54.0), galley, t.text_dim);
+        let btn_w = (card.width() - 52.0) / 2.0;
+        let y = card.top() + 150.0;
+        let not_now = Rect::from_min_size(pos2(x, y), vec2(btn_w, 50.0));
+        let download = Rect::from_min_size(pos2(not_now.right() + 12.0, y), vec2(btn_w, 50.0));
+        ui.painter().rect_filled(not_now, 12.0, t.text_dim.gamma_multiply(0.25));
+        ui.painter().text(not_now.center(), Align2::CENTER_CENTER, crate::i18n::tr("Not Now"), t.semibold(16.0), t.text);
+        ui.painter().rect_filled(download, 12.0, t.accent);
+        ui.painter().text(download.center(), Align2::CENTER_CENTER, crate::i18n::tr("Download"), t.semibold(16.0), Color32::WHITE);
+        if tap(ui, "lens-not-now", not_now).clicked() {
+            keep = None;
+        }
+        if tap(ui, "lens-download", download).clicked()
+            && let Some((dir, mirrors)) = keep.take()
+        {
+            match crate::lens_db::download(app, std::path::Path::new(&dir), mirrors) {
+                Ok(()) => app.toast(ctx, crate::i18n::tr("Downloading lens profiles")),
+                Err(e) => app.toast(ctx, e),
+            }
+        }
+    });
+    keep
 }
 
 /// A line at the very top: frames drawn, touch events and presses seen, taps that hit a button, and
@@ -512,5 +572,40 @@ mod tests {
             let n: usize = tool.sections().iter().map(|(section, _)| controls::in_section(*section).count()).sum();
             assert!(n > 0, "{} has no controls", tool.label());
         }
+    }
+
+    fn phone() -> crate::headless::Headless {
+        let mut app = LightcraftApp::new(lightcraft_engine::Session::with_demo(), crate::Services::default());
+        app.mobile = Some(Shell::preview());
+        app.ui.seen_version = Some(env!("CARGO_PKG_VERSION").to_string());
+        crate::headless::Headless::new(app, [393.0, 852.0], 1.0)
+    }
+
+    /// The desktop's lens offer would trap touches on a phone: the phone shows its own sheet, and
+    /// Not Now on it takes it away and gives the screen back.
+    #[test]
+    fn the_lens_offer_is_a_sheet_that_can_be_dismissed() {
+        let mut h = phone();
+        h.step();
+        h.app.ui.dialog = Some(crate::state::Dialog::LensDatabase { dir: "/nonexistent".into(), mirrors: vec![] });
+        h.step();
+        assert!(h.app.ui.dialog.is_none(), "the desktop dialog must not stay open behind the sheet");
+        assert!(h.painted_text().iter().any(|t| t.contains("Not Now")));
+        // Not Now: left of the two buttons, 150 pt below the card's top (the card is 230 pt plus the inset)
+        let y = 852.0 - (230.0 + 34.0) + 150.0 + 25.0;
+        let r = h.request("ui.click", serde_json::json!({"x": 100.0, "y": y}), std::time::Duration::from_secs(5));
+        assert_eq!(r["ok"], true, "{r}");
+        h.step();
+        assert!(!h.painted_text().iter().any(|t| t.contains("Not Now")), "the sheet stays up after Not Now");
+    }
+
+    /// Any other desktop dialog is closed on the phone instead of trapping input.
+    #[test]
+    fn other_desktop_dialogs_do_not_stay_open() {
+        let mut h = phone();
+        h.step();
+        h.app.ui.dialog = Some(crate::state::Dialog::WhatsNew);
+        h.step();
+        assert!(h.app.ui.dialog.is_none());
     }
 }
