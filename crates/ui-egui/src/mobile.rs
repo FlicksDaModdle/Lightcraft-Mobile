@@ -131,6 +131,10 @@ pub struct Shell {
     crop_mark: usize,
     /// Curve mode: 0 all channels together, then red, green, blue.
     curve_ch: usize,
+    /// A tap on the photo hid the bars and panels, so the photo fills the screen.
+    hidden: bool,
+    /// When a short tap on the photo ended; it hides the bars unless a second tap (a zoom) follows.
+    tap_at: Option<f64>,
     /// Color grading: 0 shadows, 1 midtones, 2 highlights, 3 global.
     grade_region: usize,
     /// The white balance list under the Color sheet is open.
@@ -195,6 +199,8 @@ impl Default for Shell {
             crop_mark: 0,
             curve_ch: 0,
             grade_region: 0,
+            hidden: false,
+            tap_at: None,
             wb_open: false,
             crop_tab: 0,
             crop_popup: None,
@@ -512,6 +518,20 @@ fn photo(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens, safe: Rect, she
     if shell.tool == Some(Tool::Grading) {
         return grading_mode(app, ui, t, safe, shell);
     }
+    if shell.hidden {
+        // only the photo, edge to edge; a tap brings the bars back
+        let full = ui.max_rect();
+        app.ui.filmstrip = false;
+        app.ui.fullscreen = false;
+        app.ui.right = RightPanel::None;
+        ui.painter().rect_filled(full, 0.0, Color32::BLACK);
+        ui.scope_builder(UiBuilder::new().max_rect(full), |ui| {
+            ui.set_clip_rect(full.intersect(ui.clip_rect()));
+            crate::panels::detail::show(app, ui);
+        });
+        gestures(app, ui.ctx(), full, shell);
+        return;
+    }
     let header = Rect::from_min_size(safe.min, vec2(safe.width(), HEADER_H));
     let main = Rect::from_min_max(pos2(safe.left(), safe.bottom() - STRIP_H), safe.max);
     // the second row (Auto and the edit groups) belongs to Edit; Presets and Crop replace it
@@ -540,13 +560,7 @@ fn photo(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens, safe: Rect, she
     gestures(app, ui.ctx(), canvas, shell);
     header_bar(app, ui, t, header, shell);
     if let Some(tool) = shell.tool.filter(|t| *t != Tool::Assist) {
-        ui.painter().rect_filled(sheet, egui::CornerRadius { nw: 14, ne: 14, sw: 0, se: 0 }, panel(t));
-        ui.painter().rect_filled(
-            Rect::from_center_size(pos2(sheet.center().x, sheet.top() + 7.0), vec2(36.0, 4.0)),
-            2.0,
-            t.text_dim.gamma_multiply(0.5),
-        );
-        ui.painter().line_segment([sheet.left_top(), sheet.right_top()], Stroke::new(1.0, t.text_dim.gamma_multiply(0.35)));
+        ui.painter().rect_filled(sheet, 0.0, panel(t));
         ui.scope_builder(UiBuilder::new().max_rect(sheet), |ui| {
             ui.set_clip_rect(sheet.intersect(ui.clip_rect()));
             sheet_of(app, ui, t, tool, shell);
@@ -746,9 +760,12 @@ fn edit_row(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens, strip: Rect,
             ui.horizontal(|ui| {
                 let item = |ui: &mut egui::Ui, label: &str, on: bool| -> bool {
                     let text = crate::i18n::tr(label);
-                    let color = if on { t.accent } else { t.text };
-                    let galley = ui.painter().layout_no_wrap(text.to_string(), t.font(11.0), color);
-                    let (r, resp) = ui.allocate_exact_size(vec2((galley.size().x + 24.0).max(64.0), STRIP_H), Sense::click());
+                    let color = if on { t.text } else { t.text_dim };
+                    let galley = ui.painter().layout_no_wrap(text.to_string(), t.font(11.5), color);
+                    let (r, resp) = ui.allocate_exact_size(vec2((galley.size().x + 24.0).max(66.0), STRIP_H), Sense::click());
+                    if on {
+                        ui.painter().rect_filled(r.shrink2(vec2(3.0, 4.0)), 10.0, Color32::from_white_alpha(22));
+                    }
                     paint_icon(ui.painter(), label, r.center_top() + vec2(0.0, 22.0), color);
                     ui.painter().galley(pos2(r.center().x - galley.size().x / 2.0, r.bottom() - galley.size().y - 8.0), galley, color);
                     resp.clicked()
@@ -839,12 +856,19 @@ fn sheet_of(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens, tool: Tool, 
             shell.tool = Some(Tool::Color);
         }
     } else {
-        ui.painter().text(pos2(title.left() + 16.0, title.center().y), Align2::LEFT_CENTER, crate::i18n::tr(tool.label()), t.semibold(16.0), t.text);
+        ui.painter().text(
+            pos2(title.left() + 18.0, title.center().y + 2.0),
+            Align2::LEFT_CENTER,
+            crate::i18n::tr(tool.label()),
+            t.semibold(17.0),
+            t.text,
+        );
     }
     if tool == Tool::Light {
         // the point curve has a screen of its own
-        let pill = Rect::from_min_size(pos2(title.right() - 200.0, title.top() + 4.0), vec2(104.0, 32.0));
-        ui.painter().rect_stroke(pill, 8.0, Stroke::new(1.0, t.text_dim.gamma_multiply(0.6)), egui::StrokeKind::Inside);
+        let pill = Rect::from_min_size(pos2(title.right() - 192.0, title.top() + 6.0), vec2(104.0, 32.0));
+        ui.painter().rect_filled(pill, 8.0, Color32::from_white_alpha(10));
+        ui.painter().rect_stroke(pill, 8.0, Stroke::new(1.0, Color32::from_white_alpha(46)), egui::StrokeKind::Inside);
         paint_icon(ui.painter(), "Curve", pill.left_center() + vec2(18.0, 0.0), t.text);
         ui.painter().text(pill.center() + vec2(12.0, 0.0), Align2::CENTER_CENTER, crate::i18n::tr("Curve"), t.font(15.0), t.text);
         if tap(ui, "open-curve", pill).clicked() {
@@ -853,7 +877,13 @@ fn sheet_of(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens, tool: Tool, 
     }
     let changed = specs.iter().any(|(_, s)| controls::get(&d, s.id).is_some_and(|v| (v - s.default).abs() > 1e-9));
     let reset = Rect::from_min_size(pos2(title.right() - 80.0, title.top()), vec2(80.0, 40.0));
-    ui.painter().text(reset.center(), Align2::CENTER_CENTER, crate::i18n::tr("Reset"), t.font(15.0), if changed { t.accent } else { t.text_dim });
+    ui.painter().text(
+        reset.center() + vec2(0.0, 2.0),
+        Align2::CENTER_CENTER,
+        crate::i18n::tr("Reset"),
+        t.font(14.0),
+        if changed { t.text } else { t.text_dim.gamma_multiply(0.6) },
+    );
     if changed && tap(ui, "reset-tool", reset).clicked() {
         let _ = app.run("develop.beginInteraction", json!({"label": tool.label()}));
         for (_, spec) in &specs {
@@ -949,25 +979,77 @@ fn touch_slider(ui: &mut egui::Ui, t: &Tokens, spec: &ControlSpec, value: f64) -
     let shown = out.value.unwrap_or(value);
     let changed = (shown - spec.default).abs() > 1e-9;
     let p = ui.painter();
-    p.text(pos2(row.left() + pad, row.top() + 20.0), Align2::LEFT_CENTER, crate::i18n::tr(spec.label), t.font(15.0), t.text);
+    p.text(pos2(row.left() + pad, row.top() + 20.0), Align2::LEFT_CENTER, crate::i18n::tr(spec.label), t.font(15.0), t.text.gamma_multiply(0.92));
     p.text(
         pos2(row.right() - pad, row.top() + 20.0),
         Align2::RIGHT_CENTER,
         spec.format(shown),
         t.font(15.0),
-        if changed { t.accent } else { t.text_dim },
+        if changed { t.text } else { t.text_dim },
     );
     let y = track.center().y;
     let x_of = |v: f64| track.left() + spec.position(v) as f32 * track.width();
-    p.line_segment([pos2(track.left(), y), pos2(track.right(), y)], Stroke::new(2.5, t.text_dim.gamma_multiply(0.4)));
-    // a notch where the value starts, so a moved slider shows how far it has gone
-    p.line_segment([pos2(x_of(spec.default), y - 5.0), pos2(x_of(spec.default), y + 5.0)], Stroke::new(1.5, t.text_dim.gamma_multiply(0.7)));
-    p.line_segment([pos2(x_of(spec.default), y), pos2(x_of(shown), y)], Stroke::new(3.0, t.accent));
     let thumb = pos2(x_of(shown), y);
-    let r = if resp.dragged() { 13.0 } else { 11.0 };
-    p.circle_filled(thumb + vec2(0.0, 1.5), r + 1.0, Color32::from_black_alpha(90));
-    p.circle_filled(thumb, r, if changed { t.accent } else { Color32::from_gray(235) });
+    let r = if resp.dragged() { 13.0 } else { 11.5 };
+    match track_stops(spec) {
+        Some(stops) => paint_gradient(p, pos2(track.left(), y), pos2(track.right(), y), 2.0, &stops),
+        None => {
+            p.line_segment([pos2(track.left(), y), pos2(track.right(), y)], Stroke::new(2.0, Color32::from_gray(78)));
+            // the stretch the value has moved from its default, so a changed slider reads at a glance
+            p.line_segment([pos2(x_of(spec.default), y), thumb], Stroke::new(2.0, Color32::from_gray(200)));
+        }
+    }
+    // a ring, open in the middle like the track runs under it
+    p.circle_filled(thumb, r, panel(t));
+    p.circle_stroke(thumb, r, Stroke::new(2.0, Color32::from_gray(if resp.dragged() { 250 } else { 215 })));
     out
+}
+
+/// The colours along a slider's track, for the controls that have one (white balance, saturation,
+/// the mixer bands, hue); `None` for a plain grey track.
+fn track_stops(spec: &ControlSpec) -> Option<Vec<Color32>> {
+    use lightcraft_develop::controls::Track;
+    let hex = |h: &str| Color32::from_hex(h).unwrap_or(Color32::GRAY);
+    let band = |b: u8| BANDS.get(usize::from(b)).map_or(Color32::GRAY, |(_, c)| *c);
+    let rainbow = || (0..=12).map(|i| egui::ecolor::Hsva::new(i as f32 / 12.0, 0.85, 0.95, 1.0).into()).collect();
+    Some(match spec.track {
+        Track::Plain | Track::Centered => return None,
+        Track::Temp => vec![Color32::from_rgb(70, 92, 210), Color32::from_gray(140), Color32::from_rgb(214, 196, 70)],
+        Track::Tint => vec![Color32::from_rgb(76, 170, 80), Color32::from_gray(140), Color32::from_rgb(196, 76, 196)],
+        Track::Gradient { from, to } => vec![hex(from), hex(to)],
+        Track::Sat { band: b } => vec![Color32::from_gray(120), band(b)],
+        Track::Lum { band: b } => vec![band(b).lerp_to_gamma(Color32::BLACK, 0.65), band(b), band(b).lerp_to_gamma(Color32::WHITE, 0.6)],
+        Track::Hue { band: b } => {
+            let i = usize::from(b);
+            let prev = band(((i + BANDS.len() - 1) % BANDS.len()) as u8);
+            let next = band(((i + 1) % BANDS.len()) as u8);
+            vec![prev, band(b), next]
+        }
+        Track::Rainbow => rainbow(),
+    })
+}
+
+/// A line with colour stops spread evenly along it.
+fn paint_gradient(p: &egui::Painter, a: egui::Pos2, b: egui::Pos2, width: f32, stops: &[Color32]) {
+    if stops.len() < 2 {
+        return;
+    }
+    let mut mesh = egui::Mesh::default();
+    let n = (stops.len() - 1) as f32;
+    let h = width / 2.0;
+    for (i, c) in stops.iter().enumerate() {
+        let x = a.x + (b.x - a.x) * i as f32 / n;
+        mesh.colored_vertex(pos2(x, a.y - h), *c);
+        mesh.colored_vertex(pos2(x, a.y + h), *c);
+        if i > 0 {
+            let k = i as u32 * 2;
+            mesh.add_triangle(k - 2, k - 1, k);
+            mesh.add_triangle(k - 1, k + 1, k);
+        }
+    }
+    p.add(mesh);
+    p.circle_filled(a, h, stops[0]);
+    p.circle_filled(b, h, stops[stops.len() - 1]);
 }
 
 // ---------------------------------------------------------------- photo gestures, rating, export
@@ -983,7 +1065,22 @@ fn gestures(app: &mut LightcraftApp, ctx: &egui::Context, canvas: Rect, shell: &
         && canvas.contains(p)
         && shell.lens_offer.is_none()
     {
+        // a second tap soon after the first is a double tap (the photo's zoom), not a hide
+        if shell.tap_at.is_some_and(|at| now - at < TAP_WAIT) {
+            shell.tap_at = None;
+            shell.press = None;
+            return;
+        }
         shell.press = Some((p, now));
+    }
+    if let Some(at) = shell.tap_at {
+        if now - at >= TAP_WAIT {
+            shell.tap_at = None;
+            shell.hidden = !shell.hidden;
+            shell.menu = false;
+        } else {
+            ctx.request_repaint_after(std::time::Duration::from_secs_f64(TAP_WAIT - (now - at)));
+        }
     }
     if pinching {
         shell.press = None;
@@ -999,6 +1096,9 @@ fn gestures(app: &mut LightcraftApp, ctx: &egui::Context, canvas: Rect, shell: &
                 app.ui.before_after = BeforeAfter::Off;
             } else if let Some(cmd) = swipe(p - from, now - at) {
                 let _ = app.run(cmd, json!({}));
+            } else if moved < 10.0 && now - at < TAP_SECS {
+                shell.tap_at = Some(now);
+                ctx.request_repaint_after(std::time::Duration::from_secs_f64(TAP_WAIT));
             }
             shell.press = None;
         }
@@ -1007,6 +1107,11 @@ fn gestures(app: &mut LightcraftApp, ctx: &egui::Context, canvas: Rect, shell: &
         app.ui.before_after = BeforeAfter::Off;
     }
 }
+
+/// A press shorter than this, that barely moved, is a tap.
+const TAP_SECS: f64 = 0.3;
+/// How long a tap waits for a second one before it hides or shows the bars.
+const TAP_WAIT: f64 = 0.28;
 
 /// How long a still finger holds before the original shows.
 const HOLD_SECS: f64 = 0.45;
@@ -1640,21 +1745,24 @@ fn crop_popup(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens, popup: Cro
 /// Every change is a `develop.curve`; a drag is one undo step.
 fn curve_mode(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens, safe: Rect, shell: &mut Shell) {
     let top = Rect::from_min_size(safe.min, vec2(safe.width(), HEADER_H));
-    let hist = Rect::from_min_size(pos2(safe.left(), top.bottom()), vec2(safe.width(), HIST_H));
-    let panel = Rect::from_min_max(pos2(safe.left(), safe.bottom() - 150.0), safe.max);
-    let canvas = Rect::from_min_max(pos2(safe.left(), hist.bottom()), pos2(safe.right(), panel.top()));
-    let side = (safe.width() - 48.0).min(canvas.height() - 8.0).max(120.0);
-    let graph = Rect::from_min_size(pos2(safe.left() + 24.0, canvas.bottom() - side - 4.0), vec2(side, side));
+    let panel = Rect::from_min_max(pos2(safe.left(), safe.bottom() - 136.0), safe.max);
+    let room = panel.top() - top.bottom();
+    let side = (safe.width() - 56.0).min(room * 0.52).max(120.0);
+    let graph_area = Rect::from_min_max(pos2(safe.left(), panel.top() - side - 28.0), pos2(safe.right(), panel.top()));
+    let graph = Rect::from_center_size(graph_area.center(), vec2(side, side));
+    let hist = Rect::from_min_size(pos2(safe.left(), top.bottom()), vec2(safe.width(), 0.0));
+    let canvas = Rect::from_min_max(pos2(safe.left(), top.bottom()), pos2(safe.right(), graph_area.top()));
 
     app.ui.filmstrip = false;
     app.ui.fullscreen = false;
     app.ui.right = RightPanel::None;
     ui.painter().rect_filled(safe, 0.0, Color32::BLACK);
-    histogram(app, ui, t, hist);
+    let _ = hist;
     ui.scope_builder(UiBuilder::new().max_rect(canvas), |ui| {
         ui.set_clip_rect(canvas.intersect(ui.clip_rect()));
         crate::panels::detail::show(app, ui);
     });
+    ui.painter().rect_filled(graph_area, 0.0, self::panel(t));
 
     // top: back to the Light sheet, Undo
     let back = Rect::from_min_size(top.min, vec2(52.0, HEADER_H));
@@ -1674,29 +1782,33 @@ fn curve_mode(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens, safe: Rect
     curve_graph(app, ui, t, graph, shell.curve_ch);
 
     // the bar: name and Done, then the channels and Reset
-    ui.painter().rect_filled(panel, 0.0, bar(t));
-    ui.painter().text(pos2(panel.left() + 24.0, panel.top() + 38.0), Align2::LEFT_CENTER, crate::i18n::tr("Curve"), t.semibold(20.0), t.text_dim);
-    let done = Rect::from_min_size(pos2(panel.right() - 24.0 - 110.0, panel.top() + 14.0), vec2(110.0, 48.0));
-    ui.painter().rect_stroke(done, 24.0, Stroke::new(2.0, t.text_dim), egui::StrokeKind::Inside);
-    ui.painter().text(done.center(), Align2::CENTER_CENTER, crate::i18n::tr("Done"), t.semibold(18.0), t.text_dim);
+    ui.painter().rect_filled(panel, 0.0, self::panel(t));
+    ui.painter().line_segment([panel.left_top(), panel.right_top()], Stroke::new(1.0, Color32::from_white_alpha(14)));
+    ui.painter().text(pos2(panel.left() + 20.0, panel.top() + 34.0), Align2::LEFT_CENTER, crate::i18n::tr("Curve"), t.semibold(17.0), t.text);
+    let done = Rect::from_min_size(pos2(panel.right() - 20.0 - 92.0, panel.top() + 14.0), vec2(92.0, 40.0));
+    ui.painter().rect_stroke(done, 20.0, Stroke::new(1.5, Color32::from_gray(200)), egui::StrokeKind::Inside);
+    ui.painter().text(done.center(), Align2::CENTER_CENTER, crate::i18n::tr("Done"), t.semibold(15.0), t.text);
     if tap(ui, "curve-done", done).clicked() {
         shell.tool = Some(Tool::Light);
     }
     let colors = [Color32::from_gray(235), Color32::from_rgb(221, 51, 51), Color32::from_rgb(51, 170, 51), Color32::from_rgb(51, 119, 238)];
+    let y = panel.top() + 94.0;
+    let step = 58.0;
+    let first = panel.center().x - step * 1.5;
     for (i, color) in colors.into_iter().enumerate() {
-        let c = pos2(panel.left() + 24.0 + 30.0 + i as f32 * 106.0, panel.top() + 104.0);
+        let c = pos2(first + i as f32 * step, y);
         if shell.curve_ch == i {
-            ui.painter().circle_filled(c, 30.0, color);
-            ui.painter().circle_filled(c, 6.0, Color32::BLACK.gamma_multiply(0.7));
+            ui.painter().circle_filled(c, 15.0, color);
+            ui.painter().circle_stroke(c, 19.0, Stroke::new(2.0, Color32::from_gray(230)));
         } else {
-            ui.painter().circle_stroke(c, 29.0, Stroke::new(3.5, color));
+            ui.painter().circle_stroke(c, 14.0, Stroke::new(2.5, color));
         }
-        if tap(ui, &format!("curve-ch-{i}"), Rect::from_center_size(c, vec2(80.0, 64.0))).clicked() {
+        if tap(ui, &format!("curve-ch-{i}"), Rect::from_center_size(c, vec2(step, 52.0))).clicked() {
             shell.curve_ch = i;
         }
     }
-    let reset = Rect::from_center_size(pos2(panel.right() - 24.0 - 30.0, panel.top() + 104.0), vec2(80.0, 64.0));
-    paint_icon(ui.painter(), "Curve", reset.center(), t.text);
+    let reset = Rect::from_center_size(pos2(panel.right() - 20.0 - 22.0, y), vec2(52.0, 52.0));
+    ui.painter().text(reset.center(), Align2::CENTER_CENTER, crate::i18n::tr("Reset"), t.font(13.0), t.text_dim);
     if tap(ui, "curve-reset", reset).clicked() {
         let _ = app.run("curve.reset", json!({"channel": "point"}));
     }
@@ -1806,7 +1918,7 @@ fn curve_graph(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens, r: Rect, 
     ui.data_mut(|dd| dd.insert_temp(drag_id, dragging));
 
     let p = ui.painter();
-    p.rect_filled(r, 0.0, Color32::from_black_alpha(70));
+    p.rect_filled(r, 4.0, Color32::from_black_alpha(90));
     for i in 1..4 {
         let f = i as f32 / 4.0;
         let grid = Stroke::new(1.0, Color32::from_white_alpha(45));
@@ -1820,8 +1932,9 @@ fn curve_graph(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens, r: Rect, 
     p.add(egui::Shape::line(line, Stroke::new(2.5, color)));
     for (i, q) in pts.iter().enumerate() {
         let c = to_screen(q.x, q.y);
-        p.circle_filled(c, if dragging == Some(i) { 11.0 } else { 9.0 }, Color32::from_gray(205));
-        p.circle_stroke(c, if dragging == Some(i) { 11.0 } else { 9.0 }, Stroke::new(1.0, Color32::from_gray(90)));
+        let rr = if dragging == Some(i) { 10.0 } else { 7.0 };
+        p.circle_filled(c, rr, Color32::from_gray(30));
+        p.circle_stroke(c, rr, Stroke::new(2.0, Color32::from_gray(235)));
     }
     let _ = t;
 }
@@ -1844,28 +1957,33 @@ const WB_MODES: [(&str, &str); 8] = [
 fn color_header(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens, bw: bool, mode: &str, shell: &mut Shell) {
     let w = ui.available_width();
     let (row, _) = ui.allocate_exact_size(vec2(w, 64.0), Sense::hover());
-    let sw = Rect::from_center_size(pos2(row.left() + 16.0 + 26.0, row.center().y), vec2(52.0, 30.0));
+    let sw = Rect::from_center_size(pos2(row.left() + 18.0 + 24.0, row.center().y), vec2(48.0, 28.0));
     ui.painter().rect_filled(sw, 15.0, if bw { t.accent } else { Color32::from_gray(70) });
-    ui.painter().circle_filled(pos2(if bw { sw.right() - 15.0 } else { sw.left() + 15.0 }, sw.center().y), 11.0, Color32::from_gray(235));
-    ui.painter().text(pos2(sw.right() + 14.0, row.center().y), Align2::LEFT_CENTER, crate::i18n::tr("B&W"), t.font(17.0), t.text);
+    ui.painter().circle_filled(pos2(if bw { sw.right() - 14.0 } else { sw.left() + 14.0 }, sw.center().y), 11.0, Color32::from_gray(235));
+    ui.painter().text(pos2(sw.right() + 10.0, row.center().y), Align2::LEFT_CENTER, crate::i18n::tr("B&W"), t.font(16.0), t.text);
     if tap(ui, "bw", Rect::from_min_max(row.left_top(), pos2(sw.right() + 70.0, row.bottom()))).clicked() {
         let _ = app.run("develop.treatment", json!({"bw": !bw}));
     }
-    let bw_w = (w - 32.0 - 130.0 - 16.0) / 2.0;
+    let x0 = row.left() + 132.0;
+    let bw_w = ((row.right() - 16.0 - x0) - 8.0) / 2.0;
     for (i, (label, icon, to)) in [("Grading", "Grading", Tool::Grading), ("Color mix", "Mixer", Tool::Mixer)].into_iter().enumerate() {
-        let b = Rect::from_min_size(pos2(row.left() + 16.0 + 130.0 + i as f32 * (bw_w + 8.0), row.top() + 10.0), vec2(bw_w - 4.0, 44.0));
-        ui.painter().rect_stroke(b, 8.0, Stroke::new(1.0, t.text_dim.gamma_multiply(0.6)), egui::StrokeKind::Inside);
-        paint_icon(ui.painter(), icon, b.left_center() + vec2(20.0, 0.0), t.text);
-        ui.painter().text(b.center() + vec2(14.0, 0.0), Align2::CENTER_CENTER, crate::i18n::tr(label), t.font(14.0), t.text);
+        let b = Rect::from_min_size(pos2(x0 + i as f32 * (bw_w + 8.0), row.top() + 12.0), vec2(bw_w, 40.0));
+        ui.painter().rect_filled(b, 8.0, Color32::from_white_alpha(10));
+        ui.painter().rect_stroke(b, 8.0, Stroke::new(1.0, Color32::from_white_alpha(46)), egui::StrokeKind::Inside);
+        let text = ui.painter().layout_no_wrap(crate::i18n::tr(label).to_string(), t.font(13.5), t.text);
+        let total = 20.0 + 6.0 + text.size().x;
+        let start = b.center().x - total / 2.0;
+        paint_icon(ui.painter(), icon, pos2(start + 10.0, b.center().y), t.text);
+        ui.painter().galley(pos2(start + 26.0, b.center().y - text.size().y / 2.0), text, t.text);
         if tap(ui, label, b).clicked() {
             shell.tool = Some(to);
         }
     }
     let (wb, _) = ui.allocate_exact_size(vec2(w, 48.0), Sense::hover());
     let name = WB_MODES.iter().find(|(m, _)| *m == mode).map_or("Custom", |(_, n)| n);
-    ui.painter().text(pos2(wb.left() + 16.0, wb.center().y), Align2::LEFT_CENTER, crate::i18n::tr("White balance"), t.font(15.0), t.text_dim);
-    ui.painter().text(pos2(wb.left() + 150.0, wb.center().y), Align2::LEFT_CENTER, crate::i18n::tr(name), t.font(17.0), t.text);
-    let c = pos2(wb.left() + 270.0, wb.center().y);
+    ui.painter().text(pos2(wb.left() + 18.0, wb.center().y), Align2::LEFT_CENTER, crate::i18n::tr("White balance"), t.font(15.0), t.text_dim);
+    let shown = ui.painter().text(pos2(wb.left() + 140.0, wb.center().y), Align2::LEFT_CENTER, crate::i18n::tr(name), t.font(16.0), t.text);
+    let c = pos2(shown.right() + 16.0, wb.center().y);
     let dy = if shell.wb_open { -4.0 } else { 4.0 };
     let chevron = Stroke::new(2.0, t.text);
     ui.painter().line_segment([c + vec2(-6.0, -dy / 2.0), c + vec2(0.0, dy / 2.0 + dy / 4.0)], chevron);
@@ -2008,13 +2126,13 @@ fn grading_wheel(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens, r: Rect
     let sat = controls::get(d, &sat_id).unwrap_or(0.0);
     let center = r.center();
     let radius = r.width() / 2.0;
-    let (rings, spokes) = (6usize, 72usize);
+    let (rings, spokes) = (14usize, 120usize);
     let mut mesh = egui::Mesh::default();
     for ring in 0..=rings {
         for a in 0..spokes {
             let ang = a as f32 / spokes as f32 * std::f32::consts::TAU;
             let f = ring as f32 / rings as f32;
-            let color = egui::ecolor::Hsva::new(a as f32 / spokes as f32, f * 0.9, 1.0, 1.0);
+            let color = egui::ecolor::Hsva::new(a as f32 / spokes as f32, f.powf(0.8), 1.0, 1.0);
             mesh.colored_vertex(center + vec2(ang.cos(), -ang.sin()) * radius * f, color.into());
         }
     }
@@ -2270,5 +2388,20 @@ mod tests {
         let h = open_tool("Mixer");
         let text = h.painted_text();
         assert!(text.iter().any(|t| t == "Color mix"), "{text:?}");
+    }
+
+    #[test]
+    fn a_tap_on_the_photo_hides_the_bars_and_another_brings_them_back() {
+        let mut h = open_tool("Light");
+        h.app.mobile.as_mut().expect("phone").tool = None;
+        h.step();
+        assert!(h.painted_text().iter().any(|t| t == "Light"));
+        h.app.mobile.as_mut().expect("phone").hidden = true;
+        h.step();
+        let text = h.painted_text();
+        assert!(!text.iter().any(|t| t == "Light" || t == "Auto"), "{text:?}");
+        h.app.mobile.as_mut().expect("phone").hidden = false;
+        h.step();
+        assert!(h.painted_text().iter().any(|t| t == "Light"));
     }
 }
