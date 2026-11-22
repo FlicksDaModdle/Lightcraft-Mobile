@@ -63,3 +63,11 @@ goes to a device.
 iOS ends apps that use too much memory. The app limits its caches to an eighth of the RAM (192 to 768
 MiB). For big raw files, add the *Increased Memory Limit* capability to the App ID and regenerate the
 profile; the app then has more room.
+
+## Getting photos in and out
+
+Until the Photos picker lands, the app uses two folders you can see in the Files app
+(On My iPhone > LightCraft):
+
+- **Import**: copy photos here, then tap **+** in the library to add them.
+- **Exports**: the **Export** button on the photo screen writes `<name>-edit.jpg` here.

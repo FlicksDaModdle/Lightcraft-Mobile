@@ -21,6 +21,8 @@ use crate::widgets::SliderOut;
 const HEADER_H: f32 = 52.0;
 /// The tool strip along the bottom of the photo screen.
 const STRIP_H: f32 = 60.0;
+/// The rating row above the tool strip.
+const RATE_H: f32 = 48.0;
 /// The slider rows' height: a finger-sized track under its label.
 const ROW_H: f32 = 64.0;
 /// Gap between thumbnails.
@@ -35,6 +37,8 @@ enum Screen {
 /// A group of sliders in the bottom sheet.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Tool {
+    Presets,
+    Crop,
     Light,
     Color,
     Effects,
@@ -44,10 +48,12 @@ enum Tool {
 }
 
 impl Tool {
-    const ALL: [Tool; 6] = [Tool::Light, Tool::Color, Tool::Effects, Tool::Detail, Tool::Optics, Tool::Geometry];
+    const ALL: [Tool; 8] = [Tool::Presets, Tool::Crop, Tool::Light, Tool::Color, Tool::Effects, Tool::Detail, Tool::Optics, Tool::Geometry];
 
     fn label(self) -> &'static str {
         match self {
+            Tool::Presets => "Presets",
+            Tool::Crop => "Crop",
             Tool::Light => "Light",
             Tool::Color => "Color",
             Tool::Effects => "Effects",
@@ -60,6 +66,7 @@ impl Tool {
     /// The engine's control groups the tool shows, with the heading each gets when there are several.
     fn sections(self) -> &'static [(Section, &'static str)] {
         match self {
+            Tool::Presets | Tool::Crop => &[],
             Tool::Light => &[(Section::Light, "")],
             Tool::Color => &[(Section::Color, "")],
             Tool::Effects => &[(Section::Effects, ""), (Section::Vignette, "Vignette"), (Section::Grain, "Grain")],
@@ -84,6 +91,14 @@ pub struct Shell {
     /// Simulated safe-area insets (top, right, bottom, left) for a run on a desktop; `None` uses what
     /// the device reports.
     insets: Option<[f32; 4]>,
+    /// Where photos wait to be added (the Files app can fill it); the + button imports from it.
+    pub import_dir: Option<std::path::PathBuf>,
+    /// Where exported JPEGs are written (visible in the Files app).
+    pub export_dir: Option<std::path::PathBuf>,
+    /// The pointer press on the photo: where, and when (seconds), for swipe and hold.
+    press: Option<(egui::Pos2, f64)>,
+    /// Name of the last preset group opened.
+    preset_group: Option<String>,
 }
 
 /// What input the shell has seen, for the status line.
@@ -99,7 +114,18 @@ struct Stats {
 
 impl Default for Shell {
     fn default() -> Self {
-        Shell { screen: Screen::Library, tool: None, debug: true, stats: Stats::default(), lens_offer: None, insets: None }
+        Shell {
+            screen: Screen::Library,
+            tool: None,
+            debug: true,
+            stats: Stats::default(),
+            lens_offer: None,
+            insets: None,
+            import_dir: None,
+            export_dir: None,
+            press: None,
+            preset_group: None,
+        }
     }
 }
 
@@ -290,7 +316,7 @@ fn library(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens, safe: Rect, s
     p.line_segment([add.center() - vec2(0.0, 8.0), add.center() + vec2(0.0, 8.0)], plus);
     p.text(pos2(add.left() - 12.0, header.center().y), Align2::RIGHT_CENTER, count, t.font(14.0), t.text_dim);
     if tap(ui, "add", add.expand(6.0)).clicked() {
-        add_photos(app, ui.ctx());
+        add_photos(app, ui.ctx(), shell);
     }
     let body = Rect::from_min_max(pos2(safe.left(), header.bottom()), safe.max);
     ui.scope_builder(UiBuilder::new().max_rect(body), |ui| {
@@ -299,10 +325,28 @@ fn library(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens, safe: Rect, s
     });
 }
 
-/// Add photos from the device. Until the Photos and Files pickers exist (docs/ios/PLAN.md, phase 1)
-/// this says so instead of pretending to work.
-fn add_photos(app: &mut LightcraftApp, ctx: &egui::Context) {
-    let picked = app.services.pick_files.as_mut().map(|pick| pick()).unwrap_or_default();
+/// Add photos: from the phone's picker when the host has one, otherwise from the Import folder
+/// (shown in the Files app), which is how photos get in until the Photos picker exists
+/// (docs/ios/PLAN.md, phase 1).
+fn add_photos(app: &mut LightcraftApp, ctx: &egui::Context, shell: &Shell) {
+    let mut picked = app.services.pick_files.as_mut().map(|pick| pick()).unwrap_or_default();
+    if picked.is_empty()
+        && let Some(dir) = &shell.import_dir
+    {
+        picked = std::fs::read_dir(dir)
+            .map(|rd| {
+                rd.filter_map(Result::ok)
+                    .filter(|e| e.file_type().is_ok_and(|t| t.is_file()) && !e.file_name().to_string_lossy().starts_with('.'))
+                    .map(|e| e.path().to_string_lossy().into_owned())
+                    .collect()
+            })
+            .unwrap_or_default();
+        if picked.is_empty() {
+            app.toast(ctx, crate::i18n::tr("Put photos in the Import folder (Files > LightCraft > Import), then tap +"));
+            return;
+        }
+        picked.sort();
+    }
     if picked.is_empty() {
         app.toast(ctx, crate::i18n::tr("Adding photos from your phone is not available yet"));
         return;
@@ -365,7 +409,10 @@ fn photo(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens, safe: Rect, she
     let strip = Rect::from_min_max(pos2(safe.left(), safe.bottom() - STRIP_H), safe.max);
     let sheet_h = if shell.tool.is_some() { (safe.height() * 0.4).min(360.0) } else { 0.0 };
     let sheet = Rect::from_min_max(pos2(safe.left(), strip.top() - sheet_h), pos2(safe.right(), strip.top()));
-    let canvas = Rect::from_min_max(pos2(safe.left(), header.bottom()), pos2(safe.right(), sheet.top()));
+    // the rating row sits above the strip while no sheet is open
+    let rate_h = if shell.tool.is_none() { RATE_H } else { 0.0 };
+    let rate = Rect::from_min_max(pos2(safe.left(), sheet.top() - rate_h), pos2(safe.right(), sheet.top()));
+    let canvas = Rect::from_min_max(pos2(safe.left(), header.bottom()), pos2(safe.right(), rate.top()));
 
     // the loupe draws the photo; the desktop's own side panels, filmstrip and full screen stay off
     app.ui.filmstrip = false;
@@ -377,13 +424,18 @@ fn photo(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens, safe: Rect, she
         crate::panels::detail::show(app, ui);
     });
 
+    gestures(app, ui.ctx(), canvas, shell);
     header_bar(app, ui, t, header, shell);
+    if rate_h > 0.0 {
+        ui.painter().rect_filled(rate, 0.0, t.chrome);
+        rating_row(app, ui, t, rate, shell);
+    }
     if let Some(tool) = shell.tool {
         ui.painter().rect_filled(sheet, 0.0, t.chrome);
         ui.painter().line_segment([sheet.left_top(), sheet.right_top()], Stroke::new(1.0, t.text_dim.gamma_multiply(0.35)));
         ui.scope_builder(UiBuilder::new().max_rect(sheet), |ui| {
             ui.set_clip_rect(sheet.intersect(ui.clip_rect()));
-            sheet_of(app, ui, t, tool);
+            sheet_of(app, ui, t, tool, shell);
         });
     }
     ui.painter().rect_filled(strip, 0.0, t.chrome);
@@ -459,7 +511,12 @@ fn tool_strip(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens, strip: Rec
 // ---------------------------------------------------------------- sliders
 
 /// The sliders of one tool, in a scrolling sheet.
-fn sheet_of(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens, tool: Tool) {
+fn sheet_of(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens, tool: Tool, shell: &mut Shell) {
+    match tool {
+        Tool::Presets => return presets_sheet(app, ui, t, shell),
+        Tool::Crop => return crop_sheet(app, ui, t),
+        _ => {}
+    }
     let Some(id) = app.session.active() else { return };
     let d = app.session.develop_of(id).unwrap_or_default();
     let specs: Vec<(&'static str, &'static ControlSpec)> = tool
@@ -561,6 +618,208 @@ fn touch_slider(ui: &mut egui::Ui, t: &Tokens, spec: &ControlSpec, value: f64) -
     out
 }
 
+// ---------------------------------------------------------------- photo gestures, rating, export
+
+/// A swipe along the photo moves to the next or previous photo; holding a finger still on it shows
+/// the original. Two fingers (a pinch) are the loupe's own.
+fn gestures(app: &mut LightcraftApp, ctx: &egui::Context, canvas: Rect, shell: &mut Shell) {
+    use crate::state::BeforeAfter;
+    let (pressed, released, pos, now, pinching) =
+        ctx.input(|i| (i.pointer.any_pressed(), i.pointer.any_released(), i.pointer.interact_pos(), i.time, i.multi_touch().is_some()));
+    if pressed
+        && let Some(p) = pos
+        && canvas.contains(p)
+        && shell.lens_offer.is_none()
+    {
+        shell.press = Some((p, now));
+    }
+    if pinching {
+        shell.press = None;
+    }
+    if let (Some((from, at)), Some(p)) = (shell.press, pos) {
+        let moved = (p - from).length();
+        if !released && now - at > HOLD_SECS && moved < 12.0 {
+            app.ui.before_after = BeforeAfter::Original;
+            ctx.request_repaint();
+        }
+        if released {
+            if app.ui.before_after == BeforeAfter::Original {
+                app.ui.before_after = BeforeAfter::Off;
+            } else if let Some(cmd) = swipe(p - from, now - at) {
+                let _ = app.run(cmd, json!({}));
+            }
+            shell.press = None;
+        }
+    }
+    if released && app.ui.before_after == BeforeAfter::Original && shell.press.is_none() {
+        app.ui.before_after = BeforeAfter::Off;
+    }
+}
+
+/// How long a still finger holds before the original shows.
+const HOLD_SECS: f64 = 0.45;
+
+/// The command a drag of `d` points over `secs` makes: a quick, mostly sideways flick.
+fn swipe(d: egui::Vec2, secs: f64) -> Option<&'static str> {
+    (secs < 0.7 && d.x.abs() > 90.0 && d.y.abs() < d.x.abs() * 0.5).then_some(if d.x < 0.0 { "library.next" } else { "library.previous" })
+}
+
+/// Stars, pick and reject on the left; Export on the right.
+fn rating_row(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens, row: Rect, shell: &Shell) {
+    let Some(id) = app.session.active() else { return };
+    let Some((rating, flag)) = app.session.catalog.photo(id).map(|p| (p.rating, p.flag)) else { return };
+    for n in 1..=5u8 {
+        let r = Rect::from_center_size(pos2(row.left() + 28.0 + f32::from(n - 1) * 42.0, row.center().y), vec2(42.0, RATE_H));
+        let on = n <= rating;
+        paint_star(ui.painter(), r.center(), 10.0, if on { t.accent } else { t.text_dim.gamma_multiply(0.6) }, on);
+        if tap(ui, &format!("star{n}"), r).clicked() {
+            // tapping the star that is already the rating clears it
+            let _ = app.run("photo.rate", json!({"rating": if n == rating { 0 } else { n }}));
+        }
+    }
+    let flags =
+        [("pick", crate::i18n::tr("Pick"), lightcraft_catalog::Flag::Pick), ("reject", crate::i18n::tr("Reject"), lightcraft_catalog::Flag::Reject)];
+    let mut x = row.left() + 28.0 + 5.0 * 42.0 + 8.0;
+    for (name, label, which) in flags {
+        let w = 64.0;
+        let r = Rect::from_min_size(pos2(x, row.top()), vec2(w, RATE_H));
+        let on = flag == which;
+        let color = if on { t.accent } else { t.text_dim };
+        ui.painter().text(r.center(), Align2::CENTER_CENTER, label, t.font(14.0), color);
+        if tap(ui, name, r).clicked() {
+            let _ = app.run("photo.flag", json!({"flag": if on { "none" } else { name }}));
+        }
+        x += w;
+    }
+    let ex = Rect::from_min_max(pos2(row.right() - 72.0, row.top()), row.right_bottom());
+    ui.painter().text(ex.center(), Align2::CENTER_CENTER, crate::i18n::tr("Export"), t.semibold(15.0), t.accent);
+    if tap(ui, "export", ex).clicked() {
+        export_jpeg(app, ui.ctx(), shell);
+    }
+}
+
+fn paint_star(p: &egui::Painter, c: egui::Pos2, r: f32, color: Color32, filled: bool) {
+    let pts: Vec<egui::Pos2> = (0..10)
+        .map(|i| {
+            let a = -std::f32::consts::FRAC_PI_2 + i as f32 * std::f32::consts::PI / 5.0;
+            let rad = if i % 2 == 0 { r } else { r * 0.42 };
+            c + vec2(a.cos(), a.sin()) * rad
+        })
+        .collect();
+    let stroke = Stroke::new(1.5, color);
+    p.add(egui::Shape::convex_polygon(pts, if filled { color } else { Color32::TRANSPARENT }, stroke));
+}
+
+/// Write the photo as a JPEG into the Exports folder (visible in the Files app), and say where.
+fn export_jpeg(app: &mut LightcraftApp, ctx: &egui::Context, shell: &Shell) {
+    let (Some(dir), Some(id)) = (&shell.export_dir, app.session.active()) else {
+        app.toast(ctx, crate::i18n::tr("Exporting is not available here"));
+        return;
+    };
+    let Some(name) = app.session.catalog.photo(id).map(|p| p.file_name.clone()) else { return };
+    let stem = std::path::Path::new(&name).file_stem().map_or_else(|| "photo".to_string(), |s| s.to_string_lossy().into_owned());
+    if let Err(e) = std::fs::create_dir_all(dir) {
+        app.toast(ctx, e.to_string());
+        return;
+    }
+    let path = dir.join(format!("{stem}-edit.jpg"));
+    match app.run("app.export", json!({"path": path.to_string_lossy(), "format": "jpg"})) {
+        Ok(_) => app.toast(ctx, crate::i18n::tr_format!("Saved {name} to the Exports folder", name = format!("{stem}-edit.jpg"))),
+        Err(e) => app.toast(ctx, e.to_string()),
+    }
+}
+
+// ---------------------------------------------------------------- presets and crop
+
+/// The presets as rows, a group at a time; tapping one applies it to the photo.
+fn presets_sheet(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens, shell: &mut Shell) {
+    let mut groups: Vec<String> = Vec::new();
+    for p in app.session.presets.iter() {
+        if !groups.contains(&p.group) {
+            groups.push(p.group.clone());
+        }
+    }
+    let current = shell.preset_group.clone().filter(|g| groups.contains(g)).or_else(|| groups.first().cloned());
+    let title = Rect::from_min_size(ui.max_rect().min, vec2(ui.max_rect().width(), 44.0));
+    ui.scope_builder(UiBuilder::new().max_rect(title), |ui| {
+        egui::ScrollArea::horizontal().scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden).show(ui, |ui| {
+            ui.horizontal(|ui| {
+                for g in &groups {
+                    let on = current.as_deref() == Some(g.as_str());
+                    let galley = ui.painter().layout_no_wrap(g.clone(), t.font(15.0), if on { t.accent } else { t.text });
+                    let (r, resp) = ui.allocate_exact_size(vec2(galley.size().x + 28.0, 44.0), Sense::click());
+                    ui.painter().galley(r.center() - galley.size() / 2.0, galley, t.text);
+                    if on {
+                        ui.painter()
+                            .line_segment([r.left_bottom() + vec2(10.0, -3.0), r.right_bottom() + vec2(-10.0, -3.0)], Stroke::new(3.0, t.accent));
+                    }
+                    if resp.clicked() {
+                        shell.preset_group = Some(g.clone());
+                    }
+                }
+            });
+        });
+    });
+    let body = Rect::from_min_max(pos2(ui.max_rect().left(), title.bottom()), ui.max_rect().max);
+    let rows: Vec<(String, String)> =
+        app.session.presets.iter().filter(|p| Some(&p.group) == current.as_ref()).map(|p| (p.id.clone(), p.name.clone())).collect();
+    let mut apply = None;
+    ui.scope_builder(UiBuilder::new().max_rect(body), |ui| {
+        ui.set_clip_rect(body.intersect(ui.clip_rect()));
+        egui::ScrollArea::vertical().auto_shrink([false, false]).show_rows(ui, 48.0, rows.len(), |ui, range| {
+            for i in range {
+                let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 48.0), Sense::click());
+                ui.painter().text(pos2(r.left() + 18.0, r.center().y), Align2::LEFT_CENTER, &rows[i].1, t.font(16.0), t.text);
+                ui.painter().line_segment([r.left_bottom() + vec2(18.0, 0.0), r.right_bottom()], Stroke::new(1.0, t.text_dim.gamma_multiply(0.2)));
+                if resp.clicked() {
+                    apply = Some(rows[i].clone());
+                }
+            }
+        });
+    });
+    if let Some((id, name)) = apply {
+        match app.run("preset.apply", json!({"id": id})) {
+            Ok(_) => app.toast(ui.ctx(), crate::i18n::tr_format!("Applied {name}", name = name)),
+            Err(e) => app.toast(ui.ctx(), e.to_string()),
+        }
+    }
+}
+
+/// Aspect-ratio buttons, a rotate and the straighten angle. Dragging the crop box itself is the
+/// loupe's (the crop overlay), so the sheet only sets what the box is locked to.
+fn crop_sheet(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens) {
+    let area = ui.max_rect();
+    let ratios: [(&str, &str); 8] = [
+        ("Original", "original"),
+        ("Free", "free"),
+        ("1:1", "1x1"),
+        ("4:5", "4x5"),
+        ("2:3", "2x3"),
+        ("4:3", "4x3"),
+        ("16:9", "16x9"),
+        ("Rotate", "rotate"),
+    ];
+    let cell = vec2(area.width() / 4.0, 52.0);
+    for (i, (label, arg)) in ratios.iter().enumerate() {
+        let r = Rect::from_min_size(area.min + vec2((i % 4) as f32 * cell.x, 8.0 + (i / 4) as f32 * cell.y), cell);
+        ui.painter().text(r.center(), Align2::CENTER_CENTER, crate::i18n::tr(label), t.font(16.0), t.text);
+        if tap(ui, &format!("crop-{arg}"), r).clicked() {
+            let _ = if *arg == "rotate" { app.run("crop.rotateAspect", json!({})) } else { app.run("crop.aspect", json!({"aspect": arg})) };
+        }
+    }
+    let angle_area = Rect::from_min_max(pos2(area.left(), area.top() + 8.0 + 2.0 * cell.y), area.max);
+    ui.scope_builder(UiBuilder::new().max_rect(angle_area), |ui| {
+        let Some(id) = app.session.active() else { return };
+        let d = app.session.develop_of(id).unwrap_or_default();
+        if let Some(spec) = controls::find("crop.angle").filter(|s| controls::get(&d, s.id).is_some())
+            && let Some(v) = controls::get(&d, spec.id)
+        {
+            let out = touch_slider(ui, t, spec, v);
+            crate::panels::edit::apply_slider_out(app, spec, out, |app, v| app.run("develop.set", json!({"control": spec.id, "value": v})));
+        }
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -568,7 +827,7 @@ mod tests {
     /// A retune of the engine's control groups must not leave a tool with an empty sheet.
     #[test]
     fn every_tool_has_sliders() {
-        for tool in Tool::ALL {
+        for tool in Tool::ALL.into_iter().filter(|t| !matches!(t, Tool::Presets | Tool::Crop)) {
             let n: usize = tool.sections().iter().map(|(section, _)| controls::in_section(*section).count()).sum();
             assert!(n > 0, "{} has no controls", tool.label());
         }
@@ -610,5 +869,59 @@ mod tests {
         h.app.ui.dialog = Some(crate::state::Dialog::WhatsNew);
         h.step();
         assert!(h.app.ui.dialog.is_none());
+    }
+
+    #[test]
+    fn a_quick_sideways_flick_changes_photo_and_nothing_else_does() {
+        assert_eq!(swipe(vec2(-150.0, 10.0), 0.2), Some("library.next"));
+        assert_eq!(swipe(vec2(150.0, -10.0), 0.2), Some("library.previous"));
+        assert_eq!(swipe(vec2(-150.0, 140.0), 0.2), None, "diagonal drags are not swipes");
+        assert_eq!(swipe(vec2(-150.0, 0.0), 1.5), None, "a slow drag is not a swipe");
+        assert_eq!(swipe(vec2(-20.0, 0.0), 0.1), None, "a tap with a wobble is not a swipe");
+    }
+
+    fn open_tool(name: &str) -> crate::headless::Headless {
+        let mut h = phone();
+        h.step();
+        let (_, ids) = h.app.session.visible_shared();
+        let id = *ids.first().expect("demo photos");
+        h.app.run("library.select", serde_json::json!({"ids": [id.0], "mode": "replace"})).expect("select");
+        h.app.run("view.detail", serde_json::json!({})).expect("detail");
+        h.app.mobile.as_mut().expect("phone").open_photo(Some(name));
+        h.step();
+        h.step();
+        h
+    }
+
+    #[test]
+    fn the_crop_sheet_offers_ratios_and_a_locked_ratio_sticks() {
+        let mut h = open_tool("Crop");
+        let text = h.painted_text();
+        assert!(text.iter().any(|t| t == "16:9") && text.iter().any(|t| t == "Original"), "{text:?}");
+        h.app.run("crop.aspect", serde_json::json!({"aspect": "1x1"})).expect("aspect");
+        let id = h.app.session.active().expect("active");
+        assert!(h.app.session.develop_of(id).is_some_and(|d| d.crop.aspect.is_some()));
+    }
+
+    #[test]
+    fn the_presets_sheet_lists_presets_and_applying_one_changes_the_edit() {
+        let mut h = open_tool("Presets");
+        let first = h.app.session.presets.first().expect("built-in presets").clone();
+        let text = h.painted_text();
+        assert!(text.iter().any(|t| *t == first.group), "the group tabs show {:?}: {text:?}", first.group);
+        let id = h.app.session.active().expect("active");
+        let before = h.app.session.develop_of(id);
+        h.app.run("preset.apply", serde_json::json!({"id": first.id})).expect("apply");
+        assert_ne!(h.app.session.develop_of(id), before, "{} did nothing", first.name);
+    }
+
+    #[test]
+    fn rating_and_flagging_from_the_row_go_through_the_commands() {
+        let mut h = open_tool("Light");
+        h.app.mobile.as_mut().expect("phone").tool = None;
+        h.step();
+        h.step();
+        let text = h.painted_text();
+        assert!(text.iter().any(|t| t == "Pick") && text.iter().any(|t| t == "Export"), "{text:?}");
     }
 }

@@ -99,6 +99,15 @@ fn main() -> eframe::Result {
             // the phone layout; on a desktop its status bar and home indicator are simulated
             let shell =
                 if cfg!(target_os = "ios") { lightcraft_ui_egui::mobile::Shell::default() } else { lightcraft_ui_egui::mobile::Shell::preview() };
+            let mut shell = shell;
+            let docs = lightcraft_engine::library::default_dir().and_then(|d| d.parent().map(std::path::Path::to_path_buf));
+            if let Some(docs) = docs {
+                let (import, export) = (docs.join("Import"), docs.join("Exports"));
+                let _ = std::fs::create_dir_all(&import);
+                let _ = std::fs::create_dir_all(&export);
+                shell.import_dir = Some(import);
+                shell.export_dir = Some(export);
+            }
             app.mobile = Some(shell);
             // the desktop's welcome dialog is wider than a phone; the phone layout has no use for it
             app.ui.seen_version = Some(env!("CARGO_PKG_VERSION").to_string());
