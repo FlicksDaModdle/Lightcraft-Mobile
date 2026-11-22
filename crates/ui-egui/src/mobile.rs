@@ -28,7 +28,7 @@ const HIST_H: f32 = 104.0;
 /// The slider rows' height: a finger-sized track under its label.
 const ROW_H: f32 = 70.0;
 /// Gap between thumbnails.
-const GAP: f32 = 2.0;
+const GAP: f32 = 1.5;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Screen {
@@ -245,8 +245,10 @@ fn insets(ctx: &egui::Context, shell: &Shell) -> [f32; 4] {
     if let Some(i) = shell.insets {
         return i;
     }
+    // the system gives them in its own points; a zoomed UI has more points across the same screen
     let m = ctx.input(|i| i.safe_area_insets()).0;
-    [m.top, m.right, m.bottom, m.left]
+    let z = ctx.zoom_factor().max(0.1);
+    [m.top / z, m.right / z, m.bottom / z, m.left / z]
 }
 
 /// Draw the phone layout over the whole window.
@@ -413,7 +415,7 @@ fn library(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens, safe: Rect, s
     let header = Rect::from_min_size(safe.min, vec2(safe.width(), HEADER_H));
     let (_, ids) = app.session.visible_shared();
     let p = ui.painter();
-    p.text(pos2(header.left() + 16.0, header.center().y), Align2::LEFT_CENTER, crate::i18n::tr("Library"), t.semibold(24.0), t.text);
+    p.text(pos2(header.left() + 16.0, header.center().y), Align2::LEFT_CENTER, crate::i18n::tr("All photos"), t.semibold(22.0), t.text);
     let count = if ids.len() == 1 { crate::i18n::tr("1 photo").to_string() } else { crate::i18n::tr_format!("{n} photos", n = ids.len()) };
     // the Add button: a circle with a plus
     let add = Rect::from_center_size(pos2(header.right() - 16.0 - 20.0, header.center().y), vec2(40.0, 40.0));
@@ -478,7 +480,7 @@ fn add_photos(app: &mut LightcraftApp, ctx: &egui::Context, shell: &mut Shell) {
 
 fn grid(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens, ids: &[lightcraft_catalog::PhotoId], shell: &mut Shell) {
     let width = ui.available_width();
-    let cols = ((width / 118.0).floor() as usize).clamp(3, 8);
+    let cols = ((width / 100.0).floor() as usize).clamp(4, 10);
     let cell = (width - GAP * (cols as f32 - 1.0)) / cols as f32;
     let rows = ids.len().div_ceil(cols);
     let ppp = ui.ctx().pixels_per_point();
@@ -724,7 +726,7 @@ fn main_row(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens, row: Rect, s
         };
         let c = cell.center() - vec2(0.0, 4.0);
         if on {
-            ui.painter().rect_filled(Rect::from_center_size(c, vec2(60.0, 46.0)), 10.0, t.accent);
+            ui.painter().rect_filled(Rect::from_center_size(c, vec2(54.0, 44.0)), 9.0, t.accent);
         }
         paint_icon(ui.painter(), name, c, if on { Color32::WHITE } else { t.text });
         if tap(ui, &format!("main-{name}"), cell).clicked() {

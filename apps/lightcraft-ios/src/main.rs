@@ -65,6 +65,9 @@ impl Drop for App {
     }
 }
 
+/// The phone UI's scale: below 1 draws everything smaller.
+const PHONE_ZOOM: f32 = 0.88;
+
 fn main() -> eframe::Result {
     logging::install();
     lightcraft_engine::guard::install_hook(
@@ -89,7 +92,10 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "LightCraft",
         options,
-        Box::new(move |_cc| {
+        Box::new(move |cc| {
+            // the phone layout is drawn a little smaller than one point per iOS point, closer to how
+            // native photo apps size their controls
+            cc.egui_ctx.set_zoom_factor(PHONE_ZOOM);
             let (session, problem) = host::open_session(in_memory);
             let mut app = LightcraftApp::new(session, host::services());
             if let Some(ui) = loaded.ui {
