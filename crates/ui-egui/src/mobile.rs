@@ -131,6 +131,10 @@ pub struct Shell {
     crop_mark: usize,
     /// Curve mode: 0 all channels together, then red, green, blue.
     curve_ch: usize,
+    /// Color grading: 0 shadows, 1 midtones, 2 highlights, 3 global.
+    grade_region: usize,
+    /// The white balance list under the Color sheet is open.
+    wb_open: bool,
     /// Crop mode: 0 Aspect, 1 Geometry.
     crop_tab: u8,
     /// Crop mode: the open list of ratios, social sizes or more actions.
@@ -190,6 +194,8 @@ impl Default for Shell {
             menu: false,
             crop_mark: 0,
             curve_ch: 0,
+            grade_region: 0,
+            wb_open: false,
             crop_tab: 0,
             crop_popup: None,
             crop_label: String::new(),
@@ -503,6 +509,9 @@ fn photo(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens, safe: Rect, she
     if shell.tool == Some(Tool::Curve) {
         return curve_mode(app, ui, t, safe, shell);
     }
+    if shell.tool == Some(Tool::Grading) {
+        return grading_mode(app, ui, t, safe, shell);
+    }
     let header = Rect::from_min_size(safe.min, vec2(safe.width(), HEADER_H));
     let main = Rect::from_min_max(pos2(safe.left(), safe.bottom() - STRIP_H), safe.max);
     // the second row (Auto and the edit groups) belongs to Edit; Presets and Crop replace it
@@ -769,8 +778,8 @@ fn edit_row(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens, strip: Rect,
                     assist(app, ui.ctx(), "Auto");
                 }
                 divider(ui);
-                for tool in Tool::ALL.into_iter().filter(|t| !matches!(t, Tool::Presets | Tool::Crop | Tool::Curve)) {
-                    if item(ui, tool.label(), shell.tool == Some(tool)) {
+                for tool in Tool::ALL.into_iter().filter(|t| !matches!(t, Tool::Presets | Tool::Crop | Tool::Curve | Tool::Mixer | Tool::Grading)) {
+                    if item(ui, tool.label(), shell.tool == Some(tool) || (tool == Tool::Color && shell.tool == Some(Tool::Mixer))) {
                         shell.tool = if shell.tool == Some(tool) { None } else { Some(tool) };
                     }
                 }
@@ -819,7 +828,19 @@ fn sheet_of(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens, tool: Tool, 
         .filter(|(_, s)| tool != Tool::Mixer || s.id.starts_with(&format!("mixer.{}.", BANDS[shell.mixer_band].0)))
         .collect();
     let title = Rect::from_min_size(ui.max_rect().min, vec2(ui.max_rect().width(), 40.0));
-    ui.painter().text(pos2(title.left() + 16.0, title.center().y), Align2::LEFT_CENTER, crate::i18n::tr(tool.label()), t.semibold(16.0), t.text);
+    if tool == Tool::Mixer {
+        // the Color mix is a step inside Color: back goes there
+        let c = pos2(title.left() + 22.0, title.center().y);
+        let chevron = Stroke::new(2.2, t.text);
+        ui.painter().line_segment([c + vec2(4.0, -7.0), c + vec2(-3.0, 0.0)], chevron);
+        ui.painter().line_segment([c + vec2(-3.0, 0.0), c + vec2(4.0, 7.0)], chevron);
+        ui.painter().text(pos2(title.left() + 38.0, title.center().y), Align2::LEFT_CENTER, crate::i18n::tr("Color mix"), t.semibold(16.0), t.text);
+        if tap(ui, "mixer-back", Rect::from_min_size(title.min, vec2(170.0, title.height()))).clicked() {
+            shell.tool = Some(Tool::Color);
+        }
+    } else {
+        ui.painter().text(pos2(title.left() + 16.0, title.center().y), Align2::LEFT_CENTER, crate::i18n::tr(tool.label()), t.semibold(16.0), t.text);
+    }
     if tool == Tool::Light {
         // the point curve has a screen of its own
         let pill = Rect::from_min_size(pos2(title.right() - 200.0, title.top() + 4.0), vec2(104.0, 32.0));
@@ -862,6 +883,11 @@ fn sheet_of(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens, tool: Tool, 
         ui.set_clip_rect(body.intersect(ui.clip_rect()));
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
+            if tool == Tool::Color {
+                let bw = d.treatment == lightcraft_develop::settings::Treatment::Bw;
+                let mode = serde_json::to_value(d.wb.mode).ok().and_then(|v| v.as_str().map(str::to_owned)).unwrap_or_default();
+                color_header(app, ui, t, bw, &mode, shell);
+            }
             let mut last = "";
             for (heading, spec) in specs {
                 if heading != last && !heading.is_empty() {
@@ -1800,6 +1826,241 @@ fn curve_graph(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens, r: Rect, 
     let _ = t;
 }
 
+// ---------------------------------------------------------------- color
+
+/// White balance choices: the engine's mode name and what the list says.
+const WB_MODES: [(&str, &str); 8] = [
+    ("asShot", "As shot"),
+    ("auto", "Auto"),
+    ("daylight", "Daylight"),
+    ("cloudy", "Cloudy"),
+    ("shade", "Shade"),
+    ("tungsten", "Tungsten"),
+    ("fluorescent", "Fluorescent"),
+    ("flash", "Flash"),
+];
+
+/// The top of the Color sheet: black and white, the two steps (Grading, Color mix) and white balance.
+fn color_header(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens, bw: bool, mode: &str, shell: &mut Shell) {
+    let w = ui.available_width();
+    let (row, _) = ui.allocate_exact_size(vec2(w, 64.0), Sense::hover());
+    let sw = Rect::from_center_size(pos2(row.left() + 16.0 + 26.0, row.center().y), vec2(52.0, 30.0));
+    ui.painter().rect_filled(sw, 15.0, if bw { t.accent } else { Color32::from_gray(70) });
+    ui.painter().circle_filled(pos2(if bw { sw.right() - 15.0 } else { sw.left() + 15.0 }, sw.center().y), 11.0, Color32::from_gray(235));
+    ui.painter().text(pos2(sw.right() + 14.0, row.center().y), Align2::LEFT_CENTER, crate::i18n::tr("B&W"), t.font(17.0), t.text);
+    if tap(ui, "bw", Rect::from_min_max(row.left_top(), pos2(sw.right() + 70.0, row.bottom()))).clicked() {
+        let _ = app.run("develop.treatment", json!({"bw": !bw}));
+    }
+    let bw_w = (w - 32.0 - 130.0 - 16.0) / 2.0;
+    for (i, (label, icon, to)) in [("Grading", "Grading", Tool::Grading), ("Color mix", "Mixer", Tool::Mixer)].into_iter().enumerate() {
+        let b = Rect::from_min_size(pos2(row.left() + 16.0 + 130.0 + i as f32 * (bw_w + 8.0), row.top() + 10.0), vec2(bw_w - 4.0, 44.0));
+        ui.painter().rect_stroke(b, 8.0, Stroke::new(1.0, t.text_dim.gamma_multiply(0.6)), egui::StrokeKind::Inside);
+        paint_icon(ui.painter(), icon, b.left_center() + vec2(20.0, 0.0), t.text);
+        ui.painter().text(b.center() + vec2(14.0, 0.0), Align2::CENTER_CENTER, crate::i18n::tr(label), t.font(14.0), t.text);
+        if tap(ui, label, b).clicked() {
+            shell.tool = Some(to);
+        }
+    }
+    let (wb, _) = ui.allocate_exact_size(vec2(w, 48.0), Sense::hover());
+    let name = WB_MODES.iter().find(|(m, _)| *m == mode).map_or("Custom", |(_, n)| n);
+    ui.painter().text(pos2(wb.left() + 16.0, wb.center().y), Align2::LEFT_CENTER, crate::i18n::tr("White balance"), t.font(15.0), t.text_dim);
+    ui.painter().text(pos2(wb.left() + 150.0, wb.center().y), Align2::LEFT_CENTER, crate::i18n::tr(name), t.font(17.0), t.text);
+    let c = pos2(wb.left() + 270.0, wb.center().y);
+    let dy = if shell.wb_open { -4.0 } else { 4.0 };
+    let chevron = Stroke::new(2.0, t.text);
+    ui.painter().line_segment([c + vec2(-6.0, -dy / 2.0), c + vec2(0.0, dy / 2.0 + dy / 4.0)], chevron);
+    ui.painter().line_segment([c + vec2(0.0, dy / 2.0 + dy / 4.0), c + vec2(6.0, -dy / 2.0)], chevron);
+    if tap(ui, "wb-open", wb).clicked() {
+        shell.wb_open = !shell.wb_open;
+    }
+    if shell.wb_open {
+        for (key, label) in WB_MODES {
+            let (r, _) = ui.allocate_exact_size(vec2(w, 44.0), Sense::hover());
+            let on = key == mode;
+            ui.painter().text(
+                pos2(r.left() + 32.0, r.center().y),
+                Align2::LEFT_CENTER,
+                crate::i18n::tr(label),
+                t.font(16.0),
+                if on { t.accent } else { t.text },
+            );
+            if tap(ui, &format!("wb-{key}"), r).clicked() {
+                let _ = app.run("develop.wb", json!({"mode": key}));
+                shell.wb_open = false;
+            }
+        }
+    }
+}
+
+/// Colour grading: the photo on top, below it a wheel for each tonal range (and one for the whole
+/// picture). Dragging the wheel sets hue by angle and saturation by distance from the middle.
+fn grading_mode(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens, safe: Rect, shell: &mut Shell) {
+    let top = Rect::from_min_size(safe.min, vec2(safe.width(), HEADER_H));
+    let canvas = Rect::from_min_max(pos2(safe.left(), top.bottom() + 8.0), pos2(safe.right(), safe.top() + safe.height() * 0.44));
+    let panel = Rect::from_min_max(pos2(safe.left(), canvas.bottom()), safe.max);
+    app.ui.filmstrip = false;
+    app.ui.fullscreen = false;
+    app.ui.right = RightPanel::None;
+    ui.painter().rect_filled(safe, 0.0, Color32::BLACK);
+    ui.scope_builder(UiBuilder::new().max_rect(canvas), |ui| {
+        ui.set_clip_rect(canvas.intersect(ui.clip_rect()));
+        crate::panels::detail::show(app, ui);
+    });
+    let back = Rect::from_min_size(top.min, vec2(52.0, HEADER_H));
+    let c = back.center();
+    let chevron = Stroke::new(2.5, t.text);
+    ui.painter().line_segment([c + vec2(4.0, -9.0), c + vec2(-5.0, 0.0)], chevron);
+    ui.painter().line_segment([c + vec2(-5.0, 0.0), c + vec2(4.0, 9.0)], chevron);
+    if tap(ui, "grading-back", back).clicked() {
+        shell.tool = Some(Tool::Color);
+    }
+    let undo = Rect::from_min_size(pos2(top.right() - 60.0, top.top()), vec2(60.0, HEADER_H));
+    paint_arrow(ui.painter(), undo.center(), t.text, false);
+    if tap(ui, "grading-undo", undo).clicked() {
+        let _ = app.run("edit.undo", json!({}));
+    }
+
+    ui.painter().rect_filled(panel, 0.0, bar(t));
+    let Some(id) = app.session.active() else { return };
+    let d = app.session.develop_of(id).unwrap_or_default();
+    let names = ["shadows", "midtones", "highlights", "global"];
+    let titles = ["Shadows", "Midtones", "Highlights", "Global"];
+    let region = shell.grade_region.min(3);
+    let name = names[region];
+    ui.scope_builder(UiBuilder::new().max_rect(panel), |ui| {
+        ui.set_clip_rect(panel.intersect(ui.clip_rect()));
+        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+            ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
+            let w = ui.available_width();
+            // name and Done
+            let (head, _) = ui.allocate_exact_size(vec2(w, 64.0), Sense::hover());
+            ui.painter().text(
+                pos2(head.left() + 20.0, head.center().y),
+                Align2::LEFT_CENTER,
+                crate::i18n::tr("Color grading"),
+                t.semibold(18.0),
+                t.text_dim,
+            );
+            let done = Rect::from_center_size(pos2(head.right() - 20.0 - 52.0, head.center().y), vec2(104.0, 44.0));
+            ui.painter().rect_stroke(done, 22.0, Stroke::new(2.0, t.text_dim), egui::StrokeKind::Inside);
+            ui.painter().text(done.center(), Align2::CENTER_CENTER, crate::i18n::tr("Done"), t.semibold(17.0), t.text_dim);
+            if tap(ui, "grading-done", done).clicked() {
+                shell.tool = Some(Tool::Color);
+            }
+            // the four ranges
+            let (dots, _) = ui.allocate_exact_size(vec2(w, 56.0), Sense::hover());
+            let fills = [Color32::from_gray(25), Color32::from_gray(100), Color32::from_gray(225), Color32::from_gray(150)];
+            for i in 0..4 {
+                let x = dots.center().x + (i as f32 - 1.5) * 64.0 + if i == 3 { 14.0 } else { 0.0 };
+                let c = pos2(x, dots.center().y);
+                if i == 3 {
+                    ui.painter().line_segment([pos2(x - 32.0, c.y - 10.0), pos2(x - 32.0, c.y + 10.0)], Stroke::new(1.5, t.text_dim));
+                }
+                if region == i {
+                    ui.painter().circle_filled(c, 15.0, Color32::WHITE);
+                    ui.painter().circle_filled(c, 9.0, fills[i]);
+                } else {
+                    ui.painter().circle_filled(c, 14.0, fills[i]);
+                    ui.painter().circle_stroke(c, 14.0, Stroke::new(2.0, Color32::from_gray(200)));
+                }
+                if tap(ui, &format!("range-{i}"), Rect::from_center_size(c, vec2(56.0, 52.0))).clicked() {
+                    shell.grade_region = i;
+                }
+            }
+            // the wheel
+            let size = (w - 100.0).clamp(160.0, 270.0);
+            let (area, _) = ui.allocate_exact_size(vec2(w, size + 24.0), Sense::hover());
+            let wheel = Rect::from_center_size(area.center(), vec2(size, size));
+            grading_wheel(app, ui, t, wheel, name, &d);
+            // the range's name
+            let (lab, _) = ui.allocate_exact_size(vec2(w, 48.0), Sense::hover());
+            ui.painter().text(pos2(lab.left() + 20.0, lab.center().y), Align2::LEFT_CENTER, crate::i18n::tr(titles[region]), t.font(17.0), t.text);
+            // sliders for this range
+            let ids: Vec<(String, &'static str)> = {
+                let mut v = vec![
+                    (format!("grading.{name}.hue"), "Hue"),
+                    (format!("grading.{name}.sat"), "Saturation"),
+                    (format!("grading.{name}.lum"), "Luminance"),
+                ];
+                if region < 3 {
+                    v.push(("grading.blending".to_string(), "Blending"));
+                    v.push(("grading.balance".to_string(), "Balance"));
+                }
+                v
+            };
+            for (cid, label) in ids {
+                let Some(spec) = controls::find(&cid) else { continue };
+                let spec = ControlSpec { label, ..*spec };
+                let v = controls::get(&d, spec.id).unwrap_or(spec.default);
+                let out = touch_slider(ui, t, &spec, v);
+                crate::panels::edit::apply_slider_out(app, &spec, out, |app, v| app.run("develop.set", json!({"control": spec.id, "value": v})));
+            }
+            ui.add_space(32.0);
+        });
+    });
+}
+
+/// One grading wheel: hue runs round the circle (red on the right), saturation out from the middle.
+fn grading_wheel(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens, r: Rect, name: &str, d: &lightcraft_develop::DevelopSettings) {
+    let hue_id = format!("grading.{name}.hue");
+    let sat_id = format!("grading.{name}.sat");
+    let hue = controls::get(d, &hue_id).unwrap_or(0.0);
+    let sat = controls::get(d, &sat_id).unwrap_or(0.0);
+    let center = r.center();
+    let radius = r.width() / 2.0;
+    let (rings, spokes) = (6usize, 72usize);
+    let mut mesh = egui::Mesh::default();
+    for ring in 0..=rings {
+        for a in 0..spokes {
+            let ang = a as f32 / spokes as f32 * std::f32::consts::TAU;
+            let f = ring as f32 / rings as f32;
+            let color = egui::ecolor::Hsva::new(a as f32 / spokes as f32, f * 0.9, 1.0, 1.0);
+            mesh.colored_vertex(center + vec2(ang.cos(), -ang.sin()) * radius * f, color.into());
+        }
+    }
+    for ring in 0..rings {
+        for a in 0..spokes {
+            let (a2, i0, i1) = (a, ring * spokes, (ring + 1) * spokes);
+            let b = (a2 + 1) % spokes;
+            mesh.add_triangle((i0 + a2) as u32, (i1 + a2) as u32, (i1 + b) as u32);
+            mesh.add_triangle((i0 + a2) as u32, (i1 + b) as u32, (i0 + b) as u32);
+        }
+    }
+    ui.painter().add(egui::Shape::mesh(mesh));
+    let ang = (hue as f32).to_radians();
+    let knob = center + vec2(ang.cos(), -ang.sin()) * radius * (sat as f32 / 100.0).clamp(0.0, 1.0);
+    ui.painter().circle_stroke(knob, 14.0, Stroke::new(2.5, Color32::from_gray(80)));
+    ui.painter().circle_stroke(knob, 14.0, Stroke::new(1.0, Color32::WHITE));
+    ui.painter().circle_filled(knob, 2.5, Color32::from_gray(80));
+    let _ = t;
+
+    let resp = ui.interact(r.expand(14.0), ui.scope_id().with(("wheel", name)), Sense::click_and_drag());
+    if resp.drag_started() {
+        let _ = app.run("develop.beginInteraction", json!({"label": "Color Grading"}));
+    }
+    if (resp.dragged() || resp.drag_started())
+        && let Some(q) = resp.interact_pointer_pos()
+    {
+        let v = q - center;
+        let mut deg = f64::from((-v.y).atan2(v.x).to_degrees());
+        if deg < 0.0 {
+            deg += 360.0;
+        }
+        let s = (f64::from(v.length() / radius) * 100.0).clamp(0.0, 100.0);
+        let _ = app.run("develop.set", json!({"control": hue_id, "value": deg.round()}));
+        let _ = app.run("develop.set", json!({"control": sat_id, "value": s.round()}));
+    }
+    if resp.drag_stopped() {
+        let _ = app.run("develop.endInteraction", json!({}));
+    }
+    if resp.double_clicked() {
+        let _ = app.run("develop.beginInteraction", json!({"label": "Color Grading"}));
+        let _ = app.run("develop.set", json!({"control": hue_id, "value": 0.0}));
+        let _ = app.run("develop.set", json!({"control": sat_id, "value": 0.0}));
+        let _ = app.run("develop.endInteraction", json!({}));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1807,7 +2068,7 @@ mod tests {
     /// A retune of the engine's control groups must not leave a tool with an empty sheet.
     #[test]
     fn every_tool_has_sliders() {
-        for tool in Tool::ALL.into_iter().filter(|t| !matches!(t, Tool::Presets | Tool::Crop | Tool::Curve)) {
+        for tool in Tool::ALL.into_iter().filter(|t| !matches!(t, Tool::Presets | Tool::Crop | Tool::Curve | Tool::Mixer | Tool::Grading)) {
             let n: usize = tool.sections().iter().map(|(section, _)| controls::in_section(*section).count()).sum();
             assert!(n > 0, "{} has no controls", tool.label());
         }
@@ -1982,5 +2243,32 @@ mod tests {
         let h = open_tool("Light");
         let text = h.painted_text();
         assert!(text.iter().any(|t| t == "Curve") && text.iter().any(|t| t == "Exposure"), "{text:?}");
+    }
+
+    #[test]
+    fn color_has_bw_grading_and_color_mix_above_the_sliders() {
+        let h = open_tool("Color");
+        let text = h.painted_text();
+        for want in ["B&W", "Grading", "Color mix", "White balance", "Temp", "Vibrance"] {
+            assert!(text.iter().any(|t| t == want), "{want}: {text:?}");
+        }
+    }
+
+    #[test]
+    fn grading_has_a_screen_with_a_wheel_per_range() {
+        let mut h = open_tool("Grading");
+        let text = h.painted_text();
+        assert!(text.iter().any(|t| t == "Color grading") && text.iter().any(|t| t == "Shadows") && text.iter().any(|t| t == "Done"), "{text:?}");
+        h.app.mobile.as_mut().expect("phone").grade_region = 3;
+        h.step();
+        let text = h.painted_text();
+        assert!(text.iter().any(|t| t == "Global") && !text.iter().any(|t| t == "Balance"), "{text:?}");
+    }
+
+    #[test]
+    fn color_mix_is_still_reachable_with_a_way_back() {
+        let h = open_tool("Mixer");
+        let text = h.painted_text();
+        assert!(text.iter().any(|t| t == "Color mix"), "{text:?}");
     }
 }
