@@ -908,7 +908,7 @@ mod tests {
         let mut h = open_tool("Presets");
         let first = h.app.session.presets.first().expect("built-in presets").clone();
         let text = h.painted_text();
-        assert!(text.iter().any(|t| *t == first.group), "the group tabs show {:?}: {text:?}", first.group);
+        assert!(text.contains(&first.group), "the group tabs show {:?}: {text:?}", first.group);
         let id = h.app.session.active().expect("active");
         let before = h.app.session.develop_of(id);
         h.app.run("preset.apply", serde_json::json!({"id": first.id})).expect("apply");
