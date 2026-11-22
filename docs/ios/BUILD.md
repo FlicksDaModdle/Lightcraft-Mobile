@@ -66,8 +66,13 @@ profile; the app then has more room.
 
 ## Getting photos in and out
 
-Until the Photos picker lands, the app uses two folders you can see in the Files app
-(On My iPhone > LightCraft):
+- **+** in the library opens the iPhone's Photos picker (several photos at once). Chosen photos are
+  copied into the app's **Import** folder and added to the library. If the picker cannot open, the
+  app falls back to adding whatever is already in that folder.
+- **Export** on the photo screen writes `<name>-edit.jpg` into the **Exports** folder.
 
-- **Import**: copy photos here, then tap **+** in the library to add them.
-- **Exports**: the **Export** button on the photo screen writes `<name>-edit.jpg` here.
+Both folders show in the Files app (On My iPhone > LightCraft).
+
+The picker lives in `crates/iospicker`, which is allowed `unsafe` for its Objective-C calls (like
+`crates/sysmem`). That departs from the AGENTS.md note on where `unsafe` may live; it is registered in
+`xtask/src/roots.rs` and `xtask/src/layers.rs`.

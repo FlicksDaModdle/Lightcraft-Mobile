@@ -4208,11 +4208,21 @@ dependencies = [
  "egui",
  "lightcraft-codecs",
  "lightcraft-engine",
+ "lightcraft-iospicker",
  "lightcraft-raster",
  "lightcraft-ui-egui",
  "log",
  "objc2-foundation 0.3.2",
  "serde_json",
+]
+
+[[package]]
+name = "lightcraft-iospicker"
+version = "0.21.1"
+dependencies = [
+ "block2 0.6.2",
+ "objc2 0.6.5",
+ "objc2-foundation 0.3.2",
 ]
 
 [[package]]

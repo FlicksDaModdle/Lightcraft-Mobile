@@ -105,6 +105,9 @@ fn main() -> eframe::Result {
                 let (import, export) = (docs.join("Import"), docs.join("Exports"));
                 let _ = std::fs::create_dir_all(&import);
                 let _ = std::fs::create_dir_all(&export);
+                let dest = import.clone();
+                shell.photo_picker =
+                    Some(lightcraft_ui_egui::mobile::PhotoPicker(Box::new(move |done| lightcraft_iospicker::pick_photos(dest.clone(), done))));
                 shell.import_dir = Some(import);
                 shell.export_dir = Some(export);
             }

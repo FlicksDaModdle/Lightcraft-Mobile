@@ -19,6 +19,7 @@ heif = ["lightcraft-codecs/heif"]
 lightcraft-engine = { workspace = true }
 lightcraft-ui-egui = { workspace = true }
 lightcraft-codecs = { workspace = true }
+lightcraft-iospicker = { workspace = true }
 lightcraft-raster = { workspace = true }
 # wgpu draws through Metal on iOS. No `glow`: iOS has no GL context for it to use.
 eframe = { workspace = true, features = ["default_fonts", "wgpu", "accesskit"] }

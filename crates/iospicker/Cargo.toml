@@ -1,0 +1,23 @@
+[package]
+name = "lightcraft-iospicker"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "LightCraft iospicker (L0): the iPhone Photos picker (PHPicker) through the Objective-C runtime. Allowed `unsafe` for that FFI only (see docs/ios/PLAN.md)."
+
+# Like crates/sysmem: opts out of the workspace lints only so `unsafe_code` can be allowed in the
+# one module that talks to Objective-C. The API is safe.
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+cognitive_complexity = "deny"
+too_many_arguments = "deny"
+wildcard_imports = "deny"
+dbg_macro = "warn"
+todo = "warn"
+
+[target.'cfg(target_os = "ios")'.dependencies]
+objc2 = { workspace = true }
+block2 = "0.6"
+objc2-foundation = { workspace = true, features = ["NSError", "NSObject", "NSString", "NSURL", "block2"] }

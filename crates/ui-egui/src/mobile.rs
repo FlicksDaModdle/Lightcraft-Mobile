@@ -99,6 +99,20 @@ pub struct Shell {
     press: Option<(egui::Pos2, f64)>,
     /// Name of the last preset group opened.
     preset_group: Option<String>,
+    /// The phone's Photos picker, when the host has one.
+    pub photo_picker: Option<PhotoPicker>,
+    /// Photos the picker has copied in, waiting to be added to the library.
+    picked: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+/// Shows the Photos picker; its argument is told the copied files' paths when the user is done.
+/// Returns false when it could not be shown.
+pub struct PhotoPicker(pub Box<dyn FnMut(Box<dyn FnOnce(Vec<String>) + Send>) -> bool>);
+
+impl std::fmt::Debug for PhotoPicker {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("PhotoPicker")
+    }
 }
 
 /// What input the shell has seen, for the status line.
@@ -125,6 +139,8 @@ impl Default for Shell {
             export_dir: None,
             press: None,
             preset_group: None,
+            photo_picker: None,
+            picked: Default::default(),
         }
     }
 }
@@ -158,6 +174,14 @@ pub(crate) fn show(app: &mut LightcraftApp, ui: &mut egui::Ui) {
     let full = ui.max_rect();
     ui.painter().rect_filled(full, 0.0, t.chrome);
     // a notice or prompt would block all input behind a dialog sized for a desktop: say it in a toast
+    // photos the picker has copied in since the last frame
+    let picked = shell.picked.lock().map(|mut q| std::mem::take(&mut *q)).unwrap_or_default();
+    if !picked.is_empty() {
+        match crate::import::start_paths(app, picked) {
+            Ok(_) => app.toast(&ctx, crate::i18n::tr("Adding photos")),
+            Err(e) => app.toast(&ctx, e),
+        }
+    }
     for notice in std::mem::take(&mut app.notices) {
         log::warn!("notice: {notice}");
         app.toast(&ctx, notice);
@@ -328,7 +352,20 @@ fn library(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens, safe: Rect, s
 /// Add photos: from the phone's picker when the host has one, otherwise from the Import folder
 /// (shown in the Files app), which is how photos get in until the Photos picker exists
 /// (docs/ios/PLAN.md, phase 1).
-fn add_photos(app: &mut LightcraftApp, ctx: &egui::Context, shell: &Shell) {
+fn add_photos(app: &mut LightcraftApp, ctx: &egui::Context, shell: &mut Shell) {
+    if let Some(picker) = shell.photo_picker.as_mut() {
+        let (inbox, ctx2) = (shell.picked.clone(), ctx.clone());
+        let shown = (picker.0)(Box::new(move |paths| {
+            if let Ok(mut q) = inbox.lock() {
+                q.extend(paths);
+            }
+            ctx2.request_repaint();
+        }));
+        if !shown {
+            app.toast(ctx, crate::i18n::tr("The photo picker could not be opened"));
+        }
+        return;
+    }
     let mut picked = app.services.pick_files.as_mut().map(|pick| pick()).unwrap_or_default();
     if picked.is_empty()
         && let Some(dir) = &shell.import_dir
@@ -923,5 +960,37 @@ mod tests {
         h.step();
         let text = h.painted_text();
         assert!(text.iter().any(|t| t == "Pick") && text.iter().any(|t| t == "Export"), "{text:?}");
+    }
+
+    /// Tapping + adds what is in the Import folder to the library.
+    #[test]
+    fn plus_imports_the_import_folder() {
+        let dir = std::env::temp_dir().join(format!("lc-mobile-import-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("dir");
+        let data: Vec<[u8; 4]> = (0..24 * 16).map(|i| [(i % 24 * 9) as u8, (i / 24 * 13) as u8, 7, 255]).collect();
+        let img = lightcraft_raster::Rgba8 { width: 24, height: 16, data };
+        let bytes =
+            lightcraft_codecs::encode_png(&lightcraft_codecs::EncodeImage::rgba8(&img), &lightcraft_codecs::EncodeMeta::default()).expect("png");
+        std::fs::write(dir.join("a.png"), bytes).expect("write");
+        let mut app = LightcraftApp::new(lightcraft_engine::Session::new().with_fs(), crate::Services::default());
+        let mut shell = Shell::preview();
+        shell.import_dir = Some(dir.clone());
+        app.mobile = Some(shell);
+        app.ui.seen_version = Some(env!("CARGO_PKG_VERSION").to_string());
+        let mut h = crate::headless::Headless::new(app, [393.0, 852.0], 1.0);
+        h.step();
+        let r = h.request("ui.click", serde_json::json!({"x": 357.0, "y": 73.0}), std::time::Duration::from_secs(5));
+        assert_eq!(r["ok"], true, "{r}");
+        for _ in 0..200 {
+            h.step();
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            if !h.app.session.visible_shared().1.is_empty() {
+                break;
+            }
+        }
+        let n = h.app.session.visible_shared().1.len();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(n, 1, "the photo in the Import folder is in the library; toasts: {:?}", h.painted_text());
     }
 }
