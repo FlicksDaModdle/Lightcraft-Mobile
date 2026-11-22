@@ -93,7 +93,7 @@ impl Tool {
             Tool::Light => &[(Section::Light, "")],
             Tool::Color => &[(Section::Color, "")],
             Tool::Mixer => &[(Section::Mixer, "")],
-            Tool::Curve => &[(Section::Curve, "")],
+            Tool::Curve => &[],
             Tool::Grading => &[(Section::Grading, "")],
             Tool::Effects => &[(Section::Effects, ""), (Section::Vignette, "Vignette"), (Section::Grain, "Grain")],
             Tool::Detail => &[(Section::Detail, "")],
@@ -129,6 +129,8 @@ pub struct Shell {
     menu: bool,
     /// Crop mode: how many undo steps there were on entering (Cancel goes back to it).
     crop_mark: usize,
+    /// Curve mode: 0 all channels together, then red, green, blue.
+    curve_ch: usize,
     /// Crop mode: 0 Aspect, 1 Geometry.
     crop_tab: u8,
     /// Crop mode: the open list of ratios, social sizes or more actions.
@@ -187,6 +189,7 @@ impl Default for Shell {
             preset_group: None,
             menu: false,
             crop_mark: 0,
+            curve_ch: 0,
             crop_tab: 0,
             crop_popup: None,
             crop_label: String::new(),
@@ -497,6 +500,9 @@ fn photo(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens, safe: Rect, she
     if shell.tool == Some(Tool::Crop) {
         return crop_mode(app, ui, t, safe, shell);
     }
+    if shell.tool == Some(Tool::Curve) {
+        return curve_mode(app, ui, t, safe, shell);
+    }
     let header = Rect::from_min_size(safe.min, vec2(safe.width(), HEADER_H));
     let main = Rect::from_min_max(pos2(safe.left(), safe.bottom() - STRIP_H), safe.max);
     // the second row (Auto and the edit groups) belongs to Edit; Presets and Crop replace it
@@ -763,7 +769,7 @@ fn edit_row(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens, strip: Rect,
                     assist(app, ui.ctx(), "Auto");
                 }
                 divider(ui);
-                for tool in Tool::ALL.into_iter().filter(|t| !matches!(t, Tool::Presets | Tool::Crop)) {
+                for tool in Tool::ALL.into_iter().filter(|t| !matches!(t, Tool::Presets | Tool::Crop | Tool::Curve)) {
                     if item(ui, tool.label(), shell.tool == Some(tool)) {
                         shell.tool = if shell.tool == Some(tool) { None } else { Some(tool) };
                     }
@@ -814,6 +820,16 @@ fn sheet_of(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens, tool: Tool, 
         .collect();
     let title = Rect::from_min_size(ui.max_rect().min, vec2(ui.max_rect().width(), 40.0));
     ui.painter().text(pos2(title.left() + 16.0, title.center().y), Align2::LEFT_CENTER, crate::i18n::tr(tool.label()), t.semibold(16.0), t.text);
+    if tool == Tool::Light {
+        // the point curve has a screen of its own
+        let pill = Rect::from_min_size(pos2(title.right() - 200.0, title.top() + 4.0), vec2(104.0, 32.0));
+        ui.painter().rect_stroke(pill, 8.0, Stroke::new(1.0, t.text_dim.gamma_multiply(0.6)), egui::StrokeKind::Inside);
+        paint_icon(ui.painter(), "Curve", pill.left_center() + vec2(18.0, 0.0), t.text);
+        ui.painter().text(pill.center() + vec2(12.0, 0.0), Align2::CENTER_CENTER, crate::i18n::tr("Curve"), t.font(15.0), t.text);
+        if tap(ui, "open-curve", pill).clicked() {
+            shell.tool = Some(Tool::Curve);
+        }
+    }
     let changed = specs.iter().any(|(_, s)| controls::get(&d, s.id).is_some_and(|v| (v - s.default).abs() > 1e-9));
     let reset = Rect::from_min_size(pos2(title.right() - 80.0, title.top()), vec2(80.0, 40.0));
     ui.painter().text(reset.center(), Align2::CENTER_CENTER, crate::i18n::tr("Reset"), t.font(15.0), if changed { t.accent } else { t.text_dim });
@@ -1592,6 +1608,198 @@ fn crop_popup(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens, popup: Cro
     }
 }
 
+// ---------------------------------------------------------------- curve mode
+
+/// The point-curve editor: the photo, a graph to drag points on, and a bar with the channels.
+/// Every change is a `develop.curve`; a drag is one undo step.
+fn curve_mode(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens, safe: Rect, shell: &mut Shell) {
+    let top = Rect::from_min_size(safe.min, vec2(safe.width(), HEADER_H));
+    let hist = Rect::from_min_size(pos2(safe.left(), top.bottom()), vec2(safe.width(), HIST_H));
+    let panel = Rect::from_min_max(pos2(safe.left(), safe.bottom() - 150.0), safe.max);
+    let canvas = Rect::from_min_max(pos2(safe.left(), hist.bottom()), pos2(safe.right(), panel.top()));
+    let side = (safe.width() - 48.0).min(canvas.height() - 8.0).max(120.0);
+    let graph = Rect::from_min_size(pos2(safe.left() + 24.0, canvas.bottom() - side - 4.0), vec2(side, side));
+
+    app.ui.filmstrip = false;
+    app.ui.fullscreen = false;
+    app.ui.right = RightPanel::None;
+    ui.painter().rect_filled(safe, 0.0, Color32::BLACK);
+    histogram(app, ui, t, hist);
+    ui.scope_builder(UiBuilder::new().max_rect(canvas), |ui| {
+        ui.set_clip_rect(canvas.intersect(ui.clip_rect()));
+        crate::panels::detail::show(app, ui);
+    });
+
+    // top: back to the Light sheet, Undo
+    let back = Rect::from_min_size(top.min, vec2(52.0, HEADER_H));
+    let c = back.center();
+    let chevron = Stroke::new(2.5, t.text);
+    ui.painter().line_segment([c + vec2(4.0, -9.0), c + vec2(-5.0, 0.0)], chevron);
+    ui.painter().line_segment([c + vec2(-5.0, 0.0), c + vec2(4.0, 9.0)], chevron);
+    if tap(ui, "curve-back", back).clicked() {
+        shell.tool = Some(Tool::Light);
+    }
+    let undo = Rect::from_min_size(pos2(top.right() - 60.0, top.top()), vec2(60.0, HEADER_H));
+    paint_arrow(ui.painter(), undo.center(), t.text, false);
+    if tap(ui, "curve-undo", undo).clicked() {
+        let _ = app.run("edit.undo", json!({}));
+    }
+
+    curve_graph(app, ui, t, graph, shell.curve_ch);
+
+    // the bar: name and Done, then the channels and Reset
+    ui.painter().rect_filled(panel, 0.0, bar(t));
+    ui.painter().text(pos2(panel.left() + 24.0, panel.top() + 38.0), Align2::LEFT_CENTER, crate::i18n::tr("Curve"), t.semibold(20.0), t.text_dim);
+    let done = Rect::from_min_size(pos2(panel.right() - 24.0 - 110.0, panel.top() + 14.0), vec2(110.0, 48.0));
+    ui.painter().rect_stroke(done, 24.0, Stroke::new(2.0, t.text_dim), egui::StrokeKind::Inside);
+    ui.painter().text(done.center(), Align2::CENTER_CENTER, crate::i18n::tr("Done"), t.semibold(18.0), t.text_dim);
+    if tap(ui, "curve-done", done).clicked() {
+        shell.tool = Some(Tool::Light);
+    }
+    let colors = [Color32::from_gray(235), Color32::from_rgb(221, 51, 51), Color32::from_rgb(51, 170, 51), Color32::from_rgb(51, 119, 238)];
+    for (i, color) in colors.into_iter().enumerate() {
+        let c = pos2(panel.left() + 24.0 + 30.0 + i as f32 * 106.0, panel.top() + 104.0);
+        if shell.curve_ch == i {
+            ui.painter().circle_filled(c, 30.0, color);
+            ui.painter().circle_filled(c, 6.0, Color32::BLACK.gamma_multiply(0.7));
+        } else {
+            ui.painter().circle_stroke(c, 29.0, Stroke::new(3.5, color));
+        }
+        if tap(ui, &format!("curve-ch-{i}"), Rect::from_center_size(c, vec2(80.0, 64.0))).clicked() {
+            shell.curve_ch = i;
+        }
+    }
+    let reset = Rect::from_center_size(pos2(panel.right() - 24.0 - 30.0, panel.top() + 104.0), vec2(80.0, 64.0));
+    paint_icon(ui.painter(), "Curve", reset.center(), t.text);
+    if tap(ui, "curve-reset", reset).clicked() {
+        let _ = app.run("curve.reset", json!({"channel": "point"}));
+    }
+}
+
+/// The graph: the curve for one channel and its points. Drag a point; tap empty space to add one;
+/// double-tap a point to remove it (the two ends stay).
+fn curve_graph(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens, r: Rect, ch: usize) {
+    use lightcraft_geom::Point;
+    let Some(id) = app.session.active() else { return };
+    let Some(d) = app.session.develop_of(id) else { return };
+    let (name, color) = [
+        ("master", Color32::from_gray(235)),
+        ("red", Color32::from_rgb(221, 51, 51)),
+        ("green", Color32::from_rgb(51, 170, 51)),
+        ("blue", Color32::from_rgb(51, 119, 238)),
+    ][ch.min(3)];
+    let mut pts: Vec<Point> = match name {
+        "red" => &d.curve.red,
+        "green" => &d.curve.green,
+        "blue" => &d.curve.blue,
+        _ => &d.curve.master,
+    }
+    .iter()
+    .copied()
+    .filter(|q| q.x.is_finite() && q.y.is_finite())
+    .collect();
+    pts.sort_by(|a, b| a.x.total_cmp(&b.x));
+    if pts.len() < 2 {
+        pts = vec![Point::new(0.0, 0.0), Point::new(1.0, 1.0)];
+    }
+    let to_screen = |x: f64, y: f64| pos2(r.left() + x as f32 * r.width(), r.bottom() - y as f32 * r.height());
+    let from_screen =
+        |q: egui::Pos2| (f64::from(((q.x - r.left()) / r.width()).clamp(0.0, 1.0)), f64::from(((r.bottom() - q.y) / r.height()).clamp(0.0, 1.0)));
+
+    let resp = ui.interact(r, ui.scope_id().with(("curve-graph", name)), Sense::click_and_drag());
+    let drag_id = ui.scope_id().with("curve-dragging");
+    let mut dragging: Option<usize> = ui.data(|dd| dd.get_temp::<Option<usize>>(drag_id)).flatten();
+    // a finger is wide: take the nearest point within this reach
+    let nearest = |q: egui::Pos2| {
+        pts.iter().enumerate().map(|(i, p)| (i, to_screen(p.x, p.y).distance(q))).min_by(|a, b| a.1.total_cmp(&b.1)).filter(|(_, dist)| *dist < 26.0)
+    };
+
+    let mut new_pts: Option<Vec<Point>> = None;
+    if resp.double_clicked()
+        && let Some(q) = resp.interact_pointer_pos()
+        && let Some((i, _)) = nearest(q)
+        && i != 0
+        && i != pts.len() - 1
+    {
+        let mut v = pts.clone();
+        v.remove(i);
+        new_pts = Some(v);
+    } else if resp.drag_started()
+        && let Some(q) = ui.input(|i| i.pointer.press_origin()).or(resp.interact_pointer_pos())
+    {
+        let _ = app.run("develop.beginInteraction", json!({"label": "Tone Curve"}));
+        match nearest(q) {
+            Some((i, _)) => dragging = Some(i),
+            None => {
+                let (x, y) = from_screen(q);
+                let mut v = pts.clone();
+                let i = v.iter().position(|p| p.x > x).unwrap_or(v.len());
+                v.insert(i, Point::new(x, y));
+                dragging = Some(i);
+                new_pts = Some(v);
+            }
+        }
+    } else if resp.dragged()
+        && let (Some(i), Some(q)) = (dragging, resp.interact_pointer_pos())
+        && i < pts.len()
+    {
+        let (mut x, y) = from_screen(q);
+        let lo = if i == 0 { 0.0 } else { pts[i - 1].x + 0.01 };
+        let hi = if i + 1 >= pts.len() { 1.0 } else { pts[i + 1].x - 0.01 };
+        x = if i == 0 {
+            x.min(hi)
+        } else if i + 1 == pts.len() {
+            x.max(lo)
+        } else if lo <= hi {
+            x.clamp(lo, hi)
+        } else {
+            (pts[i - 1].x + pts[i + 1].x) / 2.0
+        };
+        let mut v = pts.clone();
+        v[i] = Point::new(x, y);
+        new_pts = Some(v);
+    } else if resp.clicked()
+        && let Some(q) = resp.interact_pointer_pos()
+        && nearest(q).is_none()
+    {
+        let (x, y) = from_screen(q);
+        let mut v = pts.clone();
+        let i = v.iter().position(|p| p.x > x).unwrap_or(v.len());
+        v.insert(i, Point::new(x, y));
+        new_pts = Some(v);
+    }
+    if let Some(v) = &new_pts {
+        let arr: Vec<[f64; 2]> = v.iter().map(|p| [p.x, p.y]).collect();
+        let _ = app.run("develop.curve", json!({"channel": name, "points": arr}));
+        pts = v.clone();
+    }
+    if dragging.is_some() && (resp.drag_stopped() || !ui.input(|i| i.pointer.primary_down())) {
+        let _ = app.run("develop.endInteraction", json!({}));
+        dragging = None;
+    }
+    ui.data_mut(|dd| dd.insert_temp(drag_id, dragging));
+
+    let p = ui.painter();
+    p.rect_filled(r, 0.0, Color32::from_black_alpha(70));
+    for i in 1..4 {
+        let f = i as f32 / 4.0;
+        let grid = Stroke::new(1.0, Color32::from_white_alpha(45));
+        p.line_segment([pos2(r.left() + r.width() * f, r.top()), pos2(r.left() + r.width() * f, r.bottom())], grid);
+        p.line_segment([pos2(r.left(), r.top() + r.height() * f), pos2(r.right(), r.top() + r.height() * f)], grid);
+    }
+    p.rect_stroke(r, 0.0, Stroke::new(1.0, Color32::from_white_alpha(70)), egui::StrokeKind::Inside);
+    p.line_segment([r.left_bottom(), r.right_top()], Stroke::new(1.0, Color32::from_white_alpha(60)));
+    let curve = lightcraft_color::spline::MonotoneCurve::new(&pts.iter().map(|q| (q.x, q.y)).collect::<Vec<_>>());
+    let line: Vec<egui::Pos2> = (0..=96).map(|i| to_screen(f64::from(i) / 96.0, curve.eval(f64::from(i) / 96.0).clamp(0.0, 1.0))).collect();
+    p.add(egui::Shape::line(line, Stroke::new(2.5, color)));
+    for (i, q) in pts.iter().enumerate() {
+        let c = to_screen(q.x, q.y);
+        p.circle_filled(c, if dragging == Some(i) { 11.0 } else { 9.0 }, Color32::from_gray(205));
+        p.circle_stroke(c, if dragging == Some(i) { 11.0 } else { 9.0 }, Stroke::new(1.0, Color32::from_gray(90)));
+    }
+    let _ = t;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1599,7 +1807,7 @@ mod tests {
     /// A retune of the engine's control groups must not leave a tool with an empty sheet.
     #[test]
     fn every_tool_has_sliders() {
-        for tool in Tool::ALL.into_iter().filter(|t| !matches!(t, Tool::Presets | Tool::Crop)) {
+        for tool in Tool::ALL.into_iter().filter(|t| !matches!(t, Tool::Presets | Tool::Crop | Tool::Curve)) {
             let n: usize = tool.sections().iter().map(|(section, _)| controls::in_section(*section).count()).sum();
             assert!(n > 0, "{} has no controls", tool.label());
         }
@@ -1759,5 +1967,20 @@ mod tests {
         let text = h.painted_text();
         assert!(text.iter().any(|t| t == "Enhance") && text.iter().any(|t| t == "Fix angle") && text.iter().any(|t| t == "Subject"), "{text:?}");
         assert!(!text.iter().any(|t| t == "Exposure"), "no sheet over the photo: {text:?}");
+    }
+
+    #[test]
+    fn the_curve_has_a_screen_of_its_own_with_done() {
+        let h = open_tool("Curve");
+        let text = h.painted_text();
+        assert!(text.iter().any(|t| t == "Curve") && text.iter().any(|t| t == "Done"), "{text:?}");
+        assert!(!text.iter().any(|t| t == "Exposure"), "{text:?}");
+    }
+
+    #[test]
+    fn light_offers_the_curve_screen() {
+        let h = open_tool("Light");
+        let text = h.painted_text();
+        assert!(text.iter().any(|t| t == "Curve") && text.iter().any(|t| t == "Exposure"), "{text:?}");
     }
 }
