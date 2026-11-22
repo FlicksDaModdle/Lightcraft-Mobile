@@ -20,7 +20,7 @@ use crate::widgets::SliderOut;
 /// Header bar of both screens (below the status bar).
 const HEADER_H: f32 = 52.0;
 /// The tool strip along the bottom of the photo screen.
-const STRIP_H: f32 = 60.0;
+const STRIP_H: f32 = 64.0;
 /// The rating row above the tool strip.
 const RATE_H: f32 = 48.0;
 /// The slider rows' height: a finger-sized track under its label.
@@ -41,6 +41,9 @@ enum Tool {
     Crop,
     Light,
     Color,
+    Mixer,
+    Curve,
+    Grading,
     Effects,
     Detail,
     Optics,
@@ -48,7 +51,19 @@ enum Tool {
 }
 
 impl Tool {
-    const ALL: [Tool; 8] = [Tool::Presets, Tool::Crop, Tool::Light, Tool::Color, Tool::Effects, Tool::Detail, Tool::Optics, Tool::Geometry];
+    const ALL: [Tool; 11] = [
+        Tool::Presets,
+        Tool::Crop,
+        Tool::Light,
+        Tool::Color,
+        Tool::Mixer,
+        Tool::Curve,
+        Tool::Grading,
+        Tool::Effects,
+        Tool::Detail,
+        Tool::Optics,
+        Tool::Geometry,
+    ];
 
     fn label(self) -> &'static str {
         match self {
@@ -56,6 +71,9 @@ impl Tool {
             Tool::Crop => "Crop",
             Tool::Light => "Light",
             Tool::Color => "Color",
+            Tool::Mixer => "Mixer",
+            Tool::Curve => "Curve",
+            Tool::Grading => "Grading",
             Tool::Effects => "Effects",
             Tool::Detail => "Detail",
             Tool::Optics => "Optics",
@@ -69,6 +87,9 @@ impl Tool {
             Tool::Presets | Tool::Crop => &[],
             Tool::Light => &[(Section::Light, "")],
             Tool::Color => &[(Section::Color, "")],
+            Tool::Mixer => &[(Section::Mixer, "")],
+            Tool::Curve => &[(Section::Curve, "")],
+            Tool::Grading => &[(Section::Grading, "")],
             Tool::Effects => &[(Section::Effects, ""), (Section::Vignette, "Vignette"), (Section::Grain, "Grain")],
             Tool::Detail => &[(Section::Detail, "")],
             Tool::Optics => &[(Section::Optics, "")],
@@ -99,6 +120,8 @@ pub struct Shell {
     press: Option<(egui::Pos2, f64)>,
     /// Name of the last preset group opened.
     preset_group: Option<String>,
+    /// The colour band the Mixer sheet shows.
+    mixer_band: usize,
     /// The phone's Photos picker, when the host has one.
     pub photo_picker: Option<PhotoPicker>,
     /// Photos the picker has copied in, waiting to be added to the library.
@@ -139,6 +162,7 @@ impl Default for Shell {
             export_dir: None,
             press: None,
             preset_group: None,
+            mixer_band: 0,
             photo_picker: None,
             picked: Default::default(),
         }
@@ -172,7 +196,7 @@ pub(crate) fn show(app: &mut LightcraftApp, ui: &mut egui::Ui) {
     let ctx = ui.ctx().clone();
     let t = Tokens::get(&ctx);
     let full = ui.max_rect();
-    ui.painter().rect_filled(full, 0.0, t.chrome);
+    ui.painter().rect_filled(full, 0.0, bar(&t));
     // a notice or prompt would block all input behind a dialog sized for a desktop: say it in a toast
     // photos the picker has copied in since the last frame
     let picked = shell.picked.lock().map(|mut q| std::mem::take(&mut *q)).unwrap_or_default();
@@ -230,7 +254,7 @@ fn lens_sheet(
         ui.painter().rect_filled(full, 0.0, Color32::from_black_alpha(150));
         let card_h = 230.0 + bottom_inset;
         let card = Rect::from_min_max(pos2(full.left(), full.bottom() - card_h), full.max);
-        ui.painter().rect_filled(card, egui::CornerRadius { nw: 16, ne: 16, sw: 0, se: 0 }, t.chrome);
+        ui.painter().rect_filled(card, egui::CornerRadius { nw: 16, ne: 16, sw: 0, se: 0 }, panel(t));
         let x = card.left() + 20.0;
         ui.painter().text(pos2(x, card.top() + 30.0), Align2::LEFT_CENTER, crate::i18n::tr("Lens corrections"), t.semibold(18.0), t.text);
         let body = crate::i18n::tr("Download the lens profile database to correct distortion and vignetting for your lenses?");
@@ -464,23 +488,29 @@ fn photo(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens, safe: Rect, she
     gestures(app, ui.ctx(), canvas, shell);
     header_bar(app, ui, t, header, shell);
     if rate_h > 0.0 {
-        ui.painter().rect_filled(rate, 0.0, t.chrome);
+        ui.painter().rect_filled(rate, 0.0, bar(t));
         rating_row(app, ui, t, rate, shell);
     }
     if let Some(tool) = shell.tool {
-        ui.painter().rect_filled(sheet, 0.0, t.chrome);
+        ui.painter().rect_filled(sheet, egui::CornerRadius { nw: 14, ne: 14, sw: 0, se: 0 }, panel(t));
+        ui.painter().rect_filled(
+            Rect::from_center_size(pos2(sheet.center().x, sheet.top() + 7.0), vec2(36.0, 4.0)),
+            2.0,
+            t.text_dim.gamma_multiply(0.5),
+        );
         ui.painter().line_segment([sheet.left_top(), sheet.right_top()], Stroke::new(1.0, t.text_dim.gamma_multiply(0.35)));
         ui.scope_builder(UiBuilder::new().max_rect(sheet), |ui| {
             ui.set_clip_rect(sheet.intersect(ui.clip_rect()));
             sheet_of(app, ui, t, tool, shell);
         });
     }
-    ui.painter().rect_filled(strip, 0.0, t.chrome);
+    ui.painter().rect_filled(strip, 0.0, bar(t));
+    ui.painter().line_segment([strip.left_top(), strip.right_top()], Stroke::new(1.0, t.text_dim.gamma_multiply(0.2)));
     ui.scope_builder(UiBuilder::new().max_rect(strip), |ui| tool_strip(app, ui, t, strip, shell));
 }
 
 fn header_bar(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens, header: Rect, shell: &mut Shell) {
-    ui.painter().rect_filled(header, 0.0, t.chrome);
+    ui.painter().rect_filled(header, 0.0, bar(t));
     let back = Rect::from_min_size(header.min, vec2(52.0, HEADER_H));
     let c = back.center();
     let chevron = Stroke::new(2.5, t.text);
@@ -496,8 +526,8 @@ fn header_bar(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens, header: Re
         Rect::from_min_size(pos2(header.right() - 124.0, header.top()), vec2(62.0, HEADER_H)),
         Rect::from_min_size(pos2(header.right() - 62.0, header.top()), vec2(62.0, HEADER_H)),
     );
-    for (name, label, rect, cmd) in [("undo", "Undo", undo, "edit.undo"), ("redo", "Redo", redo, "edit.redo")] {
-        ui.painter().text(rect.center(), Align2::CENTER_CENTER, crate::i18n::tr(label), t.font(15.0), t.accent);
+    for (name, rect, cmd, flip) in [("undo", undo, "edit.undo", false), ("redo", redo, "edit.redo", true)] {
+        paint_arrow(ui.painter(), rect.center(), t.text, flip);
         if tap(ui, name, rect).clicked() {
             let _ = app.run(cmd, json!({}));
         }
@@ -519,16 +549,10 @@ fn tool_strip(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens, strip: Rec
                 let item = |ui: &mut egui::Ui, label: &str, on: bool| -> bool {
                     let text = crate::i18n::tr(label);
                     let color = if on { t.accent } else { t.text };
-                    let galley = ui.painter().layout_no_wrap(text.to_string(), t.font(15.0), color);
-                    let (r, resp) = ui.allocate_exact_size(vec2((galley.size().x + 32.0).max(72.0), STRIP_H), Sense::click());
-                    let galley_w = galley.size().x;
-                    ui.painter().galley(r.center() - galley.size() / 2.0 - vec2(0.0, 3.0), galley, color);
-                    if on {
-                        ui.painter().line_segment(
-                            [r.center() + vec2(-galley_w / 2.0, 16.0), r.center() + vec2(galley_w / 2.0, 16.0)],
-                            Stroke::new(3.0, t.accent),
-                        );
-                    }
+                    let galley = ui.painter().layout_no_wrap(text.to_string(), t.font(11.0), color);
+                    let (r, resp) = ui.allocate_exact_size(vec2((galley.size().x + 24.0).max(64.0), STRIP_H), Sense::click());
+                    paint_icon(ui.painter(), label, r.center_top() + vec2(0.0, 22.0), color);
+                    ui.painter().galley(pos2(r.center().x - galley.size().x / 2.0, r.bottom() - galley.size().y - 8.0), galley, color);
                     resp.clicked()
                 };
                 if item(ui, "Auto", false) {
@@ -545,7 +569,29 @@ fn tool_strip(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens, strip: Rec
     );
 }
 
+/// The bars (header, rating row, tool strip): darker than the desktop chrome, so the photo leads.
+fn bar(t: &Tokens) -> Color32 {
+    t.chrome.lerp_to_gamma(Color32::BLACK, 0.55)
+}
+
+/// The sheet that slides over the photo: a step lighter than the bars.
+fn panel(t: &Tokens) -> Color32 {
+    t.chrome.lerp_to_gamma(Color32::BLACK, 0.3)
+}
+
 // ---------------------------------------------------------------- sliders
+
+/// The Mixer's colour bands: the engine's control-id name and a swatch.
+const BANDS: [(&str, Color32); 8] = [
+    ("red", Color32::from_rgb(230, 70, 70)),
+    ("orange", Color32::from_rgb(240, 150, 50)),
+    ("yellow", Color32::from_rgb(235, 215, 60)),
+    ("green", Color32::from_rgb(80, 200, 90)),
+    ("aqua", Color32::from_rgb(70, 205, 205)),
+    ("blue", Color32::from_rgb(70, 120, 235)),
+    ("purple", Color32::from_rgb(150, 90, 220)),
+    ("magenta", Color32::from_rgb(225, 80, 180)),
+];
 
 /// The sliders of one tool, in a scrolling sheet.
 fn sheet_of(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens, tool: Tool, shell: &mut Shell) {
@@ -560,6 +606,7 @@ fn sheet_of(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens, tool: Tool, 
         .sections()
         .iter()
         .flat_map(|(section, heading)| controls::in_section(*section).filter(|s| controls::get(&d, s.id).is_some()).map(move |s| (*heading, s)))
+        .filter(|(_, s)| tool != Tool::Mixer || s.id.starts_with(&format!("mixer.{}.", BANDS[shell.mixer_band].0)))
         .collect();
     let title = Rect::from_min_size(ui.max_rect().min, vec2(ui.max_rect().width(), 40.0));
     ui.painter().text(pos2(title.left() + 16.0, title.center().y), Align2::LEFT_CENTER, crate::i18n::tr(tool.label()), t.semibold(16.0), t.text);
@@ -573,7 +620,24 @@ fn sheet_of(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens, tool: Tool, 
         }
         let _ = app.run("develop.endInteraction", json!({}));
     }
-    let body = Rect::from_min_max(pos2(title.left(), title.bottom()), ui.max_rect().max);
+    let mut top = title.bottom();
+    if tool == Tool::Mixer {
+        let row = Rect::from_min_size(pos2(title.left(), top), vec2(title.width(), 48.0));
+        let w = row.width() / BANDS.len() as f32;
+        for (i, (name, color)) in BANDS.iter().enumerate() {
+            let cell = Rect::from_min_size(pos2(row.left() + i as f32 * w, row.top()), vec2(w, 48.0));
+            let on = shell.mixer_band == i;
+            ui.painter().circle_filled(cell.center(), 11.0, *color);
+            if on {
+                ui.painter().circle_stroke(cell.center(), 15.0, Stroke::new(2.5, t.text));
+            }
+            if tap(ui, &format!("band-{name}"), cell).clicked() {
+                shell.mixer_band = i;
+            }
+        }
+        top = row.bottom();
+    }
+    let body = Rect::from_min_max(pos2(title.left(), top), ui.max_rect().max);
     ui.scope_builder(UiBuilder::new().max_rect(body), |ui| {
         ui.set_clip_rect(body.intersect(ui.clip_rect()));
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
@@ -649,9 +713,14 @@ fn touch_slider(ui: &mut egui::Ui, t: &Tokens, spec: &ControlSpec, value: f64) -
     );
     let y = track.center().y;
     let x_of = |v: f64| track.left() + spec.position(v) as f32 * track.width();
-    p.line_segment([pos2(track.left(), y), pos2(track.right(), y)], Stroke::new(3.0, t.text_dim.gamma_multiply(0.45)));
+    p.line_segment([pos2(track.left(), y), pos2(track.right(), y)], Stroke::new(2.5, t.text_dim.gamma_multiply(0.4)));
+    // a notch where the value starts, so a moved slider shows how far it has gone
+    p.line_segment([pos2(x_of(spec.default), y - 5.0), pos2(x_of(spec.default), y + 5.0)], Stroke::new(1.5, t.text_dim.gamma_multiply(0.7)));
     p.line_segment([pos2(x_of(spec.default), y), pos2(x_of(shown), y)], Stroke::new(3.0, t.accent));
-    p.circle_filled(pos2(x_of(shown), y), if resp.dragged() { 13.0 } else { 11.0 }, if changed { t.accent } else { Color32::from_gray(230) });
+    let thumb = pos2(x_of(shown), y);
+    let r = if resp.dragged() { 13.0 } else { 11.0 };
+    p.circle_filled(thumb + vec2(0.0, 1.5), r + 1.0, Color32::from_black_alpha(90));
+    p.circle_filled(thumb, r, if changed { t.accent } else { Color32::from_gray(235) });
     out
 }
 
@@ -706,7 +775,7 @@ fn rating_row(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens, row: Rect,
     let Some(id) = app.session.active() else { return };
     let Some((rating, flag)) = app.session.catalog.photo(id).map(|p| (p.rating, p.flag)) else { return };
     for n in 1..=5u8 {
-        let r = Rect::from_center_size(pos2(row.left() + 28.0 + f32::from(n - 1) * 42.0, row.center().y), vec2(42.0, RATE_H));
+        let r = Rect::from_center_size(pos2(row.left() + 24.0 + f32::from(n - 1) * 38.0, row.center().y), vec2(38.0, RATE_H));
         let on = n <= rating;
         paint_star(ui.painter(), r.center(), 10.0, if on { t.accent } else { t.text_dim.gamma_multiply(0.6) }, on);
         if tap(ui, &format!("star{n}"), r).clicked() {
@@ -716,9 +785,9 @@ fn rating_row(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens, row: Rect,
     }
     let flags =
         [("pick", crate::i18n::tr("Pick"), lightcraft_catalog::Flag::Pick), ("reject", crate::i18n::tr("Reject"), lightcraft_catalog::Flag::Reject)];
-    let mut x = row.left() + 28.0 + 5.0 * 42.0 + 8.0;
+    let mut x = row.left() + 5.0 * 38.0 + 8.0;
     for (name, label, which) in flags {
-        let w = 64.0;
+        let w = 56.0;
         let r = Rect::from_min_size(pos2(x, row.top()), vec2(w, RATE_H));
         let on = flag == which;
         let color = if on { t.accent } else { t.text_dim };
@@ -728,7 +797,7 @@ fn rating_row(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens, row: Rect,
         }
         x += w;
     }
-    let ex = Rect::from_min_max(pos2(row.right() - 72.0, row.top()), row.right_bottom());
+    let ex = Rect::from_min_max(pos2(row.right() - 64.0, row.top()), row.right_bottom());
     ui.painter().text(ex.center(), Align2::CENTER_CENTER, crate::i18n::tr("Export"), t.semibold(15.0), t.accent);
     if tap(ui, "export", ex).clicked() {
         export_jpeg(app, ui.ctx(), shell);
@@ -855,6 +924,103 @@ fn crop_sheet(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens) {
             crate::panels::edit::apply_slider_out(app, spec, out, |app, v| app.run("develop.set", json!({"control": spec.id, "value": v})));
         }
     });
+}
+
+/// A small line icon for a tool, about 22 pt across, drawn from shapes so it follows the theme.
+fn paint_icon(p: &egui::Painter, name: &str, c: egui::Pos2, color: Color32) {
+    let st = Stroke::new(1.8, color);
+    let line = |a: egui::Vec2, b: egui::Vec2| p.line_segment([c + a, c + b], st);
+    match name {
+        "Auto" => {
+            // a four-point sparkle
+            for (a, b) in [
+                (vec2(0.0, -11.0), vec2(0.0, 11.0)),
+                (vec2(-11.0, 0.0), vec2(11.0, 0.0)),
+                (vec2(-5.0, -5.0), vec2(5.0, 5.0)),
+                (vec2(-5.0, 5.0), vec2(5.0, -5.0)),
+            ] {
+                line(a, b);
+            }
+        }
+        "Presets" => {
+            for (y, knob) in [(-7.0, -4.0), (0.0, 5.0), (7.0, -1.0)] {
+                line(vec2(-11.0, y), vec2(11.0, y));
+                p.circle_filled(c + vec2(knob, y), 3.0, color);
+            }
+        }
+        "Crop" => {
+            line(vec2(-6.0, -11.0), vec2(-6.0, 6.0));
+            line(vec2(-11.0, -6.0), vec2(6.0, -6.0));
+            line(vec2(6.0, -6.0), vec2(6.0, 11.0));
+            line(vec2(-6.0, 6.0), vec2(11.0, 6.0));
+        }
+        "Light" => {
+            p.circle_stroke(c, 5.0, st);
+            for i in 0..8 {
+                let a = i as f32 * std::f32::consts::FRAC_PI_4;
+                let d = vec2(a.cos(), a.sin());
+                p.line_segment([c + d * 8.0, c + d * 11.0], st);
+            }
+        }
+        "Color" => {
+            p.circle_stroke(c + vec2(0.0, 1.0), 9.0, st);
+            p.circle_filled(c + vec2(0.0, 1.0), 4.5, color);
+        }
+        "Mixer" => {
+            for (i, x) in [-8.0, 0.0, 8.0].into_iter().enumerate() {
+                p.circle_stroke(c + vec2(x, if i == 1 { 4.0 } else { -3.0 }), 4.5, st);
+            }
+        }
+        "Curve" => {
+            let pts: Vec<egui::Pos2> = (0..=16)
+                .map(|i| {
+                    let x = i as f32 / 16.0;
+                    c + vec2(-11.0 + 22.0 * x, 11.0 - 22.0 * (x * x * (3.0 - 2.0 * x)))
+                })
+                .collect();
+            p.add(egui::Shape::line(pts, st));
+        }
+        "Grading" => {
+            for (x, y) in [(-4.0, 4.0), (4.0, 4.0), (0.0, -4.0)] {
+                p.circle_stroke(c + vec2(x, y), 6.5, st);
+            }
+        }
+        "Effects" => {
+            p.add(egui::Shape::convex_polygon(
+                vec![c + vec2(0.0, -11.0), c + vec2(8.0, 0.0), c + vec2(0.0, 11.0), c + vec2(-8.0, 0.0)],
+                Color32::TRANSPARENT,
+                st,
+            ));
+        }
+        "Detail" => {
+            p.add(egui::Shape::convex_polygon(vec![c + vec2(0.0, -10.0), c + vec2(11.0, 9.0), c + vec2(-11.0, 9.0)], Color32::TRANSPARENT, st));
+        }
+        "Optics" => {
+            p.circle_stroke(c, 10.0, st);
+            p.circle_stroke(c, 4.0, st);
+        }
+        "Geometry" => {
+            p.rect_stroke(Rect::from_center_size(c, vec2(20.0, 20.0)), 2.0, st, egui::StrokeKind::Middle);
+            line(vec2(-10.0, 10.0), vec2(10.0, -10.0));
+        }
+        _ => {}
+    }
+}
+
+/// A curved arrow, pointing back (undo) or forward (redo).
+fn paint_arrow(p: &egui::Painter, c: egui::Pos2, color: Color32, flip: bool) {
+    let sx = if flip { -1.0 } else { 1.0 };
+    let st = Stroke::new(2.0, color);
+    let pts: Vec<egui::Pos2> = (0..=12)
+        .map(|i| {
+            let a = -std::f32::consts::FRAC_PI_2 + i as f32 * std::f32::consts::PI * 0.9 / 12.0;
+            c + vec2(sx * (a.cos() * 8.0 - 1.0), a.sin() * 6.0 + 1.0)
+        })
+        .collect();
+    p.add(egui::Shape::line(pts, st));
+    let tip = c + vec2(sx * -9.0, -5.0);
+    p.line_segment([tip, tip + vec2(sx * 6.0, -1.0)], st);
+    p.line_segment([tip, tip + vec2(sx * 1.0, 6.0)], st);
 }
 
 #[cfg(test)]
@@ -992,5 +1158,17 @@ mod tests {
         let n = h.app.session.visible_shared().1.len();
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(n, 1, "the photo in the Import folder is in the library; toasts: {:?}", h.painted_text());
+    }
+
+    #[test]
+    fn the_mixer_sheet_shows_one_band_at_a_time() {
+        let mut h = open_tool("Mixer");
+        let text = h.painted_text();
+        assert!(text.iter().any(|t| t.contains("Red Hue")) && !text.iter().any(|t| t.contains("Blue Hue")), "{text:?}");
+        h.app.mobile.as_mut().expect("phone").mixer_band = 5;
+        h.step();
+        h.step();
+        let text = h.painted_text();
+        assert!(text.iter().any(|t| t.contains("Blue Hue")) && !text.iter().any(|t| t.contains("Red Hue")), "{text:?}");
     }
 }
