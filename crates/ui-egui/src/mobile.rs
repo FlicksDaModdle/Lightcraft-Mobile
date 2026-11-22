@@ -86,6 +86,19 @@ impl Tool {
         }
     }
 
+    /// The tabs across the top of the tool's panel: a name and the control ids (by prefix) it shows.
+    fn subtabs(self) -> &'static [(&'static str, &'static [&'static str])] {
+        match self {
+            Tool::Effects => &[("Effects", &["effects."]), ("Vignette", &["vignette."]), ("Grain", &["grain."])],
+            Tool::Detail => &[
+                ("Sharpening", &["detail.sharpen"]),
+                ("Noise", &["detail.nrLuminance", "detail.nrDetail", "detail.nrContrast"]),
+                ("Color noise", &["detail.nrColor"]),
+            ],
+            _ => &[],
+        }
+    }
+
     /// The engine's control groups the tool shows, with the heading each gets when there are several.
     fn sections(self) -> &'static [(Section, &'static str)] {
         match self {
@@ -95,7 +108,7 @@ impl Tool {
             Tool::Mixer => &[(Section::Mixer, "")],
             Tool::Curve => &[],
             Tool::Grading => &[(Section::Grading, "")],
-            Tool::Effects => &[(Section::Effects, ""), (Section::Vignette, "Vignette"), (Section::Grain, "Grain")],
+            Tool::Effects => &[(Section::Effects, ""), (Section::Vignette, ""), (Section::Grain, "")],
             Tool::Detail => &[(Section::Detail, "")],
             Tool::Optics => &[(Section::Optics, "")],
             Tool::Geometry => &[(Section::Geometry, "")],
@@ -131,6 +144,8 @@ pub struct Shell {
     crop_mark: usize,
     /// Curve mode: 0 all channels together, then red, green, blue.
     curve_ch: usize,
+    /// The tab open in a tool with tabs (Effects, Detail), and the tool it belongs to.
+    subtab: (Option<Tool>, usize),
     /// A tap on the photo hid the bars and panels, so the photo fills the screen.
     hidden: bool,
     /// When a short tap on the photo ended; it hides the bars unless a second tap (a zoom) follows.
@@ -200,6 +215,7 @@ impl Default for Shell {
             curve_ch: 0,
             grade_region: 0,
             hidden: false,
+            subtab: (None, 0),
             tap_at: None,
             wb_open: false,
             crop_tab: 0,
@@ -844,6 +860,15 @@ fn sheet_of(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens, tool: Tool, 
         .flat_map(|(section, heading)| controls::in_section(*section).filter(|s| controls::get(&d, s.id).is_some()).map(move |s| (*heading, s)))
         .filter(|(_, s)| tool != Tool::Mixer || s.id.starts_with(&format!("mixer.{}.", BANDS[shell.mixer_band].0)))
         .collect();
+    let tabs = tool.subtabs();
+    if shell.subtab.0 != Some(tool) {
+        shell.subtab = (Some(tool), 0);
+    }
+    let tab = shell.subtab.1.min(tabs.len().saturating_sub(1));
+    let specs: Vec<(&'static str, &'static ControlSpec)> = match tabs.get(tab) {
+        Some((_, prefixes)) => specs.into_iter().filter(|(_, s)| prefixes.iter().any(|p| s.id.starts_with(p))).collect(),
+        None => specs,
+    };
     let title = Rect::from_min_size(ui.max_rect().min, vec2(ui.max_rect().width(), 40.0));
     if tool == Tool::Mixer {
         // the Color mix is a step inside Color: back goes there
@@ -892,6 +917,30 @@ fn sheet_of(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens, tool: Tool, 
         let _ = app.run("develop.endInteraction", json!({}));
     }
     let mut top = title.bottom();
+    if !tabs.is_empty() {
+        // the tool's own tabs: names across, the open one bright and underlined
+        let row = Rect::from_min_size(pos2(title.left(), top - 4.0), vec2(title.width(), 40.0));
+        let galleys: Vec<_> =
+            tabs.iter().map(|(name, _)| ui.painter().layout_no_wrap(crate::i18n::tr(name).to_string(), t.font(15.0), t.text)).collect();
+        let gap = 28.0;
+        let total: f32 = galleys.iter().map(|g| g.size().x).sum::<f32>() + gap * (galleys.len() as f32 - 1.0);
+        let mut x = row.center().x - total / 2.0;
+        for (i, g) in galleys.into_iter().enumerate() {
+            let w = g.size().x;
+            let on = i == tab;
+            let color = if on { t.text } else { t.text_dim };
+            let cell = Rect::from_min_size(pos2(x, row.top()), vec2(w, row.height()));
+            ui.painter().galley(pos2(x, row.center().y - g.size().y / 2.0 - 2.0), g, color);
+            if on {
+                ui.painter().line_segment([pos2(x, row.bottom() - 4.0), pos2(x + w, row.bottom() - 4.0)], Stroke::new(2.0, t.text));
+            }
+            if tap(ui, &format!("subtab-{i}"), cell.expand2(vec2(gap / 2.0, 0.0))).clicked() {
+                shell.subtab.1 = i;
+            }
+            x += w + gap;
+        }
+        top = row.bottom() + 4.0;
+    }
     if tool == Tool::Mixer {
         let row = Rect::from_min_size(pos2(title.left(), top), vec2(title.width(), 48.0));
         let w = row.width() / BANDS.len() as f32;
@@ -931,6 +980,12 @@ fn sheet_of(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens, tool: Tool, 
                     );
                 }
                 last = heading;
+                // inside a tab the tab names the group, so the slider can say less
+                let label = match spec.id {
+                    "detail.nrLuminance" => "Luminance",
+                    _ => spec.label,
+                };
+                let spec = &ControlSpec { label, ..*spec };
                 let v = controls::get(&d, spec.id).unwrap_or(spec.default);
                 let out = touch_slider(ui, t, spec, v);
                 crate::panels::edit::apply_slider_out(app, spec, out, |app, v| app.run("develop.set", json!({"control": spec.id, "value": v})));
@@ -2403,5 +2458,25 @@ mod tests {
         h.app.mobile.as_mut().expect("phone").hidden = false;
         h.step();
         assert!(h.painted_text().iter().any(|t| t == "Light"));
+    }
+
+    #[test]
+    fn effects_and_detail_open_on_their_first_tab_and_tabs_switch_the_sliders() {
+        let mut h = open_tool("Effects");
+        let text = h.painted_text();
+        assert!(["Effects", "Vignette", "Grain", "Texture"].iter().all(|w| text.iter().any(|t| t == w)), "{text:?}");
+        assert!(!text.iter().any(|t| t == "Roughness"), "{text:?}");
+        h.app.mobile.as_mut().expect("phone").subtab.1 = 2;
+        h.step();
+        let text = h.painted_text();
+        assert!(text.iter().any(|t| t == "Roughness") && !text.iter().any(|t| t == "Texture"), "{text:?}");
+        h.app.mobile.as_mut().expect("phone").open_photo(Some("Detail"));
+        h.step();
+        h.step();
+        let text = h.painted_text();
+        assert!(
+            text.iter().any(|t| t == "Sharpening") && text.iter().any(|t| t == "Color noise") && !text.iter().any(|t| t == "Smoothness"),
+            "{text:?}"
+        );
     }
 }
