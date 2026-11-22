@@ -834,11 +834,17 @@ fn snapshot(args: &[String]) -> Result<(), String> {
     let mut output: Option<String> = None;
     let mut size = [1600.0f32, 1000.0];
     let mut scale = 1.0f32;
+    // the phone layout (docs/ios/PLAN.md): --phone, then --phone-photo [--phone-tool NAME] for the photo screen
+    let (mut phone, mut phone_photo, mut phone_tool): (bool, bool, Option<String>) = (false, false, None);
+    let (mut size_given, mut scale_given) = (false, false);
     let mut files = Vec::new();
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
             "--demo" => {}
+            "--phone" => phone = true,
+            "--phone-photo" => phone_photo = true,
+            "--phone-tool" => phone_tool = Some(take_value(args, &mut i, "--phone-tool")?.to_string()),
             "--library" => library = Some(take_value(args, &mut i, "--library")?.to_string()),
             "--script" => script = Some(take_value(args, &mut i, "--script")?.to_string()),
             "-o" | "--output" => output = Some(take_value(args, &mut i, "-o")?.to_string()),
@@ -846,8 +852,12 @@ fn snapshot(args: &[String]) -> Result<(), String> {
                 let v = take_value(args, &mut i, "--size")?;
                 let (w, h) = v.split_once(['x', 'X']).ok_or("--size expects WxH, e.g. 1600x1000")?;
                 size = [w.trim().parse().map_err(|_| "--size: bad width")?, h.trim().parse().map_err(|_| "--size: bad height")?];
+                size_given = true;
             }
-            "--scale" => scale = take_value(args, &mut i, "--scale")?.parse().map_err(|_| "--scale expects a number")?,
+            "--scale" => {
+                scale = take_value(args, &mut i, "--scale")?.parse().map_err(|_| "--scale expects a number")?;
+                scale_given = true;
+            }
             a if a.starts_with('-') => return Err(format!("unknown option `{a}`")),
             f => files.push(f.to_string()),
         }
@@ -855,6 +865,14 @@ fn snapshot(args: &[String]) -> Result<(), String> {
     }
     if script.is_none() && output.is_none() {
         return Err("snapshot: give -o OUT.png and/or --script FILE".into());
+    }
+    if phone {
+        if !size_given {
+            size = [393.0, 852.0];
+        }
+        if !scale_given {
+            scale = 2.0;
+        }
     }
     lightcraft_ui_egui::headless::viewport_pixels(size, scale).map_err(|e| format!("snapshot: bad --size/--scale: {e}"))?;
     let t0 = Instant::now();
@@ -909,6 +927,19 @@ fn snapshot(args: &[String]) -> Result<(), String> {
     app.ui.settings.gpu = false;
     // as the desktop app opens it: an empty library on the grid, where Import is offered
     lightcraft_ui_egui::panels::empty_library::open_on_empty_library(&mut app);
+    if phone {
+        let mut shell = lightcraft_ui_egui::mobile::Shell::preview();
+        if phone_photo {
+            let first = app.session.visible().first().copied();
+            if let Some(first) = first {
+                app.session.execute("library.select", &json!({"ids": [first.0], "mode": "replace"})).map_err(|e| e.to_string())?;
+                app.ui.view = lightcraft_ui_egui::state::ViewMode::Detail;
+                shell.open_photo(phone_tool.as_deref());
+            }
+        }
+        app.mobile = Some(shell);
+        app.ui.seen_version = Some(env!("CARGO_PKG_VERSION").to_string());
+    }
     let mut h = Headless::new(app, size, scale);
     let timeout = Duration::from_secs(60);
     let mut shots = 0usize;

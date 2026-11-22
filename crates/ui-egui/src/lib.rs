@@ -36,6 +36,7 @@ pub mod links;
 pub mod loupe_timing;
 pub mod menus;
 mod missing_sweep;
+pub mod mobile;
 pub mod panels;
 pub mod pick;
 pub mod recheck;
@@ -274,6 +275,8 @@ pub struct LightcraftApp {
     fonts_ready: bool,
     last_time: f64,
     /// Rect of the photo canvas and the displayed image (screen points) from the last frame.
+    /// The phone layout (a host that wants it sets this): see [`mobile`].
+    pub mobile: Option<mobile::Shell>,
     pub canvas_rect: Option<egui::Rect>,
     pub image_rect: Option<egui::Rect>,
     /// Scroll offsets (points) of the photo grid (vertical) and the filmstrip (horizontal) as

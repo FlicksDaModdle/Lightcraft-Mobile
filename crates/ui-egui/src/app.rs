@@ -34,6 +34,7 @@ impl LightcraftApp {
             perf: Perf::default(),
             caches: Caches::default(),
             integrated_titlebar: false,
+            mobile: None,
             window_movable: None,
             native_menu: false,
             native_shortcuts: Default::default(),

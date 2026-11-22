@@ -93,6 +93,12 @@ fn main() -> eframe::Result {
                 app.ui = ui;
             }
             lightcraft_ui_egui::i18n::set_language(app.ui.language);
+            // the phone layout; on a desktop its status bar and home indicator are simulated
+            let shell =
+                if cfg!(target_os = "ios") { lightcraft_ui_egui::mobile::Shell::default() } else { lightcraft_ui_egui::mobile::Shell::preview() };
+            app.mobile = Some(shell);
+            // the desktop's welcome dialog is wider than a phone; the phone layout has no use for it
+            app.ui.seen_version = Some(env!("CARGO_PKG_VERSION").to_string());
             app.notices.extend(loaded.warning);
             app.library_problem = problem;
             let prefs = store::PrefsWriter {
