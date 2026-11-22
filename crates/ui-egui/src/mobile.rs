@@ -880,7 +880,7 @@ fn sheet_of(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens, tool: Tool, 
         if tap(ui, "mixer-back", Rect::from_min_size(title.min, vec2(170.0, title.height()))).clicked() {
             shell.tool = Some(Tool::Color);
         }
-    } else {
+    } else if tool.subtabs().is_empty() {
         ui.painter().text(
             pos2(title.left() + 18.0, title.center().y + 2.0),
             Align2::LEFT_CENTER,
@@ -919,7 +919,7 @@ fn sheet_of(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens, tool: Tool, 
     let mut top = title.bottom();
     if !tabs.is_empty() {
         // the tool's own tabs: names across, the open one bright and underlined
-        let row = Rect::from_min_size(pos2(title.left(), top - 4.0), vec2(title.width(), 40.0));
+        let row = Rect::from_min_size(pos2(title.left(), title.top() + 2.0), vec2(title.width(), 40.0));
         let galleys: Vec<_> =
             tabs.iter().map(|(name, _)| ui.painter().layout_no_wrap(crate::i18n::tr(name).to_string(), t.font(15.0), t.text)).collect();
         let gap = 28.0;
@@ -939,7 +939,7 @@ fn sheet_of(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens, tool: Tool, 
             }
             x += w + gap;
         }
-        top = row.bottom() + 4.0;
+        top = row.bottom();
     }
     if tool == Tool::Mixer {
         let row = Rect::from_min_size(pos2(title.left(), top), vec2(title.width(), 48.0));
