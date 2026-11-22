@@ -1,5 +1,6 @@
 # Builds LightCraft for iPhone and iPad on a macOS runner and, when the signing secrets are set,
-# signs it into LightCraft.ipa (a build artifact) that you install on your own device.
+# signs it into LightCraft.ipa; without them it makes LightCraft-unsigned.ipa, which Sideloadly or
+# AltStore signs with your Apple ID when installing.
 # Setup and secrets: docs/ios/BUILD.md
 name: iOS
 
@@ -68,5 +69,5 @@ jobs:
           name: LightCraft-iOS
           path: |
             out/LightCraft.ipa
-            out/LightCraft-unsigned.zip
+            out/LightCraft-unsigned.ipa
           if-no-files-found: error

@@ -1,10 +1,22 @@
 # Building and installing on your iPhone
 
 The app is built by GitHub Actions on a macOS runner (`.github/workflows/ios.yml`). You don't need
-Xcode on your own machine to get an installable `.ipa`; you need an Apple Developer account for the
-certificate and provisioning profile.
+Xcode on your own machine: CI produces an `.ipa`, and either a signing tool or CI itself signs it.
 
-## One-time setup
+## Quick way: no secrets (Sideloadly or AltStore)
+
+Nothing to configure. Push to `main` or run the **iOS** workflow by hand (Actions → iOS → Run
+workflow), then download the `LightCraft-iOS` artifact and unzip it to get `LightCraft-unsigned.ipa`.
+Install it with [Sideloadly](https://sideloadly.io) or AltStore, which sign it with your Apple ID
+(free or paid) as they install. On the phone: Settings → General → VPN & Device Management → trust
+the developer, and turn on Developer Mode if asked (Settings → Privacy & Security).
+
+A free Apple ID's signature lasts 7 days (re-sign then; AltStore can do it automatically); a paid
+account's lasts a year. The first build takes a long time; later ones reuse the cache.
+
+## Signed in CI: with your certificate
+
+If you'd rather have CI produce a signed `LightCraft.ipa` that installs directly, set it up once:
 
 1. **Register your device** (Apple Developer → Certificates, Identifiers & Profiles → Devices) with
    its UDID.
@@ -26,12 +38,9 @@ certificate and provisioning profile.
 
 ## Building
 
-Push to `main` or run the **iOS** workflow by hand (Actions → iOS → Run workflow). The first build
-takes a long time (the whole engine compiles); later ones reuse the cache. The artifact
-`LightCraft-iOS` holds `LightCraft.ipa`. Without the secrets the workflow still compiles the app and
-uploads an unsigned zip, which can't be installed but proves the build.
+Same as above: the artifact `LightCraft-iOS` then holds a signed `LightCraft.ipa`.
 
-## Installing
+## Installing a signed build
 
 Any of these work with a development or ad hoc profile that lists your device:
 

@@ -8,7 +8,7 @@
 #   IOS_CERT_P12, IOS_CERT_PASSWORD   the signing certificate and its password (a .p12 export)
 #   IOS_PROVISION_PROFILE             the .mobileprovision for the app (development or ad hoc)
 #   IOS_BUNDLE_ID                     only for a wildcard profile (its App ID ends in *)
-# Without them the app is packaged unsigned (a compile check; it can't be installed).
+# Without them the app is packaged as LightCraft-unsigned.ipa, for a tool that signs at install time.
 set -euo pipefail
 
 BIN=${1:?usage: package.sh <binary> <output dir>}
@@ -21,7 +21,7 @@ BUILD=${GITHUB_RUN_NUMBER:-1}
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 
-rm -rf "$APP" "$OUT/Payload" "$OUT/LightCraft.ipa"
+rm -rf "$APP" "$OUT/Payload" "$OUT/LightCraft.ipa" "$OUT/LightCraft-unsigned.ipa"
 mkdir -p "$APP"
 cp "$BIN" "$APP/LightCraft"
 chmod +x "$APP/LightCraft"
@@ -73,13 +73,12 @@ if [ "$SIGN" = true ]; then
   codesign --verify --strict --verbose=2 "$APP"
 fi
 
-if [ "$SIGN" = true ]; then
-  mkdir -p "$OUT/Payload"
-  cp -R "$APP" "$OUT/Payload/"
-  (cd "$OUT" && zip -qry LightCraft.ipa Payload)
-  rm -rf "$OUT/Payload"
-  echo "wrote $OUT/LightCraft.ipa"
-else
-  (cd "$OUT" && zip -qry LightCraft-unsigned.zip LightCraft.app)
-  echo "wrote $OUT/LightCraft-unsigned.zip (unsigned)"
-fi
+# An .ipa is a zip of Payload/LightCraft.app. Unsigned, it is for a tool that signs it at install time
+# (Sideloadly, AltStore, ...); signed, it installs directly.
+IPA=LightCraft.ipa
+[ "$SIGN" = true ] || IPA=LightCraft-unsigned.ipa
+mkdir -p "$OUT/Payload"
+cp -R "$APP" "$OUT/Payload/"
+(cd "$OUT" && zip -qry "$IPA" Payload)
+rm -rf "$OUT/Payload"
+echo "wrote $OUT/$IPA"
