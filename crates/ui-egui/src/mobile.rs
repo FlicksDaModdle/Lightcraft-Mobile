@@ -75,21 +75,36 @@ impl Tool {
 pub struct Shell {
     screen: Screen,
     tool: Option<Tool>,
+    /// Show the status line (touch and modal state) and log state changes: for finding out why a
+    /// device does not respond.
+    pub debug: bool,
+    stats: Stats,
     /// Simulated safe-area insets (top, right, bottom, left) for a run on a desktop; `None` uses what
     /// the device reports.
     insets: Option<[f32; 4]>,
 }
 
+/// What input the shell has seen, for the status line.
+#[derive(Debug, Default)]
+struct Stats {
+    frames: u64,
+    touches: u64,
+    presses: u64,
+    taps: u64,
+    last: Option<(egui::Pos2, &'static str)>,
+    logged: String,
+}
+
 impl Default for Shell {
     fn default() -> Self {
-        Shell { screen: Screen::Library, tool: None, insets: None }
+        Shell { screen: Screen::Library, tool: None, debug: true, stats: Stats::default(), insets: None }
     }
 }
 
 impl Shell {
     /// For a desktop window or a headless screenshot: an iPhone's status bar and home indicator.
     pub fn preview() -> Self {
-        Shell { insets: Some([47.0, 0.0, 34.0, 0.0]), ..Shell::default() }
+        Shell { insets: Some([47.0, 0.0, 34.0, 0.0]), debug: false, ..Shell::default() }
     }
 
     /// Open the photo screen on the active photo (a script or a test).
@@ -114,6 +129,11 @@ pub(crate) fn show(app: &mut LightcraftApp, ui: &mut egui::Ui) {
     let t = Tokens::get(&ctx);
     let full = ui.max_rect();
     ui.painter().rect_filled(full, 0.0, t.chrome);
+    // a notice or prompt would block all input behind a dialog sized for a desktop: say it in a toast
+    for notice in std::mem::take(&mut app.notices) {
+        log::warn!("notice: {notice}");
+        app.toast(&ctx, notice);
+    }
     let [top, right, bottom, left] = insets(&ctx, &shell);
     let safe = Rect::from_min_max(full.min + vec2(left, top), full.max - vec2(right, bottom));
     if shell.screen == Screen::Photo && app.session.active().is_none() {
@@ -123,13 +143,75 @@ pub(crate) fn show(app: &mut LightcraftApp, ui: &mut egui::Ui) {
         Screen::Library => library(app, ui, &t, safe, &mut shell),
         Screen::Photo => photo(app, ui, &t, safe, &mut shell),
     }
+    if shell.debug {
+        status_line(app, &ctx, &t, full, &mut shell);
+    }
     app.mobile = Some(shell);
+}
+
+/// A line at the very top: frames drawn, touch events and presses seen, taps that hit a button, and
+/// what could be blocking input. It also logs when that state changes.
+fn status_line(app: &LightcraftApp, ctx: &egui::Context, t: &Tokens, full: Rect, shell: &mut Shell) {
+    let st = &mut shell.stats;
+    st.frames += 1;
+    ctx.input(|i| {
+        for e in &i.events {
+            match e {
+                egui::Event::Touch { phase, pos, .. } => {
+                    st.touches += 1;
+                    st.last = Some((
+                        *pos,
+                        match phase {
+                            egui::TouchPhase::Start => "start",
+                            egui::TouchPhase::Move => "move",
+                            egui::TouchPhase::End => "end",
+                            egui::TouchPhase::Cancel => "cancel",
+                        },
+                    ));
+                }
+                egui::Event::PointerButton { pressed: true, .. } => st.presses += 1,
+                _ => {}
+            }
+        }
+    });
+    let modal = (app.ui.dialog.is_some(), app.library_problem.is_some(), crate::panels::notices::blocks_input(app));
+    let last = st.last.map_or("-".to_string(), |(p, ph)| format!("{ph} {:.0},{:.0}", p.x, p.y));
+    let line = format!(
+        "f{} touch{} press{} tap{} last {} | dialog:{} libprob:{} blocked:{} | {}x{} ppp{:.1}",
+        st.frames,
+        st.touches,
+        st.presses,
+        st.taps,
+        last,
+        modal.0,
+        modal.1,
+        modal.2,
+        full.width() as i32,
+        full.height() as i32,
+        ctx.pixels_per_point()
+    );
+    let state = format!("dialog:{} libprob:{} blocked:{} first-touch:{}", modal.0, modal.1, modal.2, st.touches > 0);
+    if state != st.logged {
+        log::info!("ui state: {state}");
+        st.logged = state;
+    }
+    ctx.layer_painter(egui::LayerId::debug()).text(
+        full.left_top() + vec2(6.0, 3.0),
+        Align2::LEFT_TOP,
+        line,
+        egui::FontId::monospace(9.0),
+        t.text_dim,
+    );
 }
 
 /// A tappable rectangle that is not a widget of its own.
 fn tap(ui: &mut egui::Ui, name: &str, rect: Rect) -> egui::Response {
     let id = ui.scope_id().with(name);
-    ui.interact(rect, id, Sense::click())
+    let resp = ui.interact(rect, id, Sense::click());
+    if resp.clicked() {
+        log::info!("tap: {name}");
+    }
+    resp
 }
 
 // ---------------------------------------------------------------- library

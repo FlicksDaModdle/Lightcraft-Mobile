@@ -67,7 +67,10 @@ impl Drop for App {
 
 fn main() -> eframe::Result {
     logging::install();
-    lightcraft_engine::guard::install_hook(std::env::temp_dir().join("lightcraft-panics.log"));
+    lightcraft_engine::guard::install_hook(
+        logging::file_path("lightcraft-panics.log").unwrap_or_else(|| std::env::temp_dir().join("lightcraft-panics.log")),
+    );
+    log::info!("LightCraft {} starting", env!("CARGO_PKG_VERSION"));
     memory::configure();
 
     let in_memory = std::env::args().skip(1).any(|a| a == "--memory");
