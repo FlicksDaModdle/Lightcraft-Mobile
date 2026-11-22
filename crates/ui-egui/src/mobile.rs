@@ -1407,7 +1407,7 @@ mod tests {
 
     #[test]
     fn the_wand_shows_one_tap_actions_and_no_slider_sheet() {
-        let mut h = open_tool("Assist");
+        let h = open_tool("Assist");
         let text = h.painted_text();
         assert!(text.iter().any(|t| t == "Enhance") && text.iter().any(|t| t == "Fix angle") && text.iter().any(|t| t == "Subject"), "{text:?}");
         assert!(!text.iter().any(|t| t == "Exposure"), "no sheet over the photo: {text:?}");
