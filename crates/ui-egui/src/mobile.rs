@@ -589,12 +589,15 @@ mod tests {
         h.step();
         h.app.ui.dialog = Some(crate::state::Dialog::LensDatabase { dir: "/nonexistent".into(), mirrors: vec![] });
         h.step();
+        h.step();
         assert!(h.app.ui.dialog.is_none(), "the desktop dialog must not stay open behind the sheet");
-        assert!(h.painted_text().iter().any(|t| t.contains("Not Now")));
+        let text = h.painted_text();
+        assert!(text.iter().any(|t| t.contains("Not Now")), "{text:?}");
         // Not Now: left of the two buttons, 150 pt below the card's top (the card is 230 pt plus the inset)
         let y = 852.0 - (230.0 + 34.0) + 150.0 + 25.0;
         let r = h.request("ui.click", serde_json::json!({"x": 100.0, "y": y}), std::time::Duration::from_secs(5));
         assert_eq!(r["ok"], true, "{r}");
+        h.step();
         h.step();
         assert!(!h.painted_text().iter().any(|t| t.contains("Not Now")), "the sheet stays up after Not Now");
     }
