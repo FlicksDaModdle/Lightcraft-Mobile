@@ -23,6 +23,8 @@ const HEADER_H: f32 = 52.0;
 const STRIP_H: f32 = 64.0;
 /// The rating row above the tool strip.
 const RATE_H: f32 = 48.0;
+/// The histogram above the photo.
+const HIST_H: f32 = 104.0;
 /// The slider rows' height: a finger-sized track under its label.
 const ROW_H: f32 = 64.0;
 /// Gap between thumbnails.
@@ -37,6 +39,8 @@ enum Screen {
 /// A group of sliders in the bottom sheet.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Tool {
+    /// The wand's row of one-tap actions (no sheet).
+    Assist,
     Presets,
     Crop,
     Light,
@@ -67,6 +71,7 @@ impl Tool {
 
     fn label(self) -> &'static str {
         match self {
+            Tool::Assist => "Assist",
             Tool::Presets => "Presets",
             Tool::Crop => "Crop",
             Tool::Light => "Light",
@@ -84,7 +89,7 @@ impl Tool {
     /// The engine's control groups the tool shows, with the heading each gets when there are several.
     fn sections(self) -> &'static [(Section, &'static str)] {
         match self {
-            Tool::Presets | Tool::Crop => &[],
+            Tool::Assist | Tool::Presets | Tool::Crop => &[],
             Tool::Light => &[(Section::Light, "")],
             Tool::Color => &[(Section::Color, "")],
             Tool::Mixer => &[(Section::Mixer, "")],
@@ -120,6 +125,8 @@ pub struct Shell {
     press: Option<(egui::Pos2, f64)>,
     /// Name of the last preset group opened.
     preset_group: Option<String>,
+    /// The "more" card (rating, flags, reset) is open.
+    menu: bool,
     /// The colour band the Mixer sheet shows.
     mixer_band: usize,
     /// The phone's Photos picker, when the host has one.
@@ -162,6 +169,7 @@ impl Default for Shell {
             export_dir: None,
             press: None,
             preset_group: None,
+            menu: false,
             mixer_band: 0,
             photo_picker: None,
             picked: Default::default(),
@@ -178,7 +186,7 @@ impl Shell {
     /// Open the photo screen on the active photo (a script or a test).
     pub fn open_photo(&mut self, tool: Option<&str>) {
         self.screen = Screen::Photo;
-        self.tool = tool.and_then(|name| Tool::ALL.into_iter().find(|t| t.label().eq_ignore_ascii_case(name)));
+        self.tool = tool.and_then(|name| Tool::ALL.into_iter().chain([Tool::Assist]).find(|t| t.label().eq_ignore_ascii_case(name)));
     }
 }
 
@@ -467,19 +475,25 @@ fn paint_tile(app: &LightcraftApp, ui: &egui::Ui, t: &Tokens, id: lightcraft_cat
 
 fn photo(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens, safe: Rect, shell: &mut Shell) {
     let header = Rect::from_min_size(safe.min, vec2(safe.width(), HEADER_H));
-    let strip = Rect::from_min_max(pos2(safe.left(), safe.bottom() - STRIP_H), safe.max);
-    let sheet_h = if shell.tool.is_some() { (safe.height() * 0.4).min(360.0) } else { 0.0 };
-    let sheet = Rect::from_min_max(pos2(safe.left(), strip.top() - sheet_h), pos2(safe.right(), strip.top()));
-    // the rating row sits above the strip while no sheet is open
-    let rate_h = if shell.tool.is_none() { RATE_H } else { 0.0 };
-    let rate = Rect::from_min_max(pos2(safe.left(), sheet.top() - rate_h), pos2(safe.right(), sheet.top()));
-    let canvas = Rect::from_min_max(pos2(safe.left(), header.bottom()), pos2(safe.right(), rate.top()));
+    let main = Rect::from_min_max(pos2(safe.left(), safe.bottom() - STRIP_H), safe.max);
+    // the second row (Auto and the edit groups) belongs to Edit; Presets and Crop replace it
+    let editing = !matches!(shell.tool, Some(Tool::Presets | Tool::Crop));
+    let sub = Rect::from_min_max(pos2(safe.left(), main.top() - if editing { STRIP_H } else { 0.0 }), pos2(safe.right(), main.top()));
+    let sheet_h = if shell.tool.is_some_and(|t| t != Tool::Assist) { (safe.height() * 0.4).min(360.0) } else { 0.0 };
+    let sheet = Rect::from_min_max(pos2(safe.left(), sub.top() - sheet_h), pos2(safe.right(), sub.top()));
+    // the histogram shows while no sheet covers the photo
+    let hist_h = if sheet_h == 0.0 { HIST_H } else { 0.0 };
+    let hist = Rect::from_min_size(pos2(safe.left(), header.bottom()), vec2(safe.width(), hist_h));
+    let canvas = Rect::from_min_max(pos2(safe.left(), hist.bottom()), pos2(safe.right(), sheet.top()));
 
     // the loupe draws the photo; the desktop's own side panels, filmstrip and full screen stay off
     app.ui.filmstrip = false;
     app.ui.fullscreen = false;
     app.ui.right = RightPanel::None;
-    ui.painter().rect_filled(canvas, 0.0, Color32::BLACK);
+    ui.painter().rect_filled(Rect::from_min_max(hist.min, canvas.max), 0.0, Color32::BLACK);
+    if hist_h > 0.0 {
+        histogram(app, ui, t, hist);
+    }
     ui.scope_builder(UiBuilder::new().max_rect(canvas), |ui| {
         ui.set_clip_rect(canvas.intersect(ui.clip_rect()));
         crate::panels::detail::show(app, ui);
@@ -487,11 +501,7 @@ fn photo(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens, safe: Rect, she
 
     gestures(app, ui.ctx(), canvas, shell);
     header_bar(app, ui, t, header, shell);
-    if rate_h > 0.0 {
-        ui.painter().rect_filled(rate, 0.0, bar(t));
-        rating_row(app, ui, t, rate, shell);
-    }
-    if let Some(tool) = shell.tool {
+    if let Some(tool) = shell.tool.filter(|t| *t != Tool::Assist) {
         ui.painter().rect_filled(sheet, egui::CornerRadius { nw: 14, ne: 14, sw: 0, se: 0 }, panel(t));
         ui.painter().rect_filled(
             Rect::from_center_size(pos2(sheet.center().x, sheet.top() + 7.0), vec2(36.0, 4.0)),
@@ -504,9 +514,68 @@ fn photo(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens, safe: Rect, she
             sheet_of(app, ui, t, tool, shell);
         });
     }
-    ui.painter().rect_filled(strip, 0.0, bar(t));
-    ui.painter().line_segment([strip.left_top(), strip.right_top()], Stroke::new(1.0, t.text_dim.gamma_multiply(0.2)));
-    ui.scope_builder(UiBuilder::new().max_rect(strip), |ui| tool_strip(app, ui, t, strip, shell));
+    if editing {
+        ui.painter().rect_filled(sub, 0.0, bar(t));
+        ui.painter().line_segment([sub.left_top(), sub.right_top()], Stroke::new(1.0, t.text_dim.gamma_multiply(0.2)));
+        ui.scope_builder(UiBuilder::new().max_rect(sub), |ui| edit_row(app, ui, t, sub, shell));
+    }
+    ui.painter().rect_filled(main, 0.0, bar(t));
+    ui.painter().line_segment([main.left_top(), main.right_top()], Stroke::new(1.0, t.text_dim.gamma_multiply(0.2)));
+    main_row(app, ui, t, main, shell);
+    if shell.menu {
+        menu_card(app, ui, t, header, shell);
+    }
+}
+
+/// The histogram of the photo as it is drawn: a grey area for brightness and a line per channel.
+fn histogram(app: &LightcraftApp, ui: &egui::Ui, t: &Tokens, r: Rect) {
+    let Some(id) = app.session.active() else { return };
+    let tex = |slot| app.renderer.textures.get(&slot);
+    let Some(h) = tex(crate::render::Slot::Main)
+        .filter(|x| x.photo == id)
+        .and_then(|x| x.histogram.as_ref())
+        .or_else(|| tex(crate::render::Slot::Thumb(id)).and_then(|x| x.histogram.as_ref()))
+    else {
+        return;
+    };
+    let n = h.r.len().min(h.g.len()).min(h.b.len()).min(h.luma.len());
+    if n < 3 {
+        return;
+    }
+    let plot = r.shrink2(vec2(20.0, 10.0));
+    // scale by the tallest bin that is not an end: clipped pixels pile up there and would flatten the rest
+    let peak = |c: &[u32]| c[1..n - 1].iter().copied().max().unwrap_or(1).max(1) as f32;
+    let points = |c: &[u32], peak: f32| -> Vec<egui::Pos2> {
+        (0..n)
+            .map(|i| {
+                pos2(plot.left() + plot.width() * i as f32 / (n - 1) as f32, plot.bottom() - plot.height() * (c[i] as f32 / peak).min(1.0).sqrt())
+            })
+            .collect()
+    };
+    let luma = points(&h.luma, peak(&h.luma));
+    let fill = t.text_dim.gamma_multiply(0.35);
+    let mut mesh = egui::Mesh::default();
+    for (i, top) in luma.iter().enumerate() {
+        mesh.colored_vertex(*top, fill);
+        mesh.colored_vertex(pos2(top.x, plot.bottom()), fill);
+        if i > 0 {
+            let k = i as u32 * 2;
+            mesh.add_triangle(k - 2, k - 1, k);
+            mesh.add_triangle(k - 1, k + 1, k);
+        }
+    }
+    ui.painter().add(mesh);
+    let all = peak(&h.r).max(peak(&h.g)).max(peak(&h.b));
+    for (c, color) in [(&h.r, Color32::from_rgb(235, 70, 70)), (&h.g, Color32::from_rgb(80, 200, 90)), (&h.b, Color32::from_rgb(80, 120, 240))] {
+        ui.painter().add(egui::Shape::line(points(c, all), Stroke::new(1.4, color)));
+    }
+    ui.painter()
+        .line_segment([pos2(plot.left(), plot.bottom()), pos2(plot.right(), plot.bottom())], Stroke::new(1.0, t.text_dim.gamma_multiply(0.5)));
+}
+
+/// The rectangle of the "more" button in the header.
+fn more_rect(header: Rect) -> Rect {
+    Rect::from_min_size(pos2(header.right() - 52.0, header.top()), vec2(52.0, HEADER_H))
 }
 
 fn header_bar(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens, header: Rect, shell: &mut Shell) {
@@ -519,27 +588,112 @@ fn header_bar(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens, header: Re
     if tap(ui, "back", back).clicked() {
         shell.screen = Screen::Library;
         shell.tool = None;
+        shell.menu = false;
         app.ui.view = crate::state::ViewMode::PhotoGrid;
     }
-    // undo / redo at the right, the file name between
-    let (undo, redo) = (
-        Rect::from_min_size(pos2(header.right() - 124.0, header.top()), vec2(62.0, HEADER_H)),
-        Rect::from_min_size(pos2(header.right() - 62.0, header.top()), vec2(62.0, HEADER_H)),
-    );
-    for (name, rect, cmd, flip) in [("undo", undo, "edit.undo", false), ("redo", redo, "edit.redo", true)] {
+    // right to left: more, export, redo, undo
+    let cell = |n: f32| Rect::from_min_size(pos2(header.right() - 52.0 * (n + 1.0), header.top()), vec2(52.0, HEADER_H));
+    let more = more_rect(header);
+    ui.painter().circle_stroke(more.center(), 11.0, Stroke::new(2.0, t.text));
+    for dx in [-5.0, 0.0, 5.0] {
+        ui.painter().circle_filled(more.center() + vec2(dx, 0.0), 1.5, t.text);
+    }
+    if tap(ui, "more", more).clicked() {
+        shell.menu = !shell.menu;
+    }
+    let export = cell(1.0);
+    paint_icon(ui.painter(), "Export", export.center(), t.text);
+    if tap(ui, "export", export).clicked() {
+        export_jpeg(app, ui.ctx(), shell);
+    }
+    for (name, rect, cmd, flip) in [("redo", cell(2.0), "edit.redo", true), ("undo", cell(3.0), "edit.undo", false)] {
         paint_arrow(ui.painter(), rect.center(), t.text, flip);
         if tap(ui, name, rect).clicked() {
             let _ = app.run(cmd, json!({}));
         }
     }
-    if let Some(photo) = app.session.active().and_then(|id| app.session.catalog.photo(id)) {
-        let name_rect = Rect::from_min_max(pos2(back.right(), header.top()), pos2(undo.left() - 4.0, header.bottom()));
-        ui.painter_at(name_rect).text(name_rect.center(), Align2::CENTER_CENTER, &photo.file_name, t.semibold(15.0), t.text);
+}
+
+/// The "more" card: rating, flags and Reset.
+fn menu_card(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens, header: Rect, shell: &mut Shell) {
+    let card = Rect::from_min_size(pos2(header.right() - 8.0 - 330.0, header.bottom() + 4.0), vec2(330.0, RATE_H * 2.0 + 8.0));
+    ui.painter().rect_filled(card.translate(vec2(0.0, 3.0)), 14.0, Color32::from_black_alpha(80));
+    ui.painter().rect_filled(card, 14.0, panel(t));
+    ui.painter().rect_stroke(card, 14.0, Stroke::new(1.0, t.text_dim.gamma_multiply(0.3)), egui::StrokeKind::Inside);
+    rating_row(app, ui, t, Rect::from_min_size(card.min + vec2(0.0, 4.0), vec2(card.width(), RATE_H)));
+    let reset = Rect::from_min_size(card.min + vec2(0.0, 4.0 + RATE_H), vec2(card.width(), RATE_H));
+    ui.painter()
+        .line_segment([reset.left_top() + vec2(16.0, 0.0), reset.right_top() - vec2(16.0, 0.0)], Stroke::new(1.0, t.text_dim.gamma_multiply(0.25)));
+    ui.painter().text(pos2(reset.left() + 20.0, reset.center().y), Align2::LEFT_CENTER, crate::i18n::tr("Reset all edits"), t.font(16.0), t.text);
+    if tap(ui, "reset-all", reset).clicked() {
+        let _ = app.run("develop.reset", json!({}));
+        shell.menu = false;
+    }
+    // a tap anywhere else closes the card
+    let outside = ui.input(|i| i.pointer.any_click().then(|| i.pointer.interact_pos()).flatten());
+    if let Some(p) = outside
+        && !card.contains(p)
+        && !more_rect(header).contains(p)
+    {
+        shell.menu = false;
     }
 }
 
-/// The bottom row of tools: Auto, then a sheet of sliders per group.
-fn tool_strip(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens, strip: Rect, shell: &mut Shell) {
+/// The bottom row of main tools, icons only: Auto-enhance, Presets, Crop, Edit, Masks, Heal.
+fn main_row(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens, row: Rect, shell: &mut Shell) {
+    let items = ["Assist", "Presets", "Crop", "Edit", "Masks", "Heal"];
+    let w = row.width() / items.len() as f32;
+    let editing = !matches!(shell.tool, Some(Tool::Presets | Tool::Crop));
+    for (i, name) in items.into_iter().enumerate() {
+        let cell = Rect::from_min_size(pos2(row.left() + i as f32 * w, row.top()), vec2(w, row.height()));
+        let on = match name {
+            "Assist" => shell.tool == Some(Tool::Assist),
+            "Presets" => shell.tool == Some(Tool::Presets),
+            "Crop" => shell.tool == Some(Tool::Crop),
+            "Edit" => editing && shell.tool != Some(Tool::Assist),
+            _ => false,
+        };
+        let c = cell.center() - vec2(0.0, 4.0);
+        if on {
+            ui.painter().rect_filled(Rect::from_center_size(c, vec2(60.0, 46.0)), 10.0, t.accent);
+        }
+        paint_icon(ui.painter(), name, c, if on { Color32::WHITE } else { t.text });
+        if tap(ui, &format!("main-{name}"), cell).clicked() {
+            match name {
+                "Assist" => shell.tool = if on { None } else { Some(Tool::Assist) },
+                "Presets" => shell.tool = if on { None } else { Some(Tool::Presets) },
+                "Crop" => shell.tool = if on { None } else { Some(Tool::Crop) },
+                "Edit" => shell.tool = None,
+                _ => app.toast(ui.ctx(), crate::i18n::tr("That isn't available on the phone yet")),
+            }
+        }
+    }
+}
+
+/// One of the wand's actions. Those the phone cannot do yet say so rather than appear to work.
+fn assist(app: &mut LightcraftApp, ctx: &egui::Context, name: &str) {
+    let said = match name {
+        "Auto" => match app.run("develop.auto", json!({})) {
+            Ok(_) => crate::i18n::tr("Auto settings applied").to_string(),
+            Err(e) => e.to_string(),
+        },
+        "Enhance" => match app.run("denoise.toggle", json!({"enabled": true})) {
+            Ok(_) => crate::i18n::tr("Denoise turned on").to_string(),
+            Err(e) => e.to_string(),
+        },
+        "Fix angle" => match app.run("crop.autoStraighten", json!({})) {
+            Ok(v) if v["changed"] == false => crate::i18n::tr("No clear horizon or vertical lines found").to_string(),
+            Ok(_) => crate::i18n::tr("Straightened").to_string(),
+            Err(e) => e.to_string(),
+        },
+        // selections need masks on the phone (docs/ios/PLAN.md, phase 4)
+        _ => crate::i18n::tr("That isn't available on the phone yet").to_string(),
+    };
+    app.toast(ctx, said);
+}
+
+/// The edit row: Auto, then one tab per group of sliders.
+fn edit_row(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens, strip: Rect, shell: &mut Shell) {
     ui.set_clip_rect(strip.intersect(ui.clip_rect()));
     egui::ScrollArea::horizontal().scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden).auto_shrink([false, false]).show(
         ui,
@@ -555,11 +709,32 @@ fn tool_strip(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens, strip: Rec
                     ui.painter().galley(pos2(r.center().x - galley.size().x / 2.0, r.bottom() - galley.size().y - 8.0), galley, color);
                     resp.clicked()
                 };
-                if item(ui, "Auto", false) {
-                    let _ = app.run("develop.auto", json!({}));
-                    app.toast(ui.ctx(), crate::i18n::tr("Auto settings applied"));
+                let divider = |ui: &mut egui::Ui| {
+                    let (r, _) = ui.allocate_exact_size(vec2(1.0, STRIP_H), Sense::hover());
+                    ui.painter().line_segment(
+                        [r.center_top() + vec2(0.0, 14.0), r.center_bottom() - vec2(0.0, 14.0)],
+                        Stroke::new(1.0, t.text_dim.gamma_multiply(0.4)),
+                    );
+                };
+                if shell.tool == Some(Tool::Assist) {
+                    // one-tap actions, in groups: whole photo, selections, geometry
+                    for (i, group) in [&["Auto", "Enhance"][..], &["Subject", "Background", "Sky"], &["Fix angle"]].into_iter().enumerate() {
+                        if i > 0 {
+                            divider(ui);
+                        }
+                        for name in group {
+                            if item(ui, name, false) {
+                                assist(app, ui.ctx(), name);
+                            }
+                        }
+                    }
+                    return;
                 }
-                for tool in Tool::ALL {
+                if item(ui, "Auto", false) {
+                    assist(app, ui.ctx(), "Auto");
+                }
+                divider(ui);
+                for tool in Tool::ALL.into_iter().filter(|t| !matches!(t, Tool::Presets | Tool::Crop)) {
                     if item(ui, tool.label(), shell.tool == Some(tool)) {
                         shell.tool = if shell.tool == Some(tool) { None } else { Some(tool) };
                     }
@@ -771,7 +946,7 @@ fn swipe(d: egui::Vec2, secs: f64) -> Option<&'static str> {
 }
 
 /// Stars, pick and reject on the left; Export on the right.
-fn rating_row(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens, row: Rect, shell: &Shell) {
+fn rating_row(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens, row: Rect) {
     let Some(id) = app.session.active() else { return };
     let Some((rating, flag)) = app.session.catalog.photo(id).map(|p| (p.rating, p.flag)) else { return };
     for n in 1..=5u8 {
@@ -796,11 +971,6 @@ fn rating_row(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens, row: Rect,
             let _ = app.run("photo.flag", json!({"flag": if on { "none" } else { name }}));
         }
         x += w;
-    }
-    let ex = Rect::from_min_max(pos2(row.right() - 64.0, row.top()), row.right_bottom());
-    ui.painter().text(ex.center(), Align2::CENTER_CENTER, crate::i18n::tr("Export"), t.semibold(15.0), t.accent);
-    if tap(ui, "export", ex).clicked() {
-        export_jpeg(app, ui.ctx(), shell);
     }
 }
 
@@ -942,11 +1112,74 @@ fn paint_icon(p: &egui::Painter, name: &str, c: egui::Pos2, color: Color32) {
                 line(a, b);
             }
         }
-        "Presets" => {
+        "Edit" => {
             for (y, knob) in [(-7.0, -4.0), (0.0, 5.0), (7.0, -1.0)] {
                 line(vec2(-11.0, y), vec2(11.0, y));
                 p.circle_filled(c + vec2(knob, y), 3.0, color);
             }
+        }
+        "Presets" => {
+            p.circle_stroke(c + vec2(-4.0, 0.0), 8.0, st);
+            p.circle_stroke(c + vec2(5.0, 0.0), 8.0, st);
+        }
+        "Assist" => {
+            // a wand with a spark
+            line(vec2(-10.0, 10.0), vec2(3.0, -3.0));
+            for (a, b) in [(vec2(6.0, -12.0), vec2(6.0, -4.0)), (vec2(2.0, -8.0), vec2(10.0, -8.0))] {
+                line(a, b);
+            }
+            p.circle_filled(c + vec2(-11.0, -3.0), 1.5, color);
+        }
+        "Masks" => {
+            for i in 0..14 {
+                let a = i as f32 * std::f32::consts::TAU / 14.0;
+                p.circle_filled(c + vec2(a.cos(), a.sin()) * 10.0, 1.5, color);
+            }
+            p.circle_filled(c, 3.0, color);
+        }
+        "Heal" => {
+            // a bandage
+            let a = vec2(-9.0, 9.0);
+            let b = vec2(9.0, -9.0);
+            p.line_segment([c + a, c + b], Stroke::new(9.0, color.gamma_multiply(0.35)));
+            p.line_segment([c + a, c + b], Stroke::new(1.8, color));
+            p.circle_filled(c, 1.8, color);
+        }
+        "Enhance" => {
+            for (a, b) in [(vec2(-3.0, -11.0), vec2(-3.0, 1.0)), (vec2(-9.0, -5.0), vec2(3.0, -5.0))] {
+                line(a, b);
+            }
+            line(vec2(-11.0, 10.0), vec2(11.0, 10.0));
+            p.add(egui::Shape::line(vec![c + vec2(-9.0, 10.0), c + vec2(-2.0, 4.0), c + vec2(3.0, 8.0), c + vec2(10.0, 2.0)], st));
+        }
+        "Subject" => {
+            p.circle_stroke(c + vec2(0.0, -4.0), 5.0, st);
+            p.add(egui::Shape::line(vec![c + vec2(-10.0, 10.0), c + vec2(-8.0, 4.0), c + vec2(8.0, 4.0), c + vec2(10.0, 10.0)], st));
+        }
+        "Background" => {
+            for i in 0..4 {
+                let (a, b) = (-11.0 + i as f32 * 6.0, -11.0 + i as f32 * 6.0 + 3.0);
+                line(vec2(a, -10.0), vec2(b, -10.0));
+                line(vec2(a, 10.0), vec2(b, 10.0));
+                line(vec2(-11.0, a), vec2(-11.0, b));
+                line(vec2(11.0, a), vec2(11.0, b));
+            }
+            p.circle_filled(c, 4.0, color);
+        }
+        "Sky" => {
+            p.circle_stroke(c + vec2(-3.0, 1.0), 6.0, st);
+            line(vec2(-12.0, 9.0), vec2(12.0, 9.0));
+            line(vec2(7.0, -8.0), vec2(10.0, -11.0));
+        }
+        "Fix angle" => {
+            line(vec2(-11.0, 4.0), vec2(11.0, -4.0));
+            line(vec2(-11.0, 10.0), vec2(11.0, 10.0));
+        }
+        "Export" => {
+            line(vec2(0.0, -11.0), vec2(0.0, 5.0));
+            line(vec2(-5.0, 0.0), vec2(0.0, 5.0));
+            line(vec2(5.0, 0.0), vec2(0.0, 5.0));
+            line(vec2(-10.0, 10.0), vec2(10.0, 10.0));
         }
         "Crop" => {
             line(vec2(-6.0, -11.0), vec2(-6.0, 6.0));
@@ -986,11 +1219,9 @@ fn paint_icon(p: &egui::Painter, name: &str, c: egui::Pos2, color: Color32) {
             }
         }
         "Effects" => {
-            p.add(egui::Shape::convex_polygon(
-                vec![c + vec2(0.0, -11.0), c + vec2(8.0, 0.0), c + vec2(0.0, 11.0), c + vec2(-8.0, 0.0)],
-                Color32::TRANSPARENT,
-                st,
-            ));
+            // a frame with a vignette inside
+            p.rect_stroke(Rect::from_center_size(c, vec2(22.0, 22.0)), 2.0, st, egui::StrokeKind::Middle);
+            p.circle_stroke(c, 7.0, st);
         }
         "Detail" => {
             p.add(egui::Shape::convex_polygon(vec![c + vec2(0.0, -10.0), c + vec2(11.0, 9.0), c + vec2(-11.0, 9.0)], Color32::TRANSPARENT, st));
@@ -1121,11 +1352,13 @@ mod tests {
     #[test]
     fn rating_and_flagging_from_the_row_go_through_the_commands() {
         let mut h = open_tool("Light");
-        h.app.mobile.as_mut().expect("phone").tool = None;
+        let shell = h.app.mobile.as_mut().expect("phone");
+        shell.tool = None;
+        shell.menu = true;
         h.step();
         h.step();
         let text = h.painted_text();
-        assert!(text.iter().any(|t| t == "Pick") && text.iter().any(|t| t == "Export"), "{text:?}");
+        assert!(text.iter().any(|t| t == "Pick") && text.iter().any(|t| t == "Reject") && text.iter().any(|t| t == "Reset all edits"), "{text:?}");
     }
 
     /// Tapping + adds what is in the Import folder to the library.
@@ -1170,5 +1403,13 @@ mod tests {
         h.step();
         let text = h.painted_text();
         assert!(text.iter().any(|t| t.contains("Blue Hue")) && !text.iter().any(|t| t.contains("Red Hue")), "{text:?}");
+    }
+
+    #[test]
+    fn the_wand_shows_one_tap_actions_and_no_slider_sheet() {
+        let mut h = open_tool("Assist");
+        let text = h.painted_text();
+        assert!(text.iter().any(|t| t == "Enhance") && text.iter().any(|t| t == "Fix angle") && text.iter().any(|t| t == "Subject"), "{text:?}");
+        assert!(!text.iter().any(|t| t == "Exposure"), "no sheet over the photo: {text:?}");
     }
 }
