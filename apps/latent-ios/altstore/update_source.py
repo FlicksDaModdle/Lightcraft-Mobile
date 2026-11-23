@@ -1,4 +1,6 @@
-"""Adds a Latent build to the AltStore source (source.json), newest first.
+"""Adds a Latent build to the app source (source.json), newest first. The format is AltStore's,
+which Feather and other sideloading apps read too; the newest build is also given in the older
+app-level fields some of them use.
 
 Run by CI after a build of `main` is published as a GitHub Release:
 
@@ -55,7 +57,17 @@ def main():
         "size": int(size),
         "minOSVersion": "17.0",
     })
-    app = dict(APP, versions=versions[:KEEP])
+    newest = versions[0]
+    app = dict(
+        APP,
+        versions=versions[:KEEP],
+        # the older single-version fields, for readers that look for them
+        version=newest["version"],
+        versionDate=newest["date"],
+        versionDescription=newest["localizedDescription"],
+        downloadURL=newest["downloadURL"],
+        size=newest["size"],
+    )
     out = {
         "name": "Latent",
         "identifier": "app.latent.source",

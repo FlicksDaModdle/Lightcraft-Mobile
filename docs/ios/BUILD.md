@@ -13,7 +13,8 @@ Latent is a SwiftUI app over the LightCraft engine:
 - CI (`.github/workflows/ios.yml`) uploads that IPA as the `Latent-iOS` artifact. Install it with
   Sideloadly or AltStore, which sign it with your Apple ID.
 - Each build of `main` is also published as a GitHub Release (`latent-v0.1.N`) and added to the
-  AltStore source on the `altstore` branch. In AltStore, add the source
+  app source on the `altstore` branch (AltStore's format, which Feather reads too). In Feather or
+  AltStore, add the source
   `https://raw.githubusercontent.com/FlicksDaModdle/Lightcraft-Mobile/altstore/source.json` and
   install or update Latent from it (`apps/latent-ios/altstore/update_source.py` writes it).
 
