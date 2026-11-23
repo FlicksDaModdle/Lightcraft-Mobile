@@ -98,14 +98,15 @@ jobs:
       - name: Publish the release
         run: |
           mv out/Latent-unsigned.ipa out/Latent.ipa
-          gh release create "$TAG" out/Latent.ipa --target "$GITHUB_SHA" --title "Latent $VERSION" \
+          # a re-run of this job finds its release already made
+          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" out/Latent.ipa --target "$GITHUB_SHA" --title "Latent $VERSION" \
             --notes "Build ${{ github.run_number }} of main ($GITHUB_SHA). Unsigned: AltStore or Sideloadly signs it with your Apple ID."
       - name: Update the AltStore source
         run: |
           size=$(stat -c %s out/Latent.ipa)
           url="https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/Latent.ipa"
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
           mkdir -p /tmp/src && cd /tmp/src
           if git ls-remote --exit-code "https://x-access-token:$GH_TOKEN@github.com/$GITHUB_REPOSITORY.git" altstore >/dev/null; then
             git clone --depth 1 --branch altstore "https://x-access-token:$GH_TOKEN@github.com/$GITHUB_REPOSITORY.git" .
