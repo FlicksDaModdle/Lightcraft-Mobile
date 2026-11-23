@@ -167,7 +167,10 @@ struct EditorView: View {
     private var editScreen: some View {
         VStack(spacing: 0) {
             if chrome {
-                topBar.opacity(focused ? 0 : 1)
+                Group {
+                    if model.mode == .crop { cropHeader } else { topBar }
+                }
+                .opacity(focused ? 0 : 1)
             }
             photoArea
             if chrome {
@@ -175,7 +178,10 @@ struct EditorView: View {
                     .padding(.horizontal, 8)
                     .padding(.top, 6)
                 Group {
-                    if model.mode == .presets {
+                    if model.mode == .crop {
+                        PresetsBar(title: "Crop", cancel: { withAnimation(.glass) { model.cancelCrop() } }, done: { withAnimation(.glass) { model.doneCrop() } })
+                            .latentGlassID("bottomBar", in: glass)
+                    } else if model.mode == .presets {
                         PresetsBar(cancel: { withAnimation(.glass) { model.cancelPresets() } }, done: { withAnimation(.glass) { model.donePresets() } })
                             .latentGlassID("bottomBar", in: glass)
                     } else {
@@ -213,6 +219,28 @@ struct EditorView: View {
     }
 
     // MARK: top
+
+    /// Crop's own top: the shape's name, and undo.
+    private var cropHeader: some View {
+        ZStack {
+            Text(model.cropTitle)
+                .font(.system(size: 17, weight: .semibold))
+                .contentTransition(.interpolate)
+                .animation(.glass, value: model.cropTitle)
+            HStack(spacing: 4) {
+                Spacer()
+                Button { model.undo() } label: {
+                    Image(systemName: "arrow.uturn.backward").frame(width: 44, height: 44).latentGlass(in: Circle(), interactive: true)
+                }
+                .disabled(!model.canUndo)
+                .accessibilityLabel(Text("Undo"))
+            }
+        }
+        .font(.system(size: 17, weight: .medium))
+        .foregroundStyle(.white)
+        .padding(.horizontal, 16)
+        .frame(height: 52)
+    }
 
     private var topBar: some View {
         HStack(spacing: 10) {
@@ -962,57 +990,147 @@ struct EditorView: View {
 
     private var cropPanel: some View {
         VStack(spacing: 0) {
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 8) {
-                    ForEach(cropAspects, id: \.value) { a in
-                        let on = model.aspectChoice == a.value
-                        Button { model.setAspect(a.value) } label: {
-                            Text(a.label)
-                                .font(.system(size: 14, weight: on ? .semibold : .regular))
-                                .foregroundStyle(on ? Color.black : Color.white)
-                                .padding(.horizontal, 14)
-                                .frame(height: 32)
-                                .background(on ? Color.white : Color.white.opacity(0.1), in: Capsule())
-                        }
-                    }
+            StraightenDial(
+                angle: model.cropAngle,
+                begin: { model.beginAngle() },
+                change: { model.setAngle($0) },
+                end: { model.end() })
+                .frame(height: 62)
+                .padding(.top, 8)
+            HStack(spacing: 10) {
+                roundTool(model.aspectLocked ? "rectangle.portrait.rotate" : "rectangle.portrait.rotate", "Swap orientation") {
+                    model.cropCommand("crop.rotateAspect")
                 }
-                .padding(.horizontal, 16)
-            }
-            .padding(.top, 14)
-            .opacity(focused ? 0 : 1)
-            HStack(spacing: 0) {
-                cropTool("rotate.left", "Rotate") { model.cropCommand("photo.rotateLeft") }
-                cropTool("arrow.left.and.right.righttriangle.left.righttriangle.right", "Flip") { model.cropCommand("photo.flipHorizontal") }
-                cropTool("rectangle.portrait.rotate", "Swap") { model.cropCommand("crop.rotateAspect") }
-                cropTool("level", "Auto") { model.cropCommand("crop.autoStraighten") }
-                cropTool("arrow.counterclockwise", "Reset") { model.cropCommand("crop.reset") }
-            }
-            .padding(.horizontal, 8)
-            .padding(.top, 10)
-            .opacity(focused ? 0 : 1)
-            LatentSlider(
-                control: model.angleControl,
-                onBegin: { model.beginAngle() },
-                onChange: { model.setAngle($0) },
-                onEnd: { model.end() },
-                onReset: {
-                    model.beginAngle()
-                    model.setAngle(0)
-                    model.end()
-                })
-                .padding(.vertical, 6)
-        }
-        .padding(.bottom, 8)
-    }
-
-    private func cropTool(_ symbol: String, _ label: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            VStack(spacing: 5) {
-                Image(systemName: symbol).font(.system(size: 19)).frame(height: 24)
-                Text(label).font(.system(size: 11))
+                roundTool(model.aspectLocked ? "lock.fill" : "lock.open", model.aspectLocked ? "Unlock aspect" : "Lock aspect") {
+                    model.toggleAspectLock()
+                }
+                .symbolEffect(.bounce, value: model.aspectLocked)
+                Spacer()
+                roundTool("rotate.right", "Rotate") { model.cropCommand("photo.rotateRight") }
+                Menu {
+                    Button { model.cropCommand("photo.flipHorizontal") } label: { Label("Flip horizontal", systemImage: "arrow.left.and.right.righttriangle.left.righttriangle.right") }
+                    Button { model.cropCommand("photo.flipVertical") } label: { Label("Flip vertical", systemImage: "arrow.up.and.down.righttriangle.up.righttriangle.down") }
+                    Button { model.cropCommand("photo.rotateLeft") } label: { Label("Rotate left", systemImage: "rotate.left") }
+                    Button { model.cropCommand("crop.autoStraighten") } label: { Label("Auto straighten", systemImage: "level") }
+                    Divider()
+                    Button(role: .destructive) { model.cropCommand("crop.reset") } label: { Label("Reset crop", systemImage: "arrow.counterclockwise") }
+                } label: {
+                    Image(systemName: "ellipsis")
+                        .font(.system(size: 18, weight: .semibold))
+                        .frame(width: 50, height: 50)
+                        .latentGlass(in: Circle(), interactive: true)
+                }
+                .accessibilityLabel(Text("More crop options"))
             }
             .foregroundStyle(.white)
-            .frame(maxWidth: .infinity, minHeight: 54)
+            .latentGlassGroup(spacing: 12)
+            .padding(.horizontal, 16)
+            .padding(.top, 4)
+            .opacity(focused ? 0 : 1)
+            cropTabs.opacity(focused ? 0 : 1)
+            if model.cropTab == 0 {
+                aspectRow
+                    .opacity(focused ? 0 : 1)
+                    .transition(.opacity.combined(with: .move(edge: .leading)))
+            } else {
+                ScrollView {
+                    VStack(spacing: 0) {
+                        ForEach(model.geometryControls) { c in slider(c) }
+                    }
+                }
+                .frame(maxHeight: 170)
+                .transition(.opacity.combined(with: .move(edge: .trailing)))
+            }
+        }
+        .padding(.bottom, 8)
+        .animation(.glass, value: model.cropTab)
+    }
+
+    private var cropTabs: some View {
+        HStack(spacing: 28) {
+            ForEach(Array(["Aspect", "Geometry"].enumerated()), id: \.offset) { i, name in
+                Button { model.cropTab = i } label: {
+                    VStack(spacing: 6) {
+                        Text(name).font(.system(size: 16, weight: model.cropTab == i ? .semibold : .regular))
+                            .foregroundStyle(model.cropTab == i ? Color.white : Theme.secondaryText)
+                        Capsule().fill(model.cropTab == i ? Color.white : .clear).frame(width: 40, height: 2.5)
+                    }
+                }
+                .accessibilityAddTraits(model.cropTab == i ? .isSelected : [])
+            }
+        }
+        .padding(.top, 12)
+    }
+
+    /// Original, then the ratio menus and the vertical-video shape.
+    private var aspectRow: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 4) {
+                aspectCell("Original", "photo", on: model.shapeName == "Original") { model.originalShape() }
+                Rectangle().fill(Theme.separator).frame(width: 1, height: 40).padding(.horizontal, 6)
+                Menu {
+                    ForEach(cropRatios) { r in
+                        Button { model.chooseShape(r) } label: { Label(r.name, systemImage: r.symbol) }
+                    }
+                } label: {
+                    aspectLabel("Ratios", "rectangle.stack", on: cropRatios.contains { $0.name == model.shapeName })
+                }
+                Menu {
+                    Section("Sizes photo-sharing apps use") {
+                        ForEach(socialShapes) { r in
+                            Button { model.chooseShape(r) } label: {
+                                Label {
+                                    Text(r.name)
+                                    if let ratio = r.ratio { Text(ratio) }
+                                } icon: {
+                                    Image(systemName: r.symbol)
+                                }
+                            }
+                        }
+                    }
+                } label: {
+                    aspectLabel("Social posts", "person.2.crop.square.stack", on: socialShapes.contains { $0.name == model.shapeName })
+                }
+                aspectCell("Vertical video", "play.rectangle", on: model.shapeName == verticalVideo.name) { model.chooseShape(verticalVideo) }
+                aspectCell("Free", "crop", on: !model.aspectLocked) {
+                    if model.aspectLocked { model.toggleAspectLock() }
+                }
+            }
+            .padding(.horizontal, 12)
+        }
+        .padding(.top, 10)
+    }
+
+    private func aspectCell(_ title: String, _ symbol: String, on: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) { aspectLabel(title, symbol, on: on) }
+            .buttonStyle(.plain)
+    }
+
+    private func aspectLabel(_ title: String, _ symbol: String, on: Bool) -> some View {
+        VStack(spacing: 6) {
+            Image(systemName: symbol).font(.system(size: 21)).frame(height: 26)
+                .symbolEffect(.bounce, value: on)
+            Text(title).font(.system(size: 12)).lineLimit(1)
+        }
+        .foregroundStyle(on ? Color.white : Theme.secondaryText)
+        .frame(minWidth: 74, minHeight: 66)
+        .padding(.horizontal, 4)
+        .background {
+            if on {
+                RoundedRectangle(cornerRadius: 14, style: .continuous).fill(Color.white.opacity(0.08))
+                    .latentGlass(in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+            }
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(on ? .isSelected : [])
+    }
+
+    private func roundTool(_ symbol: String, _ label: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.system(size: 18, weight: .medium))
+                .frame(width: 50, height: 50)
+                .latentGlass(in: Circle(), interactive: true)
         }
         .accessibilityLabel(Text(label))
     }
@@ -1397,18 +1515,19 @@ struct PresetThumb: View {
 
 /// Presets' own bottom bar: put back the edit as it was, or keep it.
 struct PresetsBar: View {
+    var title = "Presets"
     let cancel: () -> Void
     let done: () -> Void
 
     var body: some View {
         HStack {
             Button(action: cancel) { Image(systemName: "xmark").font(.system(size: 18, weight: .semibold)).frame(width: 52, height: 40) }
-                .accessibilityLabel(Text("Cancel presets"))
+                .accessibilityLabel(Text("Cancel"))
             Spacer()
-            Text("Presets").font(.system(size: 16, weight: .semibold))
+            Text(title).font(.system(size: 16, weight: .semibold))
             Spacer()
             Button(action: done) { Image(systemName: "checkmark").font(.system(size: 18, weight: .semibold)).frame(width: 52, height: 40) }
-                .accessibilityLabel(Text("Keep presets"))
+                .accessibilityLabel(Text("Done"))
         }
         .foregroundStyle(.white)
         .padding(6)
@@ -1517,6 +1636,27 @@ struct CropEditor: View {
                 }
             }
             .stroke(Color.white, style: StrokeStyle(lineWidth: 4, lineCap: .square, lineJoin: .miter))
+            // edge handles
+            Path { p in
+                for i in 0..<4 {
+                    let a = q[i], b = q[(i + 1) % 4]
+                    let mid = lerp(a, b, 0.5)
+                    p.move(to: towards(mid, a, 11))
+                    p.addLine(to: towards(mid, b, 11))
+                }
+            }
+            .stroke(Color.white, style: StrokeStyle(lineWidth: 4, lineCap: .round))
+            // a circle for profile photos, which are shown round
+            if model.shapeName == "Profile photo" {
+                let c = CGPoint(x: q.map(\.x).reduce(0, +) / 4, y: q.map(\.y).reduce(0, +) / 4)
+                let rx = hypot(q[1].x - q[0].x, q[1].y - q[0].y) / 2
+                let ry = hypot(q[3].x - q[0].x, q[3].y - q[0].y) / 2
+                let turn = atan2(q[1].y - q[0].y, q[1].x - q[0].x)
+                Path(ellipseIn: CGRect(x: -rx, y: -ry, width: rx * 2, height: ry * 2))
+                    .applying(CGAffineTransform(rotationAngle: turn).concatenating(CGAffineTransform(translationX: c.x, y: c.y)))
+                    .stroke(Color.white.opacity(0.85), style: StrokeStyle(lineWidth: 1.5, dash: [6, 4]))
+                    .allowsHitTesting(false)
+            }
         }
         .frame(width: size.width, height: size.height)
         .contentShape(Rectangle())
@@ -1842,5 +1982,87 @@ enum EditorBackground: String, CaseIterable, Identifiable {
         case .black: return .black
         case .white: return Color(white: 0.96)
         }
+    }
+}
+
+/// The straighten dial: ticks along a curve under the crop, turning as you drag sideways; the
+/// angle in the middle. It catches at 0°.
+struct StraightenDial: View {
+    let angle: Double
+    let begin: () -> Void
+    let change: (Double) -> Void
+    let end: () -> Void
+    @State private var start: Double?
+
+    var body: some View {
+        GeometryReader { geo in
+            let perDegree = geo.size.width / 44
+            ZStack(alignment: .top) {
+                Canvas { ctx, size in
+                    let r = size.width * 1.15
+                    let center = CGPoint(x: size.width / 2, y: size.height - 4 - r)
+                    for d in -45...45 {
+                        let theta = (Double(d) - angle) * Double(perDegree) / Double(r)
+                        guard abs(theta) < 0.62 else { continue }
+                        let out = CGPoint(x: center.x + r * CGFloat(sin(theta)), y: center.y + r * CGFloat(cos(theta)))
+                        let inward = CGPoint(x: -CGFloat(sin(theta)), y: -CGFloat(cos(theta)))
+                        let major = d % 10 == 0, mid = d % 5 == 0
+                        let len: CGFloat = major ? 11 : mid ? 7 : 3
+                        var p = Path()
+                        p.move(to: out)
+                        p.addLine(to: CGPoint(x: out.x + inward.x * len, y: out.y + inward.y * len))
+                        let fade = 1 - Swift.min(abs(theta) / 0.62, 1)
+                        ctx.stroke(p, with: .color(.white.opacity(0.2 + 0.8 * fade)), style: StrokeStyle(lineWidth: major ? 2 : 1.3, lineCap: .round))
+                    }
+                    // the marker the angle is read at
+                    var m = Path()
+                    m.move(to: CGPoint(x: size.width / 2, y: size.height))
+                    m.addLine(to: CGPoint(x: size.width / 2, y: size.height - 16))
+                    ctx.stroke(m, with: .color(Theme.accent), style: StrokeStyle(lineWidth: 2.5, lineCap: .round))
+                }
+                Text(label)
+                    .font(.system(size: 15, weight: .semibold))
+                    .monospacedDigit()
+                    .contentTransition(.numericText(value: angle))
+                    .padding(.top, 2)
+            }
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture(minimumDistance: 2)
+                    .onChanged { g in
+                        if start == nil {
+                            start = angle
+                            begin()
+                        }
+                        var a = (start ?? 0) - Double(g.translation.width / perDegree)
+                        a = Swift.min(Swift.max(a, -45), 45)
+                        if abs(a) < 0.35 {
+                            if angle != 0 { UIImpactFeedbackGenerator(style: .light).impactOccurred() }
+                            a = 0
+                        }
+                        change((a * 10).rounded() / 10)
+                    }
+                    .onEnded { _ in
+                        start = nil
+                        end()
+                    })
+            .onTapGesture(count: 2) {
+                begin()
+                change(0)
+                end()
+            }
+        }
+        .accessibilityElement()
+        .accessibilityLabel(Text("Straighten"))
+        .accessibilityValue(Text(label))
+        .accessibilityAdjustableAction { dir in
+            begin()
+            change(Swift.min(Swift.max(angle + (dir == .increment ? 0.5 : -0.5), -45), 45))
+            end()
+        }
+    }
+
+    private var label: String {
+        abs(angle) < 0.05 ? "0\u{00B0}" : String(format: "%.1f\u{00B0}", angle)
     }
 }

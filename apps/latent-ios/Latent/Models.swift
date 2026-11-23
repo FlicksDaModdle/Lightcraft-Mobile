@@ -205,6 +205,35 @@ let mixerBands = ["red", "orange", "yellow", "green", "aqua", "blue", "purple", 
 let gradingRanges: [(id: String, label: String)] = [("shadows", "Shadows"), ("midtones", "Midtones"), ("highlights", "Highlights"), ("global", "Global")]
 
 /// Crop aspect choices: the engine's `crop.aspect` value and what the chip says.
+/// A crop shape: its name, the engine's aspect (a "WxH" string takes the crop's orientation; a
+/// [w, h] pair is used as given) and a symbol.
+struct CropShape: Identifiable {
+    let name: String
+    let aspect: Any
+    let symbol: String
+    var ratio: String? = nil
+    var given: Bool { aspect is [Double] }
+    var id: String { name }
+}
+
+/// Common ratios, turned to the way the crop faces.
+let cropRatios: [CropShape] = [
+    ("1x1", "1 \u{00D7} 1"), ("1x2", "1 \u{00D7} 2"), ("2x3", "2 \u{00D7} 3"), ("3x4", "3 \u{00D7} 4"), ("4x5", "4 \u{00D7} 5"),
+    ("5x7", "5 \u{00D7} 7"), ("8.5x11", "8.5 \u{00D7} 11"), ("9x16", "9 \u{00D7} 16"), ("10x16", "10 \u{00D7} 16"),
+].map { CropShape(name: $0.1, aspect: $0.0, symbol: $0.0 == "1x1" ? "square" : "rectangle.portrait") }
+
+/// The shapes photo-sharing apps show posts, stories and profile pictures in.
+let socialShapes: [CropShape] = [
+    CropShape(name: "Square post", aspect: [1.0, 1.0], symbol: "square", ratio: "1 \u{00D7} 1"),
+    CropShape(name: "Story", aspect: [9.0, 16.0], symbol: "rectangle.portrait", ratio: "9 \u{00D7} 16"),
+    CropShape(name: "Portrait post", aspect: [4.0, 5.0], symbol: "rectangle.portrait", ratio: "4 \u{00D7} 5"),
+    CropShape(name: "Landscape post", aspect: [1.91, 1.0], symbol: "rectangle", ratio: "1.91 \u{00D7} 1"),
+    CropShape(name: "Profile photo", aspect: [1.0, 1.0], symbol: "person.crop.circle", ratio: "1 \u{00D7} 1, shown round"),
+]
+
+/// Full-screen vertical video, 9 × 16.
+let verticalVideo = CropShape(name: "Vertical video", aspect: [9.0, 16.0], symbol: "play.rectangle", ratio: "9 \u{00D7} 16")
+
 let cropAspects: [(value: String, label: String)] = [
     ("original", "Original"), ("free", "Free"), ("1x1", "1:1"), ("4x5", "4:5"), ("5x7", "5:7"),
     ("2x3", "2:3"), ("3x4", "3:4"), ("9x16", "9:16"), ("16x9", "16:9"),

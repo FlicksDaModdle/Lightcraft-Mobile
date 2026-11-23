@@ -25,6 +25,10 @@ final class EditorModel: ObservableObject {
         didSet {
             guard mode != oldValue else { return }
             if mode == .presets { enterPresets() }
+            if mode == .crop {
+                cropEntry = historyCursor()
+                cropTab = 0
+            }
             // the crop box is drawn over the whole photo; every other mode shows the result
             render()
         }
@@ -399,18 +403,79 @@ final class EditorModel: ObservableObject {
 
     /// ✕: take back every preset applied since Presets opened.
     func cancelPresets() {
-        if let entry = presetsEntry {
-            // one undo at a time, stopping if the history stops moving back
-            var last = Int.max
-            while let c = historyCursor(), c > entry, c < last {
-                last = c
-                attempt("edit.undo")
-            }
-        }
+        undoBack(to: presetsEntry)
         appliedPreset = nil
         mode = .edit
         refresh()
         render()
+    }
+
+    /// Undo, one step at a time, back to a history position (stopping if the history stops moving back).
+    private func undoBack(to entry: Int?) {
+        guard let entry else { return }
+        var last = Int.max
+        while let c = historyCursor(), c > entry, c < last {
+            last = c
+            attempt("edit.undo")
+        }
+    }
+
+    // MARK: crop mode
+
+    private var cropEntry: Int?
+    /// Aspect or Geometry.
+    @Published var cropTab = 0
+    /// The shape last chosen by name (Story, 4 × 5…), shown as the crop's title.
+    @Published private(set) var shapeName: String?
+
+    /// ✕: take back every change made since Crop opened.
+    func cancelCrop() {
+        undoBack(to: cropEntry)
+        shapeName = nil
+        mode = .edit
+        refresh()
+        render()
+    }
+
+    func doneCrop() { mode = .edit }
+
+    func chooseShape(_ shape: CropShape) {
+        var p: [String: Any] = ["aspect": shape.aspect]
+        if shape.given { p["orientation"] = "given" }
+        UISelectionFeedbackGenerator().selectionChanged()
+        if attempt("crop.aspect", p) { shapeName = shape.name }
+        refresh()
+        render()
+    }
+
+    func originalShape() {
+        if attempt("crop.aspect", ["aspect": "original"]) { shapeName = "Original" }
+        refresh()
+        render()
+    }
+
+    /// Lock the crop to its shape, or set it free.
+    func toggleAspectLock() {
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        let wasLocked = cropAspect != nil
+        if attempt("crop.aspect", ["aspect": "toggle"]) { shapeName = wasLocked ? nil : shapeName }
+        refresh()
+    }
+
+    var aspectLocked: Bool { cropAspect != nil }
+
+    /// The crop's title: the shape's name, or its ratio.
+    var cropTitle: String {
+        guard let a = cropAspect, a.count == 2, a[0] > 0, a[1] > 0 else { return "Free" }
+        if let n = shapeName { return n }
+        let g = gcd(a[0], a[1])
+        let w = a[0] / g, h = a[1] / g
+        return w <= 32 && h <= 32 ? "\(w) \u{00D7} \(h)" : "Custom"
+    }
+
+    /// The geometry sliders (perspective, rotation, scale…) for the crop's Geometry tab.
+    var geometryControls: [Control] {
+        order.compactMap { controls[$0] }.filter { Tool.geometry.sections.contains($0.section) }
     }
 
     func donePresets() {
