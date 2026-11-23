@@ -7,7 +7,7 @@
 use std::ffi::{CStr, CString, c_char};
 use std::path::Path;
 
-use crate::{Core, HIST_BINS, Image};
+use crate::{Core, HIST_BINS, HdrImage, Image};
 
 /// A rendered photo as C sees it.
 #[repr(C)]
@@ -160,5 +160,64 @@ pub unsafe extern "C" fn latent_string_free(s: *mut c_char) {
     if !s.is_null() {
         // SAFETY: from CString::into_raw in give_string
         drop(unsafe { CString::from_raw(s) });
+    }
+}
+
+/// An HDR render as C sees it: half-float RGBA in linear light, SDR white at 1.0.
+#[repr(C)]
+pub struct LatentHdrImage {
+    pub width: u32,
+    pub height: u32,
+    /// `width * height * 4` half floats (IEEE bits), linear RGB plus alpha.
+    pub rgba16f: *mut u16,
+    pub rgba16f_len: usize,
+    /// Red, green, blue histograms over SDR then HDR, `LATENT_HIST_BINS` each.
+    pub hist: *mut u32,
+    pub hist_len: usize,
+    /// The brightest value the render may reach.
+    pub peak: f32,
+}
+
+/// Render photo `id` in HDR to fit the size. Null when HDR is off for it or there is no HDR render.
+///
+/// # Safety
+/// `core` from [`latent_open`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn latent_render_hdr(core: *const Core, id: u64, max_w: u32, max_h: u32) -> *mut LatentHdrImage {
+    // SAFETY: as documented above
+    let Some(c) = (unsafe { self::core(core) }) else { return std::ptr::null_mut() };
+    let Ok(HdrImage { width, height, rgba16f, hist, peak }) = c.render_hdr(id, max_w as usize, max_h as usize) else {
+        return std::ptr::null_mut();
+    };
+    let mut px = rgba16f.into_boxed_slice();
+    let mut hist = hist.into_boxed_slice();
+    let out = LatentHdrImage {
+        width: u32::try_from(width).unwrap_or(0),
+        height: u32::try_from(height).unwrap_or(0),
+        rgba16f: px.as_mut_ptr(),
+        rgba16f_len: px.len(),
+        hist: hist.as_mut_ptr(),
+        hist_len: hist.len(),
+        peak,
+    };
+    std::mem::forget(px);
+    std::mem::forget(hist);
+    Box::into_raw(Box::new(out))
+}
+
+/// Give back an image from [`latent_render_hdr`].
+///
+/// # Safety
+/// `img` is null or from [`latent_render_hdr`], and not used again.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn latent_hdr_image_free(img: *mut LatentHdrImage) {
+    if img.is_null() {
+        return;
+    }
+    // SAFETY: from Box::into_raw in latent_render_hdr; the slices were boxed with exactly these lengths
+    unsafe {
+        let img = Box::from_raw(img);
+        drop(Box::from_raw(std::ptr::slice_from_raw_parts_mut(img.rgba16f, img.rgba16f_len)));
+        drop(Box::from_raw(std::ptr::slice_from_raw_parts_mut(img.hist, img.hist_len)));
     }
 }

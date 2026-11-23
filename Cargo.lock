@@ -4231,6 +4231,7 @@ version = "0.21.1"
 dependencies = [
  "lightcraft-codecs",
  "lightcraft-engine",
+ "lightcraft-pipeline",
  "log",
  "serde_json",
 ]

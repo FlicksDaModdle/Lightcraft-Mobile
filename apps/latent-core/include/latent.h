@@ -31,5 +31,21 @@ char *latent_execute(const LatentCore *core, const char *cmd, const char *params
 LatentImage *latent_render(const LatentCore *core, uint64_t id, uint32_t max_w, uint32_t max_h, bool original);
 LatentImage *latent_thumb(const LatentCore *core, uint64_t id, uint32_t long_edge);
 
+// An HDR render: half-float RGBA, linear light, SDR white = 1.0, highlights up to `peak`.
+// The histogram covers SDR (first half) then one band per stop above white.
+typedef struct LatentHdrImage {
+    uint32_t width;
+    uint32_t height;
+    uint16_t *rgba16f;  // width * height * 4 half floats (IEEE bits)
+    size_t rgba16f_len;
+    uint32_t *hist;     // red, green, blue, LATENT_HIST_BINS each
+    size_t hist_len;
+    float peak;
+} LatentHdrImage;
+
+// NULL when HDR is off for the photo or the engine gave no HDR render.
+LatentHdrImage *latent_render_hdr(const LatentCore *core, uint64_t id, uint32_t max_w, uint32_t max_h);
+void latent_hdr_image_free(LatentHdrImage *img);
+
 void latent_image_free(LatentImage *img);
 void latent_string_free(char *s);

@@ -11,6 +11,8 @@ struct EngineError: LocalizedError {
 struct Rendered: @unchecked Sendable {
     let image: CGImage
     let histogram: [UInt32]
+    /// Above 1 for an HDR render: how much brighter than SDR white its highlights may be.
+    var peak: Float = 1
 }
 
 /// The LightCraft engine, through the C bridge. Every edit is an engine command, the same commands
@@ -59,6 +61,30 @@ final class Engine: @unchecked Sendable {
         guard let img = latent_render(core, id, w, h, original) else { return nil }
         defer { latent_image_free(img) }
         return Self.convert(img.pointee)
+    }
+
+    /// The photo's HDR render (half-float, linear, highlights above SDR white), or nil when HDR is
+    /// off for it or the engine has none.
+    func renderHDR(_ id: UInt64, fitting size: CGSize) -> Rendered? {
+        let w = UInt32(max(1, size.width.rounded()))
+        let h = UInt32(max(1, size.height.rounded()))
+        guard let img = latent_render_hdr(core, id, w, h) else { return nil }
+        defer { latent_hdr_image_free(img) }
+        let i = img.pointee
+        let width = Int(i.width)
+        let height = Int(i.height)
+        guard width > 0, height > 0, let px = i.rgba16f, i.rgba16f_len >= width * height * 4 else { return nil }
+        let data = Data(bytes: px, count: width * height * 8)
+        let space = CGColorSpace(name: CGColorSpace.extendedLinearSRGB) ?? CGColorSpaceCreateDeviceRGB()
+        let info = CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue | CGBitmapInfo.floatComponents.rawValue | CGImageByteOrderInfo.order16Little.rawValue)
+        guard let provider = CGDataProvider(data: data as CFData),
+              let cg = CGImage(
+                  width: width, height: height, bitsPerComponent: 16, bitsPerPixel: 64, bytesPerRow: width * 8, space: space,
+                  bitmapInfo: info, provider: provider, decode: nil, shouldInterpolate: true, intent: .defaultIntent)
+        else { return nil }
+        var hist: [UInt32] = []
+        if let bins = i.hist, i.hist_len > 0 { hist = Array(UnsafeBufferPointer(start: bins, count: i.hist_len)) }
+        return Rendered(image: cg, histogram: hist, peak: i.peak)
     }
 
     /// A thumbnail with the photo's edits.

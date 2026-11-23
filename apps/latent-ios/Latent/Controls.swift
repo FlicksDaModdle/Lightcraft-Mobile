@@ -111,36 +111,58 @@ struct LatentSlider: View {
     }
 }
 
-/// The red, green and blue histograms of the rendered photo, drawn over each other.
+/// The red, green and blue histograms of the rendered photo, drawn over each other. For an HDR
+/// render (`hdrStops` set) the left half is SDR and the right half one band per stop above white,
+/// marked and labelled.
 struct HistogramView: View {
     let bins: [UInt32]
+    var hdrStops: Double? = nil
 
     var body: some View {
-        Canvas { ctx, size in
-            let n = bins.count / 3
-            guard n > 1 else { return }
-            let peak = Double(bins.dropFirst(1).dropLast(1).max() ?? 1)
-            // the brightest few bins can dwarf the rest: scale to a soft peak
-            let top = Swift.max(1, peak * 0.85)
-            let colors: [Color] = [Color(red: 1, green: 0.27, blue: 0.27), Color(red: 0.3, green: 0.9, blue: 0.35), Color(red: 0.3, green: 0.45, blue: 1)]
-            var fill = Path()
-            for c in 0..<3 {
-                var line = Path()
-                for i in 0..<n {
-                    let v = Swift.min(Double(bins[c * n + i]) / top, 1)
-                    let p = CGPoint(x: size.width * CGFloat(i) / CGFloat(n - 1), y: size.height * (1 - CGFloat(v)))
-                    if i == 0 { line.move(to: p) } else { line.addLine(to: p) }
+        VStack(spacing: 2) {
+            Canvas { ctx, size in
+                let n = bins.count / 3
+                guard n > 1 else { return }
+                let peak = Double(bins.dropFirst(1).dropLast(1).max() ?? 1)
+                // the brightest few bins can dwarf the rest: scale to a soft peak
+                let top = Swift.max(1, peak * 0.85)
+                let colors: [Color] = [Color(red: 1, green: 0.27, blue: 0.27), Color(red: 0.3, green: 0.9, blue: 0.35), Color(red: 0.3, green: 0.45, blue: 1)]
+                for c in 0..<3 {
+                    var line = Path()
+                    for i in 0..<n {
+                        let v = Swift.min(Double(bins[c * n + i]) / top, 1)
+                        let p = CGPoint(x: size.width * CGFloat(i) / CGFloat(n - 1), y: size.height * (1 - CGFloat(v)))
+                        if i == 0 { line.move(to: p) } else { line.addLine(to: p) }
+                    }
+                    if c == 0 {
+                        var fill = line
+                        fill.addLine(to: CGPoint(x: size.width, y: size.height))
+                        fill.addLine(to: CGPoint(x: 0, y: size.height))
+                        fill.closeSubpath()
+                        ctx.fill(fill, with: .color(Color(white: 0.55).opacity(0.35)))
+                    }
+                    ctx.stroke(line, with: .color(colors[c].opacity(0.9)), lineWidth: 1.4)
                 }
-                if c == 0 {
-                    fill = line
-                    fill.addLine(to: CGPoint(x: size.width, y: size.height))
-                    fill.addLine(to: CGPoint(x: 0, y: size.height))
-                    fill.closeSubpath()
-                    ctx.fill(fill, with: .color(Color(white: 0.55).opacity(0.35)))
+                if let stops = hdrStops, stops > 0 {
+                    let mid = size.width / 2
+                    ctx.stroke(Path { $0.move(to: CGPoint(x: mid, y: 0)); $0.addLine(to: CGPoint(x: mid, y: size.height)) }, with: .color(.white.opacity(0.7)), lineWidth: 1)
+                    var k = 1.0
+                    while k < stops {
+                        let x = mid + mid * CGFloat(k / stops)
+                        ctx.stroke(Path { $0.move(to: CGPoint(x: x, y: 0)); $0.addLine(to: CGPoint(x: x, y: size.height)) }, with: .color(.white.opacity(0.45)), style: StrokeStyle(lineWidth: 1, dash: [3, 3]))
+                        k += 1
+                    }
                 }
-                ctx.stroke(line, with: .color(colors[c].opacity(0.9)), lineWidth: 1.4)
+                ctx.stroke(Path { $0.move(to: CGPoint(x: 0, y: size.height)); $0.addLine(to: CGPoint(x: size.width, y: size.height)) }, with: .color(Color(white: 0.4)), lineWidth: 1)
             }
-            ctx.stroke(Path { $0.move(to: CGPoint(x: 0, y: size.height)); $0.addLine(to: CGPoint(x: size.width, y: size.height)) }, with: .color(Color(white: 0.4)), lineWidth: 1)
+            if hdrStops != nil {
+                HStack(spacing: 0) {
+                    Text("SDR").frame(maxWidth: .infinity)
+                    Text("HDR").frame(maxWidth: .infinity)
+                }
+                .font(.system(size: 10, weight: .medium))
+                .foregroundStyle(Theme.secondaryText)
+            }
         }
         .accessibilityHidden(true)
     }

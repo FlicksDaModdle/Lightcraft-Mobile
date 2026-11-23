@@ -31,6 +31,11 @@ final class EditorModel: ObservableObject {
     @Published private(set) var cropAngle = 0.0
     @Published private(set) var cropAspect: [Int]?
     @Published var curveChannel = 0
+    /// HDR editing is on for the photo; `headroom` is how many stops above white it may reach.
+    @Published private(set) var hdr = false
+    @Published private(set) var headroom = 3.0
+    /// The picture on screen is an HDR render (and the histogram is the HDR one).
+    @Published private(set) var showingHDR = false
     /// Each channel's curve points (0…1 both ways); an empty list is the straight line.
     @Published private(set) var curves: [String: [CGPoint]] = [:]
 
@@ -62,6 +67,7 @@ final class EditorModel: ObservableObject {
         }
         return order.compactMap { controls[$0] }.filter { c in
             sections.contains(c.section) && (prefixes?.contains(where: { c.id.hasPrefix($0) }) ?? true)
+                && (hdr || !c.id.hasPrefix("hdr."))
         }
     }
 
@@ -231,6 +237,7 @@ final class EditorModel: ObservableObject {
     func undo() { command("edit.undo") }
     func redo() { command("edit.redo") }
     func setBW(_ on: Bool) { command("develop.treatment", ["bw": on]) }
+    func setHDR(_ on: Bool) { command("develop.hdr", ["enabled": on], toast: on ? "HDR on" : "HDR off") }
     func setWhiteBalance(_ mode: String) { command("develop.wb", ["mode": mode]) }
 
     func command(_ name: String, _ params: [String: Any] = [:], toast message: String? = nil) {
@@ -268,6 +275,9 @@ final class EditorModel: ObservableObject {
             let crop = s["crop"] as? [String: Any]
             cropAngle = ((crop?["geometry"] as? [String: Any])?["angle"] as? NSNumber)?.doubleValue ?? 0
             cropAspect = (crop?["aspect"] as? [NSNumber])?.map(\.intValue)
+            let h = s["hdr"] as? [String: Any]
+            hdr = h?["enabled"] as? Bool ?? false
+            headroom = (h?["max_ev"] as? NSNumber)?.doubleValue ?? 3
             let curve = s["curve"] as? [String: Any] ?? [:]
             var read: [String: [CGPoint]] = [:]
             for ch in curveChannels {
@@ -301,10 +311,14 @@ final class EditorModel: ObservableObject {
         let id = photo.id
         let size = renderSize
         Task {
-            let r = await Task.detached(priority: .userInitiated) { Engine.shared.render(id, fitting: size) }.value
+            let wantHDR = hdr
+            let r = await Task.detached(priority: .userInitiated) {
+                (wantHDR ? Engine.shared.renderHDR(id, fitting: size) : nil) ?? Engine.shared.render(id, fitting: size)
+            }.value
             if let r {
                 image = r.image
                 histogram = r.histogram
+                showingHDR = r.peak > 1
             } else if image == nil {
                 toast = "This photo could not be rendered"
             }

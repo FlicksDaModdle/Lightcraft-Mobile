@@ -26,6 +26,22 @@ pub struct Image {
     pub hist: Vec<u32>,
 }
 
+/// An HDR render: linear RGB with SDR white at 1.0 and highlights up to `peak`, as half floats
+/// (RGBA, alpha 1), and a histogram over SDR and then HDR (see [`HDR_SDR_SHARE`]).
+pub struct HdrImage {
+    pub width: usize,
+    pub height: usize,
+    /// IEEE half-float bits, 4 per pixel.
+    pub rgba16f: Vec<u16>,
+    pub hist: Vec<u32>,
+    /// The brightest value the render may reach (2^headroom).
+    pub peak: f32,
+}
+
+/// How much of the HDR histogram's width the SDR range takes; the rest is one band per stop above
+/// SDR white, up to the headroom.
+pub const HDR_SDR_SHARE: f32 = 0.5;
+
 /// One library session, shared by the app's threads.
 pub struct Core {
     session: Mutex<Session>,
@@ -102,6 +118,43 @@ impl Core {
         self.finish(job.run())
     }
 
+    /// The photo's HDR render (its edit with HDR on). An error when the photo isn't in HDR or the
+    /// engine gave no HDR pixels for it; the caller then shows the ordinary render.
+    pub fn render_hdr(&self, id: u64, max_w: usize, max_h: usize) -> Result<HdrImage, String> {
+        let mut job = self.lock().render_job(PhotoId(id), max_w.max(1), max_h.max(1), false, true).ok_or("no such photo")?;
+        if !job.settings.hdr.enabled {
+            return Err("HDR is off for this photo".into());
+        }
+        let peak = job.settings.hdr.peak();
+        let headroom = job.settings.hdr.max_ev.clamp(0.0, 5.0) as f32;
+        job.request.depth = lightcraft_pipeline::OutputDepth::F32Hdr;
+        // its own result: not the 8-bit preview's cache entry
+        job.key ^= 0x4844_5250_5245_5649;
+        job.cache = None;
+        let r = job.run();
+        self.lock().accept(&r);
+        let deep = r.rendered?.deep.ok_or("the engine gave no HDR pixels")?;
+        let lightcraft_pipeline::DeepSamples::F32(rgb) = deep.samples else { return Err("the HDR render is not floating point".into()) };
+        let n = deep.width * deep.height;
+        if rgb.len() < n * 3 {
+            return Err("the HDR render is short".into());
+        }
+        let mut out = Vec::with_capacity(n * 4);
+        let mut hist = vec![0u32; HIST_BINS * 3];
+        for px in rgb.chunks_exact(3).take(n) {
+            for (c, &v) in px.iter().enumerate() {
+                let v = if v.is_finite() { v.clamp(0.0, peak) } else { 0.0 };
+                out.push(f16_bits(v));
+                let bin = (hdr_position(v, headroom) * (HIST_BINS - 1) as f32).round() as usize;
+                if let Some(b) = hist.get_mut(c * HIST_BINS + bin.min(HIST_BINS - 1)) {
+                    *b = b.saturating_add(1);
+                }
+            }
+            out.push(0x3c00); // alpha 1.0
+        }
+        Ok(HdrImage { width: deep.width, height: deep.height, rgba16f: out, hist, peak })
+    }
+
     fn finish(&self, r: lightcraft_engine::media::RenderResult) -> Result<Image, String> {
         self.lock().accept(&r);
         let rendered = r.rendered?;
@@ -114,6 +167,42 @@ impl Core {
         }
         Ok(Image { width: img.width, height: img.height, rgba, hist })
     }
+}
+
+/// Where a linear value sits on the HDR histogram (0…1): SDR (display-encoded) in the first
+/// [`HDR_SDR_SHARE`], then one equal band per stop above white.
+pub fn hdr_position(v: f32, headroom: f32) -> f32 {
+    if v <= 1.0 {
+        let e = if v <= 0.003_130_8 { 12.92 * v } else { 1.055 * v.max(0.0).powf(1.0 / 2.4) - 0.055 };
+        e.clamp(0.0, 1.0) * HDR_SDR_SHARE
+    } else if headroom <= 0.0 {
+        HDR_SDR_SHARE
+    } else {
+        (HDR_SDR_SHARE + (1.0 - HDR_SDR_SHARE) * v.log2() / headroom).min(1.0)
+    }
+}
+
+/// IEEE 754 half-float bits of `v` (rounded to nearest; too large becomes the largest half, tiny
+/// becomes zero, which is all an image needs).
+pub fn f16_bits(v: f32) -> u16 {
+    let bits = v.to_bits();
+    let sign = ((bits >> 16) & 0x8000) as u16;
+    let exp = ((bits >> 23) & 0xff) as i32 - 127 + 15;
+    let mant = bits & 0x7f_ffff;
+    if v.is_nan() {
+        return sign | 0x7e00;
+    }
+    if exp >= 31 {
+        return sign | 0x7bff;
+    }
+    if exp <= 0 {
+        return sign;
+    }
+    let mut h = (exp as u32) << 10 | (mant >> 13);
+    if mant & 0x1000 != 0 {
+        h += 1; // round half up; a carry into the exponent is the right next value
+    }
+    sign | h.min(0x7bff) as u16
 }
 
 /// `bins` sums of `src` (any length) spread evenly over the output.
@@ -169,6 +258,32 @@ mod tests {
         assert!(img.width <= 160 && img.height <= 160 && img.width > 0);
         assert_eq!(img.rgba.len(), img.width * img.height * 4);
         assert_eq!(img.hist.len(), HIST_BINS * 3);
+    }
+
+    #[test]
+    fn an_hdr_render_keeps_highlights_above_white() {
+        let core = Core::demo();
+        let photos = ok(&core.execute("catalog.query", ""));
+        let id = photos["photos"][0]["id"].as_u64().unwrap_or(0);
+        ok(&core.execute("library.select", &json!({"ids": [id], "active": id}).to_string()));
+        assert!(core.render_hdr(id, 120, 120).is_err(), "HDR is off");
+        ok(&core.execute("develop.hdr", &json!({"enabled": true}).to_string()));
+        ok(&core.execute("develop.set", &json!({"control": "light.exposure", "value": 2.0}).to_string()));
+        let img = core.render_hdr(id, 120, 120);
+        let Ok(img) = img else { panic!("{:?}", img.err()) };
+        assert_eq!(img.rgba16f.len(), img.width * img.height * 4);
+        let one = f16_bits(1.0);
+        assert!(img.rgba16f.chunks_exact(4).any(|p| p[..3].iter().any(|&h| h > one)), "nothing above SDR white");
+        assert!(img.peak > 1.0);
+    }
+
+    #[test]
+    fn half_floats_keep_their_order() {
+        let vals = [0.0f32, 0.001, 0.25, 0.5, 1.0, 1.5, 4.0, 32.0];
+        let bits: Vec<u16> = vals.iter().map(|&v| f16_bits(v)).collect();
+        assert!(bits.windows(2).all(|w| w[0] < w[1]), "{bits:?}");
+        assert_eq!(f16_bits(1.0), 0x3c00);
+        assert!(hdr_position(1.0, 3.0) <= hdr_position(2.0, 3.0) && hdr_position(8.0, 3.0) <= 1.0);
     }
 
     #[test]
