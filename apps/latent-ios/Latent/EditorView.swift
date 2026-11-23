@@ -110,6 +110,16 @@ struct EditorView: View {
                 } else {
                     ProgressView().tint(.white).frame(width: geo.size.width, height: geo.size.height)
                 }
+                if let readout = model.readout {
+                    Text(readout)
+                        .font(.system(size: 14, weight: .semibold))
+                        .monospacedDigit()
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 7)
+                        .latentGlass(in: Capsule())
+                        .padding(.top, 10)
+                        .transition(.opacity)
+                }
                 if showingOriginal {
                     Text("Original")
                         .font(.system(size: 12, weight: .semibold))
@@ -177,6 +187,8 @@ struct EditorView: View {
                 case .color: colorHeader
                 case .mixer: stepHeader("Color mix")
                 case .grading: stepHeader("Color grading")
+                case .light: lightHeader
+                case .curve: curveHeader
                 default: EmptyView()
                 }
                 if !model.tool.tabs.isEmpty { tabs }
@@ -184,20 +196,27 @@ struct EditorView: View {
                 if model.tool == .grading { rangeChips }
             }
             .opacity(focused ? 0 : 1)
-            if model.tool == .grading {
+            if model.tool == .curve {
+                CurveEditor(model: model)
+                    .frame(height: 196)
+                    .padding(.horizontal, 20)
+                    .padding(.vertical, 8)
+            } else if model.tool == .grading {
                 GradingWheel(model: model)
                     .frame(height: 132)
                     .padding(.vertical, 6)
                     .opacity(focused && model.active != "wheel" ? 0 : 1)
             }
-            ScrollView {
-                LazyVStack(spacing: 0) {
-                    ForEach(model.visible) { slider($0) }
+            if model.tool != .curve {
+                ScrollView {
+                    LazyVStack(spacing: 0) {
+                        ForEach(model.visible) { slider($0) }
+                    }
+                    .padding(.vertical, 4)
                 }
-                .padding(.vertical, 4)
+                .scrollIndicators(.visible)
+                .frame(height: model.tool == .grading ? 150 : (model.tool == .light ? 150 : 168))
             }
-            .scrollIndicators(.visible)
-            .frame(height: model.tool == .grading ? 150 : 168)
         }
     }
 
@@ -258,6 +277,46 @@ struct EditorView: View {
                 .latentGlass(in: Capsule(), interactive: true)
         }
         .foregroundStyle(.white)
+    }
+
+    private var lightHeader: some View {
+        HStack {
+            Spacer()
+            stepButton("Curve", symbol: "chart.line.uptrend.xyaxis") { model.tool = .curve }
+        }
+        .padding(.horizontal, 20)
+        .padding(.top, 12)
+    }
+
+    private var curveHeader: some View {
+        HStack(spacing: 14) {
+            Button { model.tool = .light } label: {
+                Label("Curve", systemImage: "chevron.left").font(.system(size: 15, weight: .semibold))
+            }
+            .foregroundStyle(.white)
+            Spacer()
+            ForEach(curveChannels.indices, id: \.self) { i in
+                let ch = curveChannels[i]
+                let color = Color(red: ch.color.0, green: ch.color.1, blue: ch.color.2)
+                Button { model.curveChannel = i } label: {
+                    Circle()
+                        .fill(model.curveChannel == i ? color : .clear)
+                        .overlay(Circle().strokeBorder(color, lineWidth: 2.5))
+                        .frame(width: 22, height: 22)
+                        .overlay(Circle().strokeBorder(Color.white.opacity(model.curveChannel == i ? 0.9 : 0), lineWidth: 1.5).padding(-4))
+                        .frame(width: 34, height: 34)
+                }
+                .accessibilityLabel(Text(ch.label))
+                .accessibilityAddTraits(model.curveChannel == i ? .isSelected : [])
+            }
+            Button { model.resetCurve() } label: {
+                Image(systemName: "arrow.counterclockwise").font(.system(size: 15, weight: .semibold)).frame(width: 34, height: 34)
+            }
+            .foregroundStyle(.white)
+            .accessibilityLabel(Text("Reset curve"))
+        }
+        .padding(.horizontal, 20)
+        .padding(.top, 10)
     }
 
     private func stepHeader(_ title: String) -> some View {
@@ -504,7 +563,7 @@ struct ToolStrip: View {
                 item("Auto", symbol: "wand.and.stars", selected: false, edited: false) { model.auto() }
                 Rectangle().fill(Theme.separator).frame(width: 1, height: 32).padding(.horizontal, 4)
                 ForEach(Tool.strip) { t in
-                    let on = model.tool == t || (t == .color && (model.tool == .mixer || model.tool == .grading))
+                    let on = model.tool == t || (t == .color && (model.tool == .mixer || model.tool == .grading)) || (t == .light && model.tool == .curve)
                     item(t.label, symbol: t.symbol, selected: on, edited: model.edited(t)) { model.tool = t }
                 }
             }
@@ -561,5 +620,118 @@ struct ModeBar: View {
         .padding(.horizontal, 14)
         .padding(.top, 8)
         .padding(.bottom, 4)
+    }
+}
+
+/// The point curve for the open channel: drag a point, touch empty space to add one (and drag it),
+/// double-tap a point to take it away. The two ends stay.
+struct CurveEditor: View {
+    @ObservedObject var model: EditorModel
+    @State private var dragging: Int?
+    @State private var working: [CGPoint] = []
+
+    var body: some View {
+        let ch = curveChannels[model.curveChannel]
+        let color = Color(red: ch.color.0, green: ch.color.1, blue: ch.color.2)
+        GeometryReader { geo in
+            let size = geo.size
+            let pts = dragging == nil ? model.curvePoints : working
+            let toView = { (p: CGPoint) in CGPoint(x: p.x * size.width, y: (1 - p.y) * size.height) }
+            ZStack {
+                RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Color.black.opacity(0.35))
+                HistogramView(bins: model.histogram).opacity(0.35).padding(.bottom, 1)
+                Path { path in
+                    for i in 1..<4 {
+                        let f = CGFloat(i) / 4
+                        path.move(to: CGPoint(x: size.width * f, y: 0))
+                        path.addLine(to: CGPoint(x: size.width * f, y: size.height))
+                        path.move(to: CGPoint(x: 0, y: size.height * f))
+                        path.addLine(to: CGPoint(x: size.width, y: size.height * f))
+                    }
+                }
+                .stroke(Color.white.opacity(0.12), lineWidth: 1)
+                Path { path in
+                    path.move(to: CGPoint(x: 0, y: size.height))
+                    path.addLine(to: CGPoint(x: size.width, y: 0))
+                }
+                .stroke(Color.white.opacity(0.18), style: StrokeStyle(lineWidth: 1, dash: [4, 4]))
+                Path { path in
+                    let curve = MonotoneCurve(pts)
+                    for i in 0...120 {
+                        let x = Double(i) / 120
+                        let p = toView(CGPoint(x: x, y: Swift.min(Swift.max(curve(x), 0), 1)))
+                        if i == 0 { path.move(to: p) } else { path.addLine(to: p) }
+                    }
+                }
+                .stroke(color, lineWidth: 2.5)
+                ForEach(pts.indices, id: \.self) { i in
+                    Circle()
+                        .fill(Color.black.opacity(0.6))
+                        .overlay(Circle().strokeBorder(Color.white, lineWidth: 2))
+                        .frame(width: dragging == i ? 22 : 16, height: dragging == i ? 22 : 16)
+                        .position(toView(pts[i]))
+                        .animation(.spring(response: 0.25, dampingFraction: 0.7), value: dragging)
+                }
+            }
+            .contentShape(Rectangle())
+            .gesture(drag(size))
+            .simultaneousGesture(SpatialTapGesture(count: 2).onEnded { e in removePoint(near: e.location, size: size) })
+            .accessibilityLabel(Text("\(ch.label) curve"))
+            .accessibilityValue(Text("\(model.curvePoints.count) points"))
+        }
+    }
+
+    private func nearest(_ q: CGPoint, in pts: [CGPoint], size: CGSize) -> Int? {
+        var best: (Int, CGFloat)?
+        for (i, p) in pts.enumerated() {
+            let d = hypot(p.x * size.width - q.x, (1 - p.y) * size.height - q.y)
+            if d < 28, d < (best?.1 ?? .infinity) { best = (i, d) }
+        }
+        return best?.0
+    }
+
+    private func unit(_ q: CGPoint, _ size: CGSize) -> CGPoint {
+        CGPoint(x: Swift.min(Swift.max(q.x / size.width, 0), 1), y: Swift.min(Swift.max(1 - q.y / size.height, 0), 1))
+    }
+
+    private func drag(_ size: CGSize) -> some Gesture {
+        DragGesture(minimumDistance: 0)
+            .onChanged { g in
+                if dragging == nil {
+                    var pts = model.curvePoints
+                    if let i = nearest(g.startLocation, in: pts, size: size) {
+                        dragging = i
+                    } else {
+                        let p = unit(g.startLocation, size)
+                        let i = pts.firstIndex { $0.x > p.x } ?? pts.count
+                        pts.insert(p, at: i)
+                        dragging = i
+                    }
+                    working = pts
+                    model.beginCurve()
+                    model.setCurve(working)
+                }
+                guard let i = dragging, working.indices.contains(i) else { return }
+                var p = unit(g.location, size)
+                // a point stays between its neighbours; the ends keep to the edges' order
+                let lo = i == 0 ? 0 : working[i - 1].x + 0.01
+                let hi = i == working.count - 1 ? 1 : working[i + 1].x - 0.01
+                p.x = lo <= hi ? Swift.min(Swift.max(p.x, lo), hi) : working[i].x
+                working[i] = p
+                model.setCurve(working)
+            }
+            .onEnded { _ in
+                dragging = nil
+                model.end()
+            }
+    }
+
+    private func removePoint(near q: CGPoint, size: CGSize) {
+        var pts = model.curvePoints
+        guard let i = nearest(q, in: pts, size: size), i != 0, i != pts.count - 1 else { return }
+        pts.remove(at: i)
+        model.beginCurve()
+        model.setCurve(pts)
+        model.end()
     }
 }

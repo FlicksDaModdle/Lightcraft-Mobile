@@ -30,6 +30,9 @@ final class EditorModel: ObservableObject {
     @Published private(set) var presetAmount = 100.0
     @Published private(set) var cropAngle = 0.0
     @Published private(set) var cropAspect: [Int]?
+    @Published var curveChannel = 0
+    /// Each channel's curve points (0…1 both ways); an empty list is the straight line.
+    @Published private(set) var curves: [String: [CGPoint]] = [:]
 
     private var rendering = false
     private var dirty = false
@@ -66,7 +69,7 @@ final class EditorModel: ObservableObject {
     func edited(_ t: Tool) -> Bool {
         var sections = Set(t.sections)
         if t == .color { sections.formUnion(["mixer", "grading"]) }
-        return controls.values.contains { sections.contains($0.section) && $0.changed } || (t == .color && bw)
+        return controls.values.contains { sections.contains($0.section) && $0.changed } || (t == .color && bw) || (t == .light && curveEdited)
     }
 
     // MARK: editing
@@ -97,6 +100,52 @@ final class EditorModel: ObservableObject {
     func beginWheel() {
         active = "wheel"
         attempt("develop.beginInteraction", ["label": "Color Grading"])
+    }
+
+    // MARK: curve
+
+    /// The points of the open channel; the two ends when it has none yet.
+    var curvePoints: [CGPoint] {
+        let pts = curves[curveChannels[curveChannel].id] ?? []
+        return pts.count >= 2 ? pts.sorted { $0.x < $1.x } : [CGPoint(x: 0, y: 0), CGPoint(x: 1, y: 1)]
+    }
+
+    var curveEdited: Bool {
+        curves.values.contains { pts in pts.count >= 2 && pts.contains { abs($0.x - $0.y) > 1e-6 } }
+    }
+
+    func beginCurve() {
+        active = "curve"
+        attempt("develop.beginInteraction", ["label": "Tone Curve"])
+    }
+
+    func setCurve(_ points: [CGPoint]) {
+        let id = curveChannels[curveChannel].id
+        curves[id] = points
+        attempt("develop.curve", ["channel": id, "points": points.map { [Double($0.x), Double($0.y)] }])
+        render()
+    }
+
+    func resetCurve() {
+        command("curve.reset", ["channel": curveChannels[curveChannel].id])
+    }
+
+    /// What is being changed, for the label over the photo while dragging.
+    var readout: String? {
+        guard let a = active else { return nil }
+        switch a {
+        case "curve": return "Curve"
+        case "wheel":
+            let r = gradingRanges[gradingRange]
+            let h = Int(controls["grading.\(r.id).hue"]?.value ?? 0)
+            let s = Int(controls["grading.\(r.id).sat"]?.value ?? 0)
+            return "\(r.label)  \(h)°  \(s)"
+        case "preset.amount": return "Amount  \(Int(presetAmount))"
+        case "crop.angle": return "Straighten  \(angleControl.format(cropAngle))°"
+        default:
+            guard let c = controls[a] else { return nil }
+            return "\(c.label)  \(c.format(c.value))"
+        }
     }
 
     // MARK: presets
@@ -219,6 +268,16 @@ final class EditorModel: ObservableObject {
             let crop = s["crop"] as? [String: Any]
             cropAngle = ((crop?["geometry"] as? [String: Any])?["angle"] as? NSNumber)?.doubleValue ?? 0
             cropAspect = (crop?["aspect"] as? [NSNumber])?.map(\.intValue)
+            let curve = s["curve"] as? [String: Any] ?? [:]
+            var read: [String: [CGPoint]] = [:]
+            for ch in curveChannels {
+                let pts = (curve[ch.id] as? [[String: Any]] ?? []).compactMap { p -> CGPoint? in
+                    guard let x = (p["x"] as? NSNumber)?.doubleValue, let y = (p["y"] as? NSNumber)?.doubleValue else { return nil }
+                    return CGPoint(x: x, y: y)
+                }
+                read[ch.id] = pts
+            }
+            curves = read
         }
         refreshHistory()
     }

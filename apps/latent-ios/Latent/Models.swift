@@ -1,3 +1,4 @@
+import CoreGraphics
 import Foundation
 
 /// A photo in the library.
@@ -130,7 +131,7 @@ struct Control: Identifiable, Equatable {
 enum Tool: String, CaseIterable, Identifiable {
     case light, color, effects, detail, optics, geometry
     /// Steps inside Color, not in the strip.
-    case mixer, grading
+    case mixer, grading, curve
 
     /// The tools along the strip.
     static let strip: [Tool] = [.light, .color, .effects, .detail, .optics, .geometry]
@@ -147,6 +148,7 @@ enum Tool: String, CaseIterable, Identifiable {
         case .geometry: "Geometry"
         case .mixer: "Color mix"
         case .grading: "Color grading"
+        case .curve: "Curve"
         }
     }
 
@@ -160,6 +162,7 @@ enum Tool: String, CaseIterable, Identifiable {
         case .geometry: "perspective"
         case .mixer: "paintpalette"
         case .grading: "circle.lefthalf.filled"
+        case .curve: "chart.line.uptrend.xyaxis"
         }
     }
 
@@ -174,6 +177,7 @@ enum Tool: String, CaseIterable, Identifiable {
         case .geometry: ["geometry"]
         case .mixer: ["mixer"]
         case .grading: ["grading"]
+        case .curve: []
         }
     }
 
@@ -248,4 +252,65 @@ enum Mode: String, CaseIterable {
 
     /// Whether this build has the mode.
     var available: Bool { [.presets, .crop, .edit].contains(self) }
+}
+
+/// The point curve's channels: the engine's name, what it's called, and its colour.
+let curveChannels: [(id: String, label: String, color: (Double, Double, Double))] = [
+    ("master", "All", (0.92, 0.92, 0.92)), ("red", "Red", (0.9, 0.24, 0.24)),
+    ("green", "Green", (0.25, 0.75, 0.3)), ("blue", "Blue", (0.28, 0.48, 0.95)),
+]
+
+/// A monotone cubic through the points (x ascending), the shape the engine draws the curve with.
+struct MonotoneCurve {
+    private let xs: [Double]
+    private let ys: [Double]
+    private let ms: [Double]
+
+    init(_ points: [CGPoint]) {
+        let p = points.sorted { $0.x < $1.x }
+        xs = p.map { Double($0.x) }
+        ys = p.map { Double($0.y) }
+        let n = xs.count
+        guard n >= 2 else {
+            ms = []
+            return
+        }
+        var d = [Double](repeating: 0, count: n - 1)
+        for i in 0..<(n - 1) {
+            let dx = xs[i + 1] - xs[i]
+            d[i] = dx > 0 ? (ys[i + 1] - ys[i]) / dx : 0
+        }
+        var m = [Double](repeating: 0, count: n)
+        m[0] = d[0]
+        m[n - 1] = d[n - 2]
+        if n > 2 {
+            for i in 1..<(n - 1) { m[i] = d[i - 1] * d[i] <= 0 ? 0 : (d[i - 1] + d[i]) / 2 }
+        }
+        // Fritsch–Carlson: keep each piece from overshooting
+        for i in 0..<(n - 1) where d[i] != 0 {
+            let a = m[i] / d[i]
+            let b = m[i + 1] / d[i]
+            let s = a * a + b * b
+            if s > 9 {
+                let t = 3 / s.squareRoot()
+                m[i] = t * a * d[i]
+                m[i + 1] = t * b * d[i]
+            }
+        }
+        ms = m
+    }
+
+    func callAsFunction(_ x: Double) -> Double {
+        guard xs.count >= 2 else { return x }
+        if x <= xs[0] { return ys[0] }
+        if x >= xs[xs.count - 1] { return ys[ys.count - 1] }
+        var i = 0
+        while i < xs.count - 2 && x > xs[i + 1] { i += 1 }
+        let h = xs[i + 1] - xs[i]
+        guard h > 0 else { return ys[i] }
+        let t = (x - xs[i]) / h
+        let t2 = t * t
+        let t3 = t2 * t
+        return (2 * t3 - 3 * t2 + 1) * ys[i] + (t3 - 2 * t2 + t) * h * ms[i] + (-2 * t3 + 3 * t2) * ys[i + 1] + (t3 - t2) * h * ms[i + 1]
+    }
 }
