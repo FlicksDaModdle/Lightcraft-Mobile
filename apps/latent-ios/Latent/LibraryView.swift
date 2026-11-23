@@ -142,35 +142,40 @@ struct LibraryView: View {
     private var tabBar: some View {
         HStack(spacing: 4) {
             ForEach(HomeTab.allCases) { t in
-                Button {
-                    guard tab != t else { return }
-                    UISelectionFeedbackGenerator().selectionChanged()
-                    withAnimation(.glass) { tab = t }
-                } label: {
-                    VStack(spacing: 3) {
-                        Image(systemName: t.symbol).font(.system(size: 20, weight: .medium))
-                            .symbolEffect(.bounce, value: tab == t)
-                        Text(t.label).font(.system(size: 11, weight: .semibold))
-                    }
-                    .foregroundStyle(tab == t ? Theme.accent : .white)
-                    .frame(width: 104, height: 54)
-                    .background {
-                        if tab == t {
-                            Capsule()
-                                .fill(Color.white.opacity(0.12))
-                                .matchedGeometryEffect(id: "tab", in: glass)
-                        }
+                VStack(spacing: 3) {
+                    Image(systemName: t.symbol).font(.system(size: 20, weight: .medium))
+                        .symbolEffect(.bounce, value: tab == t)
+                    Text(t.label).font(.system(size: 11, weight: .semibold))
+                }
+                .foregroundStyle(tab == t ? Theme.accent : .white)
+                .frame(width: 104, height: 54)
+                .background {
+                    if tab == t {
+                        Capsule()
+                            .fill(Color.white.opacity(0.12))
+                            .matchedGeometryEffect(id: "tab", in: glass)
                     }
                 }
-                .buttonStyle(.plain)
+                .contentShape(Capsule())
+                // a plain tap, not a button inside interactive glass, so the touch always lands
+                .onTapGesture { choose(t) }
+                .accessibilityElement(children: .ignore)
                 .accessibilityLabel(Text(t.label))
-                .accessibilityAddTraits(tab == t ? .isSelected : [])
+                .accessibilityAddTraits(tab == t ? [.isButton, .isSelected] : .isButton)
+                .accessibilityAction { choose(t) }
             }
         }
         .padding(5)
-        .latentGlass(in: Capsule(), interactive: true)
+        .latentGlass(in: Capsule())
         .shadow(color: .black.opacity(0.35), radius: 18, y: 8)
         .padding(.bottom, 8)
+        .zIndex(1)
+    }
+
+    private func choose(_ t: HomeTab) {
+        guard tab != t else { return }
+        UISelectionFeedbackGenerator().selectionChanged()
+        withAnimation(.glass) { tab = t }
     }
 }
 

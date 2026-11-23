@@ -122,8 +122,12 @@ struct DeviceView: View {
                 }
                 .scrollIndicators(.hidden)
                 .refreshable { album.load() }
-            } else if album.status == .notDetermined {
-                ProgressView().tint(.white).frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if album.status == .notDetermined || (album.allowed && album.assets == nil) {
+                VStack(spacing: 12) {
+                    ProgressView().tint(.white)
+                    Text("Looking for photos on this iPhone\u{2026}").font(.system(size: 15)).foregroundStyle(Theme.secondaryText)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 denied
             }
