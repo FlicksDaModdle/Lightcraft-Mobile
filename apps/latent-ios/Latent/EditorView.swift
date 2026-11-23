@@ -24,8 +24,6 @@ struct EditorView: View {
     @State private var pan: CGSize = .zero
     @State private var pinchStart: (zoom: CGFloat, pan: CGSize)?
     @State private var panStart: CGSize?
-    /// While zoomed in Masks or Remove: one finger moves the photo instead of drawing.
-    @State private var moving = false
     @State private var importingLUTs = false
     @AppStorage("editorBackground") private var background = EditorBackground.photo.rawValue
     /// The colour taken from the photo, for the "From photo" background.
@@ -397,11 +395,9 @@ struct EditorView: View {
                         }
                         if model.mode == .masks && chrome, model.currentMask != nil {
                             MaskCanvas(model: model, imageSize: CGSize(width: img.width, height: img.height), size: geo.size, zoom: zoom)
-                                .allowsHitTesting(!moving)
                         }
                         if model.mode == .remove && chrome {
                             SpotCanvas(model: model, imageSize: CGSize(width: img.width, height: img.height), size: geo.size, zoom: zoom)
-                                .allowsHitTesting(!moving)
                         }
                     }
                     .scaleEffect(zoom)
@@ -422,15 +418,6 @@ struct EditorView: View {
                 }
                 if zoom > 1.01 {
                     HStack(spacing: 6) {
-                        if drawsOnPhoto {
-                            Button { withAnimation(.glass) { moving.toggle() } } label: {
-                                Image(systemName: moving ? "hand.raised.fill" : "hand.raised")
-                                    .font(.system(size: 13, weight: .semibold))
-                                    .frame(width: 34, height: 30)
-                                    .latentGlass(in: Capsule(), tint: moving ? Theme.accent : nil, interactive: true)
-                            }
-                            .accessibilityLabel(Text(moving ? "Stop moving the photo, draw again" : "Move the photo with one finger"))
-                        }
                         Button { resetZoom() } label: {
                             Text("\(Int((zoom * 100).rounded()))%")
                                 .font(.system(size: 13, weight: .semibold))
@@ -485,7 +472,7 @@ struct EditorView: View {
             .contentShape(Rectangle())
             .clipped()
             .simultaneousGesture(pinch(geo.size), including: model.mode == .crop ? .subviews : .all)
-            .simultaneousGesture(panWhenZoomed(geo.size), including: zoom > 1.01 && (!drawsOnPhoto || moving) ? .all : .subviews)
+            .simultaneousGesture(panWhenZoomed(geo.size), including: zoom > 1.01 && !drawsOnPhoto ? .all : .subviews)
             .onTapGesture(count: 2) { at in
                 guard model.mode != .crop else { return }
                 withAnimation(.glass) {
@@ -500,7 +487,6 @@ struct EditorView: View {
                         pan = clampPan(CGSize(width: -(at.x - c.x) * (z - 1), height: -(at.y - c.y) * (z - 1)), geo.size, z)
                     }
                 }
-                if zoom <= 1.01 { moving = false }
                 model.zoomChanged(zoom)
             }
             .onTapGesture { at in
@@ -543,14 +529,13 @@ struct EditorView: View {
         }
     }
 
-    /// Masks and Remove draw with one finger, so the photo pans with two (while pinching).
+    /// Masks and Remove draw with one finger, so there the photo moves with two.
     private var drawsOnPhoto: Bool { model.mode == .masks || model.mode == .remove }
 
     private func resetZoom() {
         withAnimation(.glass) {
             zoom = 1
             pan = .zero
-            moving = false
         }
         model.zoomChanged(1)
     }
@@ -563,23 +548,23 @@ struct EditorView: View {
     }
 
     /// Two fingers: zoom around the point between them, and move with them.
-    private func pinch(_ size: CGSize) -> some Gesture {
-        MagnifyGesture(minimumScaleDelta: 0.005)
-            .onChanged { v in
-                if pinchStart == nil {
-                    pinchStart = (zoom, pan)
-                    model.pinching = true
-                }
+    private func pinch(_ size: CGSize) -> PinchPan {
+        PinchPan(
+            began: {
+                pinchStart = (zoom, pan)
+                model.pinching = true
+            },
+            changed: { scale, now, start in
                 guard let s = pinchStart else { return }
-                let z = Swift.min(Swift.max(s.zoom * v.magnification, 1), 8)
+                let z = Swift.min(Swift.max(s.zoom * scale, 1), 8)
                 let c = CGPoint(x: size.width / 2, y: size.height / 2)
-                // the photo point that was under the fingers when the pinch began stays under them
-                let px = (v.startLocation.x - c.x - s.pan.width) / s.zoom
-                let py = (v.startLocation.y - c.y - s.pan.height) / s.zoom
+                // the photo point that was between the fingers when the pinch began follows them
+                let px = (start.x - c.x - s.pan.width) / s.zoom
+                let py = (start.y - c.y - s.pan.height) / s.zoom
                 zoom = z
-                pan = clampPan(CGSize(width: v.startLocation.x - c.x - px * z, height: v.startLocation.y - c.y - py * z), size, z)
-            }
-            .onEnded { _ in
+                pan = clampPan(CGSize(width: now.x - c.x - px * z, height: now.y - c.y - py * z), size, z)
+            },
+            ended: {
                 pinchStart = nil
                 model.pinching = false
                 if zoom < 1.05 {
@@ -587,14 +572,14 @@ struct EditorView: View {
                 } else {
                     model.zoomChanged(zoom)
                 }
-            }
+            })
     }
 
     /// One finger moves a zoomed photo (when nothing is drawn with it).
     private func panWhenZoomed(_ size: CGSize) -> some Gesture {
         DragGesture(minimumDistance: 8)
             .onChanged { v in
-                guard zoom > 1.01, pinchStart == nil, !drawsOnPhoto || moving else { return }
+                guard zoom > 1.01, pinchStart == nil, !drawsOnPhoto else { return }
                 if panStart == nil { panStart = pan }
                 let s = panStart ?? .zero
                 pan = clampPan(CGSize(width: s.width + v.translation.width, height: s.height + v.translation.height), size, zoom)
@@ -3127,6 +3112,38 @@ struct ProfileThumb: View {
                 let img = await Thumbnails.shared.profile(photo, profile: profile, longEdge: 200)
                 withAnimation(.easeOut(duration: 0.2)) { image = img }
             }
+        }
+    }
+}
+
+/// Two fingers on the photo: how far they've spread (scale), where they are now and where they
+/// began, so the photo zooms around them and moves with them. A UIKit pinch, which reports where
+/// the fingers are as they move.
+struct PinchPan: UIGestureRecognizerRepresentable {
+    let began: () -> Void
+    let changed: (_ scale: CGFloat, _ now: CGPoint, _ start: CGPoint) -> Void
+    let ended: () -> Void
+
+    final class Coordinator {
+        var start: CGPoint = .zero
+    }
+
+    func makeCoordinator(converter: CoordinateSpaceConverter) -> Coordinator { Coordinator() }
+
+    func makeUIGestureRecognizer(context: Context) -> UIPinchGestureRecognizer { UIPinchGestureRecognizer() }
+
+    func handleUIGestureRecognizerAction(_ recognizer: UIPinchGestureRecognizer, context: Context) {
+        let at = context.converter.localLocation
+        switch recognizer.state {
+        case .began:
+            context.coordinator.start = at
+            began()
+            changed(recognizer.scale, at, at)
+        case .changed:
+            // a finger lifted mid-pinch jumps the centre: follow only while both are down
+            if recognizer.numberOfTouches >= 2 { changed(recognizer.scale, at, context.coordinator.start) }
+        default:
+            ended()
         }
     }
 }

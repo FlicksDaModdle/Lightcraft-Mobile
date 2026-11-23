@@ -54,48 +54,21 @@ extension Color {
 }
 
 extension View {
-    /// Glass shapes inside blend and morph into each other on iOS 26 (Liquid Glass container).
-    @ViewBuilder
+    /// Glass shapes inside blend and morph into each other (Liquid Glass container).
     func latentGlassGroup(spacing: CGFloat = 10) -> some View {
-        #if compiler(>=6.2)
-        if #available(iOS 26.0, *) {
-            GlassEffectContainer(spacing: spacing) { self }
-        } else {
-            self
-        }
-        #else
-        self
-        #endif
+        GlassEffectContainer(spacing: spacing) { self }
     }
 
-    /// Ties a glass shape to others with the same id, so one morphs into the next on iOS 26.
-    @ViewBuilder
+    /// Ties a glass shape to others with the same id, so one morphs into the next.
     func latentGlassID(_ id: String, in namespace: Namespace.ID) -> some View {
-        #if compiler(>=6.2)
-        if #available(iOS 26.0, *) {
-            self.glassEffectID(id, in: namespace)
-        } else {
-            self
-        }
-        #else
-        self
-        #endif
+        glassEffectID(id, in: namespace)
     }
 }
 
 extension View {
-    /// The filled, tinted glass button for a sheet's confirm action on iOS 26.
-    @ViewBuilder
+    /// The filled, tinted glass button for a sheet's confirm action.
     func latentProminentGlass() -> some View {
-        #if compiler(>=6.2)
-        if #available(iOS 26.0, *) {
-            self.buttonStyle(.glassProminent).tint(Theme.accent)
-        } else {
-            self.fontWeight(.semibold).tint(Theme.accent)
-        }
-        #else
-        self.fontWeight(.semibold).tint(Theme.accent)
-        #endif
+        buttonStyle(.glassProminent).tint(Theme.accent)
     }
 }
 
@@ -140,17 +113,8 @@ enum Ambient {
 }
 
 extension View {
-    /// Liquid Glass on iOS 26 (when built with its SDK); the frosted material before that.
-    @ViewBuilder
+    /// Liquid Glass in `shape`, tinted, reacting to touch when `interactive`.
     func latentGlass<S: Shape>(in shape: S, tint: Color? = nil, interactive: Bool = false) -> some View {
-        #if compiler(>=6.2)
-        if #available(iOS 26.0, *) {
-            self.glassEffect(Glass.regular.tint(tint).interactive(interactive), in: shape)
-        } else {
-            self.background(.ultraThinMaterial, in: shape)
-        }
-        #else
-        self.background(.ultraThinMaterial, in: shape)
-        #endif
+        glassEffect(Glass.regular.tint(tint).interactive(interactive), in: shape)
     }
 }

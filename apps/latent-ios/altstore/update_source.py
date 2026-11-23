@@ -55,7 +55,7 @@ def main():
         "localizedDescription": f"Build {build} of the main branch.",
         "downloadURL": url,
         "size": int(size),
-        "minOSVersion": "17.0",
+        "minOSVersion": "26.0",
     })
     newest = versions[0]
     app = dict(
