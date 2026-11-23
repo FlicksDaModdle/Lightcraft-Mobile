@@ -13,6 +13,8 @@ struct EditorView: View {
     @State private var maskName = ""
     @State private var describing = false
     @State private var description = ""
+    /// Describe was chosen to add to (or take from) a mask: the op; nil makes a new mask.
+    @State private var describeOp: String?
     @State private var chromeHidden = false
     @State private var showingOriginal = false
     @State private var hold: Task<Void, Never>?
@@ -178,7 +180,10 @@ struct EditorView: View {
                     .padding(.horizontal, 8)
                     .padding(.top, 6)
                 Group {
-                    if model.mode == .crop {
+                    if model.mode == .masks {
+                        PresetsBar(title: "Masking", cancel: { withAnimation(.glass) { model.cancelMasks() } }, done: { withAnimation(.glass) { model.doneMasks() } })
+                            .latentGlassID("bottomBar", in: glass)
+                    } else if model.mode == .crop {
                         PresetsBar(title: "Crop", cancel: { withAnimation(.glass) { model.cancelCrop() } }, done: { withAnimation(.glass) { model.doneCrop() } })
                             .latentGlassID("bottomBar", in: glass)
                     } else if model.mode == .presets {
@@ -366,6 +371,17 @@ struct EditorView: View {
                 }
                 if model.mode == .masks && chrome, let img = model.image, model.currentMask != nil {
                     MaskCanvas(model: model, imageSize: CGSize(width: img.width, height: img.height), size: geo.size)
+                }
+                if model.mode == .masks && chrome && !focused {
+                    HStack(alignment: .bottom) {
+                        maskSideTools
+                        Spacer()
+                        maskColumn
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.bottom, 10)
+                    .frame(width: geo.size.width, height: geo.size.height, alignment: .bottom)
+                    .transition(.opacity)
                 }
                 if showHistogram && chrome && model.tool != .curve && model.mode != .crop && model.mode != .masks && !focused {
                     HistogramView(bins: model.histogram, hdrStops: model.showingHDR ? model.headroom : nil)
@@ -655,150 +671,52 @@ struct EditorView: View {
 
     private var masksPanel: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 10) {
-                Text("Masks").font(.system(size: 17, weight: .semibold))
-                Spacer()
-                if model.aiBusy {
-                    ProgressView().tint(.white).scaleEffect(0.8)
-                }
-                if model.currentMask != nil {
-                    Button { model.maskOverlay.toggle() } label: {
-                        Image(systemName: model.maskOverlay ? "eye" : "eye.slash").font(.system(size: 15, weight: .semibold)).frame(width: 36, height: 32)
-                    }
-                    .accessibilityLabel(Text(model.maskOverlay ? "Hide the overlay" : "Show the overlay"))
-                }
-                Menu {
-                    Button { model.addMask("brush") } label: { Label("Brush", systemImage: "paintbrush.pointed") }
-                    Button { model.addMask("linear") } label: { Label("Linear gradient", systemImage: "rectangle.split.1x2") }
-                    Button { model.addMask("radial") } label: { Label("Radial gradient", systemImage: "circle.dashed") }
-                    Divider()
-                    Button { model.addMask("subject") } label: { Label("Subject", systemImage: "person.crop.rectangle") }
-                    Button { model.addMask("sky") } label: { Label("Sky", systemImage: "cloud.sun") }
-                    Button { model.addMask("background") } label: { Label("Background", systemImage: "photo") }
-                    Divider()
-                    Button { model.addAIMask("object") } label: { Label("Select object (AI)", systemImage: "hand.tap") }
-                    Button {
-                        model.refreshAIModel()
-                        if model.aiModel.installed {
-                            description = ""
-                            describing = true
-                        } else {
-                            model.showAIModels = true
-                        }
-                    } label: { Label("Describe (AI)\u{2026}", systemImage: "text.magnifyingglass") }
-                    Button { model.refreshAIModel(); model.showAIModels = true } label: { Label("AI models\u{2026}", systemImage: "cpu") }
-                } label: {
-                    Label("Add", systemImage: "plus").font(.system(size: 14, weight: .medium))
-                        .padding(.horizontal, 12)
-                        .frame(height: 32)
-                        .latentGlass(in: Capsule(), interactive: true)
-                }
-            }
-            .foregroundStyle(.white)
-            .padding(.horizontal, 16)
-            .padding(.top, 12)
-            .opacity(focused ? 0 : 1)
-            if model.masks.isEmpty {
-                VStack(spacing: 8) {
-                    Image(systemName: "circle.dashed.inset.filled").font(.system(size: 30, weight: .light)).foregroundStyle(Theme.secondaryText)
-                    Text("Add a mask to change one part of the photo: paint it with a brush, or draw a linear or radial gradient.")
-                        .font(.system(size: 14))
-                        .foregroundStyle(Theme.secondaryText)
-                        .multilineTextAlignment(.center)
-                }
-                .padding(.horizontal, 30)
-                .frame(height: 200)
-            } else {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 8) {
-                        ForEach(model.masks) { m in
-                            let on = m.id == model.selectedMask
-                            Button { model.selectMask(m.id) } label: {
-                                HStack(spacing: 6) {
-                                    Image(systemName: maskSymbol(m.kind)).font(.system(size: 12, weight: .semibold))
-                                    Text(m.name).font(.system(size: 14, weight: on ? .semibold : .regular))
-                                    if !m.visible { Image(systemName: "eye.slash").font(.system(size: 11)) }
-                                }
-                                .foregroundStyle(on ? Color.black : Color.white)
-                                .padding(.horizontal, 12)
-                                .frame(height: 32)
-                                .background(on ? Color.white : Color.white.opacity(0.1), in: Capsule())
-                            }
-                        }
-                    }
-                    .padding(.horizontal, 16)
-                }
-                .padding(.top, 10)
-                .opacity(focused ? 0 : 1)
-                if let m = model.currentMask {
-                    HStack {
-                        Text(maskHint(m)).font(.system(size: 13)).foregroundStyle(Theme.secondaryText).lineLimit(2)
-                        Spacer()
-                        Menu {
-                            Button { model.maskCommand("mask.visible", ["visible": !m.visible]) } label: {
-                                Label(m.visible ? "Hide" : "Show", systemImage: m.visible ? "eye.slash" : "eye")
-                            }
-                            Button { model.maskCommand("mask.invert") } label: { Label("Invert", systemImage: "circle.righthalf.filled") }
-                            Button {
-                                maskName = m.name
-                                renamingMask = true
-                            } label: { Label("Rename", systemImage: "pencil") }
-                            Button(role: .destructive) { model.maskCommand("mask.delete") } label: { Label("Delete", systemImage: "trash") }
-                        } label: {
-                            Image(systemName: "ellipsis").font(.system(size: 16, weight: .semibold)).frame(width: 40, height: 32)
-                        }
-                        .foregroundStyle(.white)
-                        .accessibilityLabel(Text("\(m.name) options"))
-                    }
-                    .padding(.horizontal, 16)
-                    .padding(.top, 6)
+            if let m = model.currentMask {
+                maskHeader(m)
                     .opacity(focused ? 0 : 1)
-                    ScrollView {
-                        LazyVStack(spacing: 0) {
-                            if m.kind == "brush" { brushControls }
-                            if m.kind == "object" {
-                                Picker("Taps", selection: $model.objectExclude) {
-                                    Text("Add").tag(false)
-                                    Text("Leave out").tag(true)
-                                }
-                                .pickerStyle(.segmented)
-                                .padding(.horizontal, 20)
-                                .padding(.vertical, 6)
-                            }
-                            if m.kind == "radial" {
-                                maskShapeSlider("Feather", key: "feather", m: m, min: 0, max: 100)
-                            }
-                            ForEach(maskAdjustments, id: \.key) { a in
-                                let c = model.maskControl(a)
-                                LatentSlider(
-                                    control: c,
-                                    onBegin: { model.beginMask(a.key) },
-                                    onChange: { model.adjustMask(a.key, $0) },
-                                    onEnd: { model.end() },
-                                    onReset: {
-                                        model.beginMask(a.key)
-                                        model.adjustMask(a.key, 0)
-                                        model.end()
-                                    })
-                                    .opacity(focused && model.active != c.id ? 0 : 1)
-                            }
+                partsRow(m)
+                    .opacity(focused ? 0 : 1)
+                ScrollView {
+                    LazyVStack(spacing: 0) {
+                        partControls
+                        let keys = Set(maskGroups[model.maskGroup].keys)
+                        ForEach(maskAdjustments.filter { keys.contains($0.key) }, id: \.key) { a in
+                            let c = model.maskControl(a)
+                            LatentSlider(
+                                control: c,
+                                onBegin: { model.beginMask(a.key) },
+                                onChange: { model.adjustMask(a.key, $0) },
+                                onEnd: { model.end() },
+                                onReset: {
+                                    model.beginMask(a.key)
+                                    model.adjustMask(a.key, 0)
+                                    model.end()
+                                })
+                                .opacity(focused && model.active != c.id ? 0 : 1)
                         }
-                        .padding(.vertical, 4)
                     }
-                    .frame(height: 176)
-                } else {
-                    Text("Pick a mask above, or add one.")
-                        .font(.system(size: 14))
-                        .foregroundStyle(Theme.secondaryText)
-                        .frame(height: 120)
+                    .padding(.vertical, 4)
                 }
+                .frame(height: 168)
+                maskGroupStrip(m)
+                    .opacity(focused ? 0 : 1)
+            } else {
+                createGrid
             }
         }
         .padding(.bottom, 4)
+        .animation(.glass, value: model.selectedMask)
+        .animation(.glass, value: model.selectedPart)
         .alert("Describe what to select", isPresented: $describing) {
             TextField("For example: the car", text: $description)
             Button("Cancel", role: .cancel) {}
-            Button("Select") { model.addAIMask("prompt", text: description) }
+            Button("Select") {
+                if let op = describeOp {
+                    model.addPart("prompt", op: op, text: description)
+                } else {
+                    model.addAIMask("prompt", text: description)
+                }
+            }
         } message: {
             Text("The AI model finds every match in the photo.")
         }
@@ -810,26 +728,411 @@ struct EditorView: View {
         }
     }
 
-    private func maskSymbol(_ kind: String) -> String {
-        switch kind {
-        case "brush": "paintbrush.pointed"
-        case "linear": "rectangle.split.1x2"
-        case "radial": "circle.dashed"
-        default: "circle.dashed.inset.filled"
+    /// No mask yet: every way to make one.
+    private var createGrid: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("Create a mask").font(.system(size: 17, weight: .semibold))
+                Spacer()
+                Button { model.refreshAIModel(); model.showAIModels = true } label: {
+                    Label("AI model", systemImage: "cpu").font(.system(size: 13, weight: .medium))
+                        .padding(.horizontal, 10).frame(height: 30)
+                        .latentGlass(in: Capsule(), interactive: true)
+                }
+            }
+            .foregroundStyle(.white)
+            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 6), count: 5), spacing: 8) {
+                ForEach(maskTools, id: \.kind) { t in
+                    Button { choose(t.kind, op: nil) } label: {
+                        VStack(spacing: 6) {
+                            Image(systemName: t.symbol).font(.system(size: 20)).frame(height: 26)
+                            Text(t.label).font(.system(size: 11)).lineLimit(1).minimumScaleFactor(0.7)
+                        }
+                        .foregroundStyle(.white)
+                        .frame(maxWidth: .infinity, minHeight: 64)
+                        .background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                        .overlay(alignment: .topTrailing) {
+                            if t.ai {
+                                Text("AI").font(.system(size: 8, weight: .heavy)).padding(.horizontal, 4).padding(.vertical, 2)
+                                    .background(Theme.accent, in: Capsule()).padding(4)
+                            }
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(Text(t.ai ? "\(t.label), uses the AI model" : t.label))
+                }
+            }
+            Text("Each mask gets its own adjustments. Once it's made, add to it or take from it with more tools.")
+                .font(.system(size: 12))
+                .foregroundStyle(Theme.secondaryText)
+        }
+        .padding(.horizontal, 14)
+        .padding(.top, 14)
+        .padding(.bottom, 6)
+    }
+
+    /// Make a mask (op nil) or add a part to the selected one.
+    private func choose(_ kind: String, op: String?) {
+        if kind == "prompt" {
+            model.refreshAIModel()
+            guard model.aiModel.installed else {
+                model.showAIModels = true
+                return
+            }
+            describeOp = op
+            description = ""
+            describing = true
+            return
+        }
+        withAnimation(.glass) {
+            if let op { model.addPart(kind, op: op) } else { model.addMask(kind) }
         }
     }
 
-    private func maskHint(_ m: MaskItem) -> String {
-        switch m.kind {
-        case "brush": model.brushErase ? "Erasing: drag over the photo to take the mask away." : "Painting: drag over the photo to add to the mask."
-        case "linear": "Drag across the photo: full effect where you start, none where you stop."
-        case "radial": "Drag out from a centre to draw it; drag inside it to move it."
-        case "object": model.objectExclude ? "Tap parts to leave out of the selection." : "Tap what to select; tap again to add more of it."
-        case "sky": "Bright, smooth sky reaching the top of the photo, found without AI."
-        case "subject": "The photo's main subject, found without AI."
-        case "background": "Everything but the main subject, found without AI."
-        default: m.kindLabel
+    @ViewBuilder
+    private func toolMenu(op: String?) -> some View {
+        Section("Automatic") {
+            ForEach(maskTools.filter { ["subject", "sky", "background"].contains($0.kind) }, id: \.kind) { t in
+                Button { choose(t.kind, op: op) } label: { Label(t.label, systemImage: t.symbol) }
+            }
         }
+        Section("Draw") {
+            ForEach(maskTools.filter { ["brush", "linear", "radial"].contains($0.kind) }, id: \.kind) { t in
+                Button { choose(t.kind, op: op) } label: { Label(maskKindLabel(t.kind), systemImage: t.symbol) }
+            }
+        }
+        Section("By colour or brightness") {
+            ForEach(maskTools.filter { ["colorRange", "luminanceRange"].contains($0.kind) }, id: \.kind) { t in
+                Button { choose(t.kind, op: op) } label: { Label(t.label, systemImage: t.symbol) }
+            }
+        }
+        Section("With the AI model") {
+            ForEach(maskTools.filter(\.ai), id: \.kind) { t in
+                Button { choose(t.kind, op: op) } label: { Label(t.kind == "prompt" ? "Describe\u{2026}" : "Select object", systemImage: t.symbol) }
+            }
+            Button { model.refreshAIModel(); model.showAIModels = true } label: { Label("AI model\u{2026}", systemImage: "cpu") }
+        }
+    }
+
+    @ViewBuilder
+    private func maskActions(_ m: MaskItem) -> some View {
+        Button {
+            maskName = m.name
+            renamingMask = true
+        } label: { Label("Rename", systemImage: "pencil") }
+        Button { model.maskCommand("mask.duplicate") } label: { Label("Duplicate", systemImage: "plus.square.on.square") }
+        Button { model.maskCommand("mask.duplicate", ["invert": true]) } label: { Label("Duplicate and invert", systemImage: "square.on.square.intersection.dashed") }
+        Button { model.maskCommand("mask.invert") } label: { Label(m.invert ? "Don't invert" : "Invert", systemImage: "circle.righthalf.filled") }
+        Button { model.maskCommand("mask.visible", ["visible": !m.visible]) } label: {
+            Label(m.visible ? "Hide its effect" : "Show its effect", systemImage: m.visible ? "eye.slash" : "eye")
+        }
+        Divider()
+        Button(role: .destructive) { withAnimation(.glass) { model.maskCommand("mask.delete") } } label: { Label("Delete mask", systemImage: "trash") }
+    }
+
+    private func maskHeader(_ m: MaskItem) -> some View {
+        HStack(spacing: 10) {
+            Menu { maskActions(m) } label: {
+                HStack(spacing: 6) {
+                    Text(m.name).font(.system(size: 17, weight: .semibold)).lineLimit(1)
+                    Image(systemName: "chevron.down").font(.system(size: 12, weight: .bold)).foregroundStyle(Theme.secondaryText)
+                }
+            }
+            .accessibilityLabel(Text("\(m.name), mask options"))
+            if m.invert { tag("Inverted") }
+            if !m.visible { tag("Hidden") }
+            Spacer()
+            if model.aiBusy { ProgressView().tint(.white).scaleEffect(0.8) }
+        }
+        .foregroundStyle(.white)
+        .padding(.horizontal, 16)
+        .padding(.top, 12)
+    }
+
+    private func tag(_ text: String) -> some View {
+        Text(text).font(.system(size: 11, weight: .semibold)).foregroundStyle(Theme.secondaryText)
+            .padding(.horizontal, 7).padding(.vertical, 3)
+            .background(Color.white.opacity(0.08), in: Capsule())
+    }
+
+    /// The mask's parts (tap to edit one; hold for its options), then Add and Subtract.
+    private func partsRow(_ m: MaskItem) -> some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 6) {
+                ForEach(Array(m.parts.enumerated()), id: \.offset) { i, part in
+                    partChip(part, index: i)
+                }
+                Menu { toolMenu(op: "add") } label: {
+                    Label("Add", systemImage: "plus").font(.system(size: 13, weight: .semibold))
+                        .padding(.horizontal, 10).frame(height: 30)
+                        .latentGlass(in: Capsule(), interactive: true)
+                }
+                Menu { toolMenu(op: "subtract") } label: {
+                    Label("Subtract", systemImage: "minus").font(.system(size: 13, weight: .semibold))
+                        .padding(.horizontal, 10).frame(height: 30)
+                        .latentGlass(in: Capsule(), interactive: true)
+                }
+            }
+            .foregroundStyle(.white)
+            .padding(.horizontal, 16)
+        }
+        .padding(.top, 10)
+    }
+
+    private func partChip(_ part: MaskPart, index i: Int) -> some View {
+        let on = i == model.selectedPart
+        let subtracts = part.op == "subtract" && i > 0
+        return Button { model.selectedPart = i } label: {
+            HStack(spacing: 5) {
+                Image(systemName: opSymbol(part.op, first: i == 0)).font(.system(size: 11, weight: .bold))
+                    .foregroundStyle(subtracts ? Color(red: 1, green: 0.45, blue: 0.4) : (on ? Color.black : Theme.secondaryText))
+                Image(systemName: maskSymbol(part.kind)).font(.system(size: 12, weight: .semibold))
+                Text(part.label).font(.system(size: 13, weight: on ? .semibold : .regular)).lineLimit(1)
+                if part.invert { Image(systemName: "circle.righthalf.filled").font(.system(size: 10)) }
+            }
+            .foregroundStyle(on ? Color.black : Color.white)
+            .padding(.horizontal, 10)
+            .frame(height: 30)
+            .background(on ? Color.white : Color.white.opacity(0.1), in: Capsule())
+        }
+        .contextMenu {
+            Button { model.selectedPart = i; model.partCommand("invert") } label: { Label("Invert part", systemImage: "circle.righthalf.filled") }
+            Button { model.selectedPart = i; model.partCommand("duplicate") } label: { Label("Duplicate part", systemImage: "plus.square.on.square") }
+            if i > 0 {
+                Button { model.selectedPart = i; model.partCommand("op", op: "add") } label: { Label("Add to the mask", systemImage: "plus.circle") }
+                Button { model.selectedPart = i; model.partCommand("op", op: "subtract") } label: { Label("Take from the mask", systemImage: "minus.circle") }
+                Button { model.selectedPart = i; model.partCommand("op", op: "intersect") } label: { Label("Keep only where both", systemImage: "circle.circle") }
+            }
+            Button(role: .destructive) { model.selectedPart = i; model.partCommand("delete") } label: { Label("Delete part", systemImage: "trash") }
+        }
+        .accessibilityLabel(Text("\(part.label), \(i == 0 ? "base" : part.op)"))
+        .accessibilityAddTraits(on ? .isSelected : [])
+    }
+
+    private func opSymbol(_ op: String, first: Bool) -> String {
+        if first { return "circle.fill" }
+        switch op {
+        case "subtract": return "minus.circle.fill"
+        case "intersect": return "circle.circle.fill"
+        default: return "plus.circle.fill"
+        }
+    }
+
+    /// The selected part's own settings: brush, object taps, feather, colour or brightness range.
+    @ViewBuilder
+    private var partControls: some View {
+        if let part = model.currentPart {
+            switch part.kind {
+            case "brush":
+                brushControls
+            case "object":
+                Picker("Taps", selection: $model.objectExclude) {
+                    Text("Add").tag(false)
+                    Text("Leave out").tag(true)
+                }
+                .pickerStyle(.segmented)
+                .padding(.horizontal, 20)
+                .padding(.vertical, 6)
+            case "radial":
+                partSlider("Feather", key: "feather", part: part, min: 0, max: 100, scale: 1, fallback: 50)
+            case "colorRange":
+                Picker("Taps", selection: $model.addColorSample) {
+                    Text("Pick a colour").tag(false)
+                    Text("Add a colour").tag(true)
+                }
+                .pickerStyle(.segmented)
+                .padding(.horizontal, 20)
+                .padding(.vertical, 6)
+                partSlider("Refine", key: "refine", part: part, min: 0, max: 100, scale: 1, fallback: 50)
+            case "luminanceRange":
+                partSlider("From", key: "lo", part: part, min: 0, max: 100, scale: 100, fallback: 0.6)
+                partSlider("To", key: "hi", part: part, min: 0, max: 100, scale: 100, fallback: 1)
+                partSlider("Soften dark end", key: "lo_feather", part: part, min: 0, max: 100, scale: 100, fallback: 0.1)
+                partSlider("Soften bright end", key: "hi_feather", part: part, min: 0, max: 100, scale: 100, fallback: 0.1)
+            default:
+                EmptyView()
+            }
+            Text(maskHint(part))
+                .font(.system(size: 12))
+                .foregroundStyle(Theme.secondaryText)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 20)
+                .padding(.vertical, 4)
+                .opacity(focused ? 0 : 1)
+        }
+    }
+
+    private func maskHint(_ p: MaskPart) -> String {
+        switch p.kind {
+        case "brush": return model.brushErase ? "Erasing: drag over the photo to take the mask away." : "Painting: drag over the photo to add to the mask."
+        case "linear": return "Drag across the photo: full effect where you start, none where you stop."
+        case "radial": return "Drag out from a centre to draw it; drag inside it to move it."
+        case "object": return model.objectExclude ? "Tap parts to leave out of the selection." : "Tap what to select; tap again to add more of it."
+        case "colorRange": return model.addColorSample ? "Tap another colour to include it too (up to five)." : "Tap a colour in the photo; everything that colour is selected."
+        case "luminanceRange": return "Selects by brightness, from dark (0) to bright (100)."
+        case "sky": return "Bright, smooth sky reaching the top of the photo, found without AI."
+        case "subject": return "The photo's main subject, found without AI."
+        case "background": return "Everything but the main subject, found without AI."
+        default: return p.label
+        }
+    }
+
+    /// Light, Color, Effects, Detail, Optics, and Reset.
+    private func maskGroupStrip(_ m: MaskItem) -> some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 2) {
+                ForEach(maskGroups.indices, id: \.self) { i in
+                    maskGroupButton(i, m)
+                }
+                Rectangle().fill(Theme.separator).frame(width: 1, height: 30).padding(.horizontal, 4)
+                Button { model.resetMaskAdjustments() } label: {
+                    VStack(spacing: 4) {
+                        Image(systemName: "arrow.counterclockwise").font(.system(size: 18)).frame(height: 22)
+                        Text("Reset").font(.system(size: 11))
+                        Color.clear.frame(width: 4, height: 4)
+                    }
+                    .foregroundStyle(m.edited ? Color.white : Theme.secondaryText)
+                    .frame(width: 60, height: 56)
+                }
+                .buttonStyle(.plain)
+                .disabled(!m.edited)
+                .accessibilityLabel(Text("Reset this mask's adjustments"))
+            }
+            .padding(.horizontal, 10)
+        }
+        .padding(.top, 2)
+    }
+
+    private func maskGroupButton(_ i: Int, _ m: MaskItem) -> some View {
+        let g = maskGroups[i]
+        let on = model.maskGroup == i
+        let edited = g.keys.contains { abs(m.adjust[$0] ?? 0) > 1e-9 }
+        return Button {
+            UISelectionFeedbackGenerator().selectionChanged()
+            withAnimation(.glass) { model.maskGroup = i }
+        } label: {
+            VStack(spacing: 4) {
+                Image(systemName: g.symbol).font(.system(size: 18)).frame(height: 22)
+                    .symbolEffect(.bounce, value: on)
+                Text(g.label).font(.system(size: 11))
+                Circle().fill(edited ? Theme.secondaryText : .clear).frame(width: 4, height: 4)
+            }
+            .foregroundStyle(on ? Color.white : Theme.secondaryText)
+            .frame(width: 60, height: 56)
+            .background {
+                if on {
+                    RoundedRectangle(cornerRadius: 14, style: .continuous).fill(Color.white.opacity(0.08))
+                        .latentGlass(in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                        .matchedGeometryEffect(id: "maskGroup", in: glass)
+                }
+            }
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(Text(g.label))
+        .accessibilityAddTraits(on ? .isSelected : [])
+    }
+
+    /// The column over the photo's right side: + for a new mask, then each mask's picture.
+    private var maskColumn: some View {
+        VStack(spacing: 8) {
+            Menu { toolMenu(op: nil) } label: {
+                Image(systemName: "plus")
+                    .font(.system(size: 18, weight: .bold))
+                    .foregroundStyle(.white)
+                    .frame(width: 44, height: 44)
+                    .latentGlass(in: Circle(), tint: Theme.accent, interactive: true)
+            }
+            .accessibilityLabel(Text("New mask"))
+            if !model.masks.isEmpty {
+                ScrollView(.vertical, showsIndicators: false) {
+                    VStack(spacing: 8) {
+                        ForEach(model.masks.reversed()) { m in maskThumb(m) }
+                    }
+                    .padding(.vertical, 2)
+                }
+                .frame(height: CGFloat(Swift.min(model.masks.count, 4)) * 52)
+            }
+        }
+        .padding(6)
+        .latentGlass(in: RoundedRectangle(cornerRadius: 28, style: .continuous))
+    }
+
+    private func maskThumb(_ m: MaskItem) -> some View {
+        let on = m.id == model.selectedMask
+        return Button {
+            withAnimation(.glass) { model.selectMask(m.id) }
+        } label: {
+            ZStack {
+                Color.black
+                if let img = model.maskThumbs[m.id] {
+                    Image(decorative: img, scale: 1).resizable().scaledToFill()
+                } else {
+                    Image(systemName: maskSymbol(m.kind)).font(.system(size: 15)).foregroundStyle(.white)
+                }
+                if !m.visible {
+                    Color.black.opacity(0.5)
+                    Image(systemName: "eye.slash").font(.system(size: 13, weight: .semibold)).foregroundStyle(.white)
+                }
+            }
+            .frame(width: 44, height: 44)
+            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(on ? Theme.accent : Color.white.opacity(0.25), lineWidth: on ? 2.5 : 1))
+            .scaleEffect(on ? 1.06 : 1)
+        }
+        .buttonStyle(.plain)
+        .contextMenu { maskActions(m) }
+        .accessibilityLabel(Text(m.name))
+        .accessibilityAddTraits(on ? .isSelected : [])
+    }
+
+    /// Bottom left over the photo: the overlay, how it's drawn, and delete.
+    private var maskSideTools: some View {
+        VStack(spacing: 8) {
+            Button { withAnimation(.glass) { model.maskOverlay.toggle() } } label: {
+                Image(systemName: model.maskOverlay ? "circle.dashed.inset.filled" : "circle.dashed")
+                    .contentTransition(.symbolEffect(.replace))
+                    .frame(width: 44, height: 44)
+                    .latentGlass(in: Circle(), interactive: true)
+            }
+            .accessibilityLabel(Text(model.maskOverlay ? "Hide the overlay" : "Show the overlay"))
+            Menu {
+                Picker("Show as", selection: $model.maskLook.view) {
+                    Text("Colour over the photo").tag("color")
+                    Text("Colour over black & white").tag("colorOnBw")
+                    Text("Photo on black").tag("imageOnBlack")
+                    Text("Photo on white").tag("imageOnWhite")
+                    Text("White on black").tag("whiteOnBlack")
+                }
+                .pickerStyle(.menu)
+                Picker("Colour", selection: $model.maskLook.rgb) {
+                    Text("Red").tag(UInt32(0xEB4040))
+                    Text("Green").tag(UInt32(0x3CD26E))
+                    Text("Blue").tag(UInt32(0x3C8CFF))
+                    Text("Yellow").tag(UInt32(0xFFD23C))
+                    Text("White").tag(UInt32(0xFFFFFF))
+                }
+                .pickerStyle(.menu)
+                Picker("Opacity", selection: $model.maskLook.opacity) {
+                    ForEach([25, 50, 75, 100], id: \.self) { Text("\($0)%").tag($0) }
+                }
+                .pickerStyle(.menu)
+            } label: {
+                Image(systemName: "paintpalette")
+                    .frame(width: 44, height: 44)
+                    .latentGlass(in: Circle(), interactive: true)
+            }
+            .accessibilityLabel(Text("Overlay options"))
+            if model.currentMask != nil {
+                Button(role: .destructive) { withAnimation(.glass) { model.maskCommand("mask.delete") } } label: {
+                    Image(systemName: "trash")
+                        .frame(width: 44, height: 44)
+                        .latentGlass(in: Circle(), interactive: true)
+                }
+                .accessibilityLabel(Text("Delete mask"))
+            }
+        }
+        .font(.system(size: 16, weight: .semibold))
+        .foregroundStyle(.white)
     }
 
     private var brushControls: some View {
@@ -854,19 +1157,26 @@ struct EditorView: View {
         return LatentSlider(control: c, onBegin: {}, onChange: { value.wrappedValue = $0 / scale }, onEnd: {}, onReset: {})
     }
 
-    /// A slider for a number in the selected mask's shape (a radial's feather).
-    private func maskShapeSlider(_ label: String, key: String, m: MaskItem, min: Double, max: Double) -> some View {
-        let c = Control(id: "shape.\(key)", label: label, min: min, max: max, defaultValue: 50, step: 1, decimals: 0, value: m.number(key, 50), track: .plain)
+    /// A slider for a number in the selected part's shape (shown × `scale`).
+    private func partSlider(_ label: String, key: String, part: MaskPart, min: Double, max: Double, scale: Double, fallback: Double) -> some View {
+        let c = Control(id: "shape.\(key)", label: label, min: min, max: max, defaultValue: fallback * scale, step: 1, decimals: 0,
+                        value: part.number(key, fallback) * scale, track: .plain)
         return LatentSlider(
             control: c,
             onBegin: { model.beginMask(label) },
             onChange: { v in
-                var shape = m.shape
-                shape[key] = v
+                var shape = part.shape
+                shape[key] = v / scale
                 model.updateMaskShape(shape)
             },
             onEnd: { model.end() },
-            onReset: {})
+            onReset: {
+                model.beginMask(label)
+                var shape = part.shape
+                shape[key] = fallback
+                model.updateMaskShape(shape)
+                model.end()
+            })
     }
 
     // MARK: presets
@@ -1721,7 +2031,7 @@ struct MaskCanvas: View {
     let imageSize: CGSize
     let size: CGSize
     @State private var stroke: [CGPoint] = []
-    @State private var start: (mask: MaskItem, at: CGPoint)?
+    @State private var start: (part: MaskPart, at: CGPoint)?
 
     /// Where the picture sits in the view, fitted.
     private var fitted: CGRect {
@@ -1752,7 +2062,7 @@ struct MaskCanvas: View {
     }
 
     var body: some View {
-        let m = model.currentMask
+        let m = model.currentPart
         ZStack {
             if let m {
                 outline(m)
@@ -1768,9 +2078,9 @@ struct MaskCanvas: View {
         .gesture(
             DragGesture(minimumDistance: 0)
                 .onChanged { g in
-                    guard let m = model.currentMask else { return }
+                    guard let m = model.currentPart else { return }
                     switch m.kind {
-                    case "object":
+                    case "object", "colorRange":
                         break
                     case "brush":
                         if stroke.isEmpty { model.beginMask("Brush") }
@@ -1789,10 +2099,10 @@ struct MaskCanvas: View {
                             model.beginMask("Radial Gradient")
                         }
                         guard let s = start else { return }
-                        var shape = s.mask.shape
-                        let c0 = s.mask.point("center") ?? CGPoint(x: 0.5, y: 0.5)
+                        var shape = s.part.shape
+                        let c0 = s.part.point("center") ?? CGPoint(x: 0.5, y: 0.5)
                         let cv = toView(c0)
-                        let rx = s.mask.number("rx", 0.2)
+                        let rx = s.part.number("rx", 0.2)
                         let inside = hypot(s.at.x - cv.x, s.at.y - cv.y) < CGFloat(rx) * perLongEdge * 0.8
                         if inside {
                             // move it
@@ -1803,7 +2113,7 @@ struct MaskCanvas: View {
                             // draw a new one out from where the drag began
                             let c = toMask(s.at)
                             let r = Swift.max(Double(hypot(g.location.x - s.at.x, g.location.y - s.at.y) / perLongEdge), 0.02)
-                            let ratio = s.mask.number("ry", 0.16) / Swift.max(rx, 1e-3)
+                            let ratio = s.part.number("ry", 0.16) / Swift.max(rx, 1e-3)
                             shape["center"] = ["x": c.x, "y": c.y]
                             shape["rx"] = r
                             shape["ry"] = r * ratio
@@ -1814,9 +2124,9 @@ struct MaskCanvas: View {
                     }
                 }
                 .onEnded { g in
-                    if model.currentMask?.kind == "object", hypot(g.translation.width, g.translation.height) < 10 {
-                        model.objectPoint(toMask(g.location))
-                    }
+                    let tap = hypot(g.translation.width, g.translation.height) < 10
+                    if tap, model.currentPart?.kind == "object" { model.objectPoint(toMask(g.location)) }
+                    if tap, model.currentPart?.kind == "colorRange" { model.sampleColor(toMask(g.location)) }
                     if !stroke.isEmpty {
                         model.brushStroke(stroke.map(toMask))
                         stroke = []
@@ -1832,7 +2142,7 @@ struct MaskCanvas: View {
     }
 
     @ViewBuilder
-    private func outline(_ m: MaskItem) -> some View {
+    private func outline(_ m: MaskPart) -> some View {
         switch m.kind {
         case "linear":
             if let a = m.point("start"), let b = m.point("end") {

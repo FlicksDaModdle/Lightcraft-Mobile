@@ -29,6 +29,11 @@ final class EditorModel: ObservableObject {
                 cropEntry = historyCursor()
                 cropTab = 0
             }
+            if mode == .masks {
+                masksEntry = historyCursor()
+                selectedPart = 0
+                refreshThumbs()
+            }
             // the crop box is drawn over the whole photo; every other mode shows the result
             render()
         }
@@ -40,7 +45,42 @@ final class EditorModel: ObservableObject {
     @Published private(set) var flipH = false
     @Published private(set) var flipV = false
     @Published private(set) var masks: [MaskItem] = []
-    @Published var selectedMask: UInt32? { didSet { if selectedMask != oldValue { render() } } }
+    @Published var selectedMask: UInt32? {
+        didSet {
+            if selectedMask != oldValue {
+                selectedPart = 0
+                render()
+            }
+        }
+    }
+    /// The part of the selected mask being edited (index into its parts).
+    @Published var selectedPart = 0
+    /// Which adjustment group the masks panel shows (index into `maskGroups`).
+    @Published var maskGroup = 0
+    /// How the selected mask is drawn over the photo.
+    @Published var maskLook = EditorModel.savedMaskLook() {
+        didSet {
+            UserDefaults.standard.set(maskLook.view, forKey: "maskLook.view")
+            UserDefaults.standard.set(Int(maskLook.rgb), forKey: "maskLook.rgb")
+            UserDefaults.standard.set(maskLook.opacity, forKey: "maskLook.opacity")
+            render()
+        }
+    }
+    /// Small white-on-black pictures of each mask, for the masks column.
+    @Published private(set) var maskThumbs: [UInt32: CGImage] = [:]
+    /// Colour range: a tap adds a colour instead of replacing them.
+    @Published var addColorSample = false
+    private var masksEntry: Int?
+    private var thumbTask: Task<Void, Never>?
+
+    private static func savedMaskLook() -> MaskLook {
+        let d = UserDefaults.standard
+        var look = MaskLook()
+        if let v = d.string(forKey: "maskLook.view") { look.view = v }
+        if d.object(forKey: "maskLook.rgb") != nil { look.rgb = UInt32(clamping: d.integer(forKey: "maskLook.rgb")) }
+        if d.object(forKey: "maskLook.opacity") != nil { look.opacity = d.integer(forKey: "maskLook.opacity") }
+        return look
+    }
     /// The red overlay showing where the selected mask applies.
     @Published var maskOverlay = true { didSet { render() } }
     @Published var brushErase = false
@@ -128,6 +168,7 @@ final class EditorModel: ObservableObject {
         active = nil
         attempt("develop.endInteraction")
         refreshHistory()
+        if mode == .masks { refreshThumbs() }
     }
 
     /// Set a control without a drag (the grading wheel sets two at once).
@@ -145,16 +186,127 @@ final class EditorModel: ObservableObject {
 
     var currentMask: MaskItem? { masks.first { $0.id == selectedMask } }
 
-    /// Add a mask of `kind` (brush, linear, radial) and select it.
+    /// The part being edited (the first when the index is out of range).
+    var currentPart: MaskPart? {
+        guard let m = currentMask else { return nil }
+        return m.parts.indices.contains(selectedPart) ? m.parts[selectedPart] : m.parts.first
+    }
+
+    /// Add a mask of `kind` and select it.
     func addMask(_ kind: String) {
+        if maskTools.first(where: { $0.kind == kind })?.ai == true {
+            addAIMask(kind)
+            return
+        }
         do {
             let r = try Engine.shared.run("mask.add", ["kind": kind]) as? [String: Any]
             refresh()
             selectedMask = (r?["activeMask"] as? NSNumber)?.uint32Value
+            selectedPart = 0
             mode = .masks
+            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+            if kind == "colorRange" { toast = "Tap a colour in the photo to select everywhere it appears." }
             render()
+            refreshThumbs()
         } catch {
             toast = error.localizedDescription
+        }
+    }
+
+    /// Add a part to the selected mask: `op` "add", "subtract" or "intersect".
+    func addPart(_ kind: String, op: String, text: String? = nil) {
+        guard let id = selectedMask else { return }
+        let ai = maskTools.first(where: { $0.kind == kind })?.ai ?? false
+        if ai {
+            refreshAIModel()
+            guard aiModel.installed else {
+                showAIModels = true
+                return
+            }
+        }
+        var p: [String: Any] = ["id": id, "op": op, "kind": kind]
+        if let text { p["text"] = text }
+        do {
+            let r = try Engine.shared.run("mask.addComponent", p) as? [String: Any]
+            refreshMasksOnly()
+            refreshHistory()
+            selectedPart = Swift.max((currentMask?.parts.count ?? 1) - 1, 0)
+            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+            if kind == "object" { toast = op == "subtract" ? "Tap what to take out of the mask." : "Tap what to add to the mask." }
+            if kind == "colorRange" { toast = "Tap a colour in the photo." }
+            if r?["pending"] as? Bool == true { toast = "Looking for \u{201C}\(text ?? "")\u{201D}\u{2026}" }
+            if ai { watchAI() }
+            render()
+            refreshThumbs()
+        } catch {
+            toast = error.localizedDescription
+        }
+    }
+
+    /// Change the selected part: "invert", "duplicate", "delete", or "op" with `op`.
+    func partCommand(_ action: String, op: String? = nil) {
+        guard let id = selectedMask else { return }
+        var p: [String: Any] = ["id": id, "component": selectedPart, "action": action]
+        if let op { p["op"] = op }
+        guard attempt("mask.component", p) else { return }
+        refresh()
+        if selectedMask != nil, !masks.contains(where: { $0.id == selectedMask }) { selectedMask = masks.last?.id }
+        if action == "delete" { selectedPart = Swift.max(selectedPart - 1, 0) }
+        if action == "duplicate" { selectedPart += 1 }
+        render()
+        refreshThumbs()
+    }
+
+    /// Colour range: take the colour at a point (mask coordinates).
+    func sampleColor(_ at: CGPoint) {
+        guard let id = selectedMask else { return }
+        guard attempt("mask.sampleColor", ["id": id, "component": selectedPart, "x": at.x, "y": at.y, "add": addColorSample]) else { return }
+        UISelectionFeedbackGenerator().selectionChanged()
+        refreshMasksOnly()
+        refreshHistory()
+        render()
+        refreshThumbs()
+    }
+
+    /// Set every adjustment of the selected mask back to none.
+    func resetMaskAdjustments() {
+        guard let id = selectedMask else { return }
+        var values: [String: Double] = [:]
+        for a in maskAdjustments { values[a.key] = 0 }
+        if attempt("mask.adjust", ["id": id, "values": values]) {
+            refreshMasksOnly()
+            refreshHistory()
+            render()
+        }
+    }
+
+    /// ✕: take back every change made since Masking opened.
+    func cancelMasks() {
+        undoBack(to: masksEntry)
+        mode = .edit
+        refresh()
+        render()
+    }
+
+    func doneMasks() { mode = .edit }
+
+    /// Draw the small mask pictures again, a moment after the last change.
+    func refreshThumbs() {
+        thumbTask?.cancel()
+        let id = photo.id
+        let list = masks.map(\.id)
+        thumbTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 250_000_000)
+            guard !Task.isCancelled else { return }
+            var out: [UInt32: CGImage] = [:]
+            for m in list {
+                let img = await Task.detached(priority: .utility) {
+                    Engine.shared.renderMask(id, mask: m, fitting: CGSize(width: 132, height: 132), look: MaskLook(view: "whiteOnBlack", rgb: 0xFFFFFF, opacity: 100))?.image
+                }.value
+                if let img { out[m] = img }
+            }
+            guard !Task.isCancelled, let self else { return }
+            self.maskThumbs = out
         }
     }
 
@@ -211,6 +363,7 @@ final class EditorModel: ObservableObject {
                     self.refreshMasksOnly()
                     self.refreshHistory()
                     self.render()
+                    self.refreshThumbs()
                 }
                 if let m = r.messages.last { self.toast = m }
                 idle = r.busy ? 0 : idle + 1
@@ -225,6 +378,7 @@ final class EditorModel: ObservableObject {
 
     func selectMask(_ id: UInt32) {
         attempt("mask.select", ["id": id])
+        UISelectionFeedbackGenerator().selectionChanged()
         selectedMask = id
     }
 
@@ -263,12 +417,13 @@ final class EditorModel: ObservableObject {
         refreshMasksOnly()
         refreshHistory()
         render()
+        refreshThumbs()
     }
 
-    /// Replace the selected mask's (first) shape: a gradient being drawn.
+    /// Replace the selected part's shape: a gradient being drawn, a range being set.
     func updateMaskShape(_ shape: [String: Any]) {
         guard let id = selectedMask else { return }
-        attempt("mask.update", ["id": id, "shape": shape])
+        attempt("mask.update", ["id": id, "component": selectedPart, "shape": shape])
         refreshMasksOnly()
         render()
     }
@@ -737,11 +892,12 @@ final class EditorModel: ObservableObject {
         let size = renderSize
         let cropping = mode == .crop
         let overlay: UInt32? = (mode == .masks && maskOverlay) ? selectedMask : nil
+        let look = maskLook
         Task {
             let wantHDR = hdr
             let r = await Task.detached(priority: .userInitiated) {
                 if cropping { return Engine.shared.renderUncropped(id, fitting: size) }
-                if let m = overlay { return Engine.shared.renderMask(id, mask: m, fitting: size) }
+                if let m = overlay { return Engine.shared.renderMask(id, mask: m, fitting: size, look: look) }
                 return (wantHDR ? Engine.shared.renderHDR(id, fitting: size) : nil) ?? Engine.shared.render(id, fitting: size)
             }.value
             if cropping, let r {

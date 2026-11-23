@@ -42,6 +42,20 @@ pub struct HdrImage {
 /// SDR white, up to the headroom.
 pub const HDR_SDR_SHARE: f32 = 0.5;
 
+/// How a mask overlay is drawn: the engine's view name, colour and opacity (0..100).
+#[derive(Clone, Copy, Debug)]
+pub struct MaskLook<'a> {
+    pub view: &'a str,
+    pub color: [u8; 3],
+    pub opacity: u8,
+}
+
+impl Default for MaskLook<'_> {
+    fn default() -> Self {
+        Self { view: "color", color: [235, 64, 64], opacity: 50 }
+    }
+}
+
 /// One library session, shared by the app's threads.
 pub struct Core {
     session: Mutex<Session>,
@@ -149,11 +163,24 @@ impl Core {
     /// The photo with mask `mask` shown as a red tint over it (where the mask applies), for
     /// drawing masks.
     pub fn render_mask(&self, id: u64, max_w: usize, max_h: usize, mask: u32) -> Result<Image, String> {
+        self.render_mask_as(id, max_w, max_h, mask, MaskLook::default())
+    }
+
+    /// Photo `id` with mask `mask` drawn the way `look` says (the engine's mask views: "color",
+    /// "colorOnBw", "imageOnBlack", "imageOnWhite", "whiteOnBlack"; an unknown view is "color").
+    pub fn render_mask_as(&self, id: u64, max_w: usize, max_h: usize, mask: u32, look: MaskLook) -> Result<Image, String> {
+        use lightcraft_pipeline::MaskView;
         let mut job = self.lock().render_job(PhotoId(id), max_w.max(1), max_h.max(1), false, true).ok_or("no such photo")?;
         let mask = u16::try_from(mask).map_err(|_| "no such mask")?;
-        job.request.overlay =
-            lightcraft_pipeline::Overlay::Mask { id: mask, view: lightcraft_pipeline::MaskView::Color, color: [235, 64, 64], opacity: 50 };
-        job.key ^= 0x4d41_534b_0000_0000 ^ u64::from(mask).rotate_left(23);
+        let view = MaskView::ALL.into_iter().find(|v| v.name() == look.view).unwrap_or(MaskView::Color);
+        let opacity = look.opacity.min(100);
+        job.request.overlay = lightcraft_pipeline::Overlay::Mask { id: mask, view, color: look.color, opacity };
+        let salt = (view as u64) << 40
+            | u64::from(look.color[0]) << 32
+            | u64::from(look.color[1]) << 24
+            | u64::from(look.color[2]) << 16
+            | u64::from(opacity) << 8;
+        job.key ^= 0x4d41_534b_0000_0000 ^ u64::from(mask).rotate_left(23) ^ salt.rotate_left(3);
         job.cache = None;
         self.finish(job.run())
     }
@@ -378,6 +405,11 @@ mod tests {
         let mid = m["activeMask"].as_u64().unwrap_or(0) as u32;
         let tinted = core.render_mask(id, 96, 96, mid).map(|i| i.rgba).unwrap_or_default();
         assert!(!tinted.is_empty() && tinted != plain, "the mask overlay should tint the photo");
+        let look = |view, color| MaskLook { view, color, opacity: 60 };
+        let mask_only = core.render_mask_as(id, 96, 96, mid, look("whiteOnBlack", [255, 255, 255])).map(|i| i.rgba).unwrap_or_default();
+        assert!(!mask_only.is_empty() && mask_only != tinted, "the white-on-black view draws the mask, not a tint");
+        let green = core.render_mask_as(id, 96, 96, mid, look("color", [40, 220, 90])).map(|i| i.rgba).unwrap_or_default();
+        assert_ne!(green, tinted, "the overlay colour is used");
     }
 
     #[test]

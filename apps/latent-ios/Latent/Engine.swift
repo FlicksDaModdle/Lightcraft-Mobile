@@ -15,6 +15,13 @@ struct Rendered: @unchecked Sendable {
     var peak: Float = 1
 }
 
+/// How a mask overlay is drawn: the engine's view, a colour (0xRRGGBB) and opacity (0…100).
+struct MaskLook: Equatable, Sendable {
+    var view = "color"
+    var rgb: UInt32 = 0xEB4040
+    var opacity = 50
+}
+
 /// The LightCraft engine, through the C bridge. Every edit is an engine command, the same commands
 /// the desktop app and the command line use. Safe to call from any thread (the engine locks).
 final class Engine: @unchecked Sendable {
@@ -107,10 +114,10 @@ final class Engine: @unchecked Sendable {
     }
 
     /// The photo with a mask tinted red over it, for drawing masks.
-    func renderMask(_ id: UInt64, mask: UInt32, fitting size: CGSize) -> Rendered? {
+    func renderMask(_ id: UInt64, mask: UInt32, fitting size: CGSize, look: MaskLook = MaskLook()) -> Rendered? {
         let w = UInt32(max(1, size.width.rounded()))
         let h = UInt32(max(1, size.height.rounded()))
-        guard let img = latent_render_mask(core, id, w, h, mask) else { return nil }
+        guard let img = latent_render_mask_as(core, id, w, h, mask, look.view, look.rgb, UInt8(clamping: look.opacity)) else { return nil }
         defer { latent_image_free(img) }
         return Self.convert(img.pointee)
     }

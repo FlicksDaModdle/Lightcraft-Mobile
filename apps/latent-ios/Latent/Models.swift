@@ -383,48 +383,49 @@ let maskAdjustments: [(key: String, label: String, min: Double, max: Double, ste
     ("defringe", "Defringe", -100, 100, 1, 0, .centered),
 ]
 
-/// A mask from the engine (`develop.get` → `masks`).
-struct MaskItem: Identifiable {
-    let id: UInt32
-    let name: String
-    let visible: Bool
+/// The groups a mask's adjustments are shown in, with the keys each holds.
+let maskGroups: [(label: String, symbol: String, keys: [String])] = [
+    ("Light", "sun.max", ["exposure", "contrast", "highlights", "shadows", "whites", "blacks"]),
+    ("Color", "thermometer.medium", ["temp", "tint", "hue", "saturation"]),
+    ("Effects", "square.dashed", ["texture", "clarity", "dehaze"]),
+    ("Detail", "triangle", ["sharpness", "noise", "moire"]),
+    ("Optics", "camera.aperture", ["defringe"]),
+]
+
+/// The ways a mask can be made (or added to, or taken from): kind, label, symbol, whether it
+/// needs the AI model.
+let maskTools: [(kind: String, label: String, symbol: String, ai: Bool)] = [
+    ("subject", "Subject", "person.crop.rectangle", false),
+    ("sky", "Sky", "cloud.sun", false),
+    ("background", "Background", "photo", false),
+    ("object", "Object", "hand.tap", true),
+    ("prompt", "Describe", "text.magnifyingglass", true),
+    ("brush", "Brush", "paintbrush.pointed", false),
+    ("linear", "Linear", "rectangle.split.1x2", false),
+    ("radial", "Radial", "circle.dashed", false),
+    ("colorRange", "Color range", "eyedropper", false),
+    ("luminanceRange", "Brightness range", "circle.lefthalf.filled", false),
+]
+
+func maskSymbol(_ kind: String) -> String { maskTools.first { $0.kind == kind }?.symbol ?? "circle.dashed.inset.filled" }
+
+func maskKindLabel(_ kind: String) -> String {
+    switch kind {
+    case "linear": return "Linear gradient"
+    case "radial": return "Radial gradient"
+    case "prompt": return "Described"
+    default: return maskTools.first { $0.kind == kind }?.label ?? kind.capitalized
+    }
+}
+
+/// One part of a mask: a shape that adds to it, takes from it, or keeps only where both are.
+struct MaskPart {
+    let op: String
     let invert: Bool
-    /// The first component's shape (`kind` and its parameters).
+    let name: String?
     let shape: [String: Any]
-    let adjust: [String: Double]
-
     var kind: String { shape["kind"] as? String ?? "" }
-
-    var kindLabel: String {
-        switch kind {
-        case "brush": "Brush"
-        case "linear": "Linear gradient"
-        case "radial": "Radial gradient"
-        case "sky": "Sky"
-        case "subject": "Subject"
-        case "background": "Background"
-        case "object": "Object"
-        case "prompt": "Described"
-        case "luminanceRange": "Luminance range"
-        case "colorRange": "Color range"
-        default: kind.capitalized
-        }
-    }
-
-    init?(_ json: Any) {
-        guard let d = json as? [String: Any], let id = (d["id"] as? NSNumber)?.uint32Value else { return nil }
-        self.id = id
-        name = d["name"] as? String ?? "Mask \(id)"
-        visible = d["visible"] as? Bool ?? true
-        invert = d["invert"] as? Bool ?? false
-        let comps = d["components"] as? [[String: Any]] ?? []
-        shape = comps.first?["shape"] as? [String: Any] ?? [:]
-        var adj: [String: Double] = [:]
-        for (k, v) in d["adjust"] as? [String: Any] ?? [:] {
-            if let n = v as? NSNumber, !(v is Bool) { adj[k] = n.doubleValue }
-        }
-        adjust = adj
-    }
+    var label: String { name ?? maskKindLabel(kind) }
 
     func point(_ key: String) -> CGPoint? {
         guard let p = shape[key] as? [String: Any], let x = (p["x"] as? NSNumber)?.doubleValue, let y = (p["y"] as? NSNumber)?.doubleValue else { return nil }
@@ -432,6 +433,42 @@ struct MaskItem: Identifiable {
     }
 
     func number(_ key: String, _ fallback: Double) -> Double { (shape[key] as? NSNumber)?.doubleValue ?? fallback }
+}
+
+/// A mask from the engine (`develop.get` → `masks`).
+struct MaskItem: Identifiable {
+    let id: UInt32
+    let name: String
+    let visible: Bool
+    let invert: Bool
+    let parts: [MaskPart]
+    let adjust: [String: Double]
+
+    /// The first part's shape and kind (what the mask is known by).
+    var shape: [String: Any] { parts.first?.shape ?? [:] }
+    var kind: String { parts.first?.kind ?? "" }
+    var kindLabel: String { maskKindLabel(kind) }
+    var edited: Bool { adjust.values.contains { abs($0) > 1e-9 } }
+
+    init?(_ json: Any) {
+        guard let d = json as? [String: Any], let id = (d["id"] as? NSNumber)?.uint32Value else { return nil }
+        self.id = id
+        name = d["name"] as? String ?? "Mask \(id)"
+        visible = d["visible"] as? Bool ?? true
+        invert = d["invert"] as? Bool ?? false
+        parts = (d["components"] as? [[String: Any]] ?? []).map { c in
+            MaskPart(op: (c["op"] as? String)?.lowercased() ?? "add", invert: c["invert"] as? Bool ?? false,
+                     name: c["name"] as? String, shape: c["shape"] as? [String: Any] ?? [:])
+        }
+        var adj: [String: Double] = [:]
+        for (k, v) in d["adjust"] as? [String: Any] ?? [:] {
+            if let n = v as? NSNumber, !(v is Bool) { adj[k] = n.doubleValue }
+        }
+        adjust = adj
+    }
+
+    func point(_ key: String) -> CGPoint? { parts.first?.point(key) }
+    func number(_ key: String, _ fallback: Double) -> Double { parts.first?.number(key, fallback) ?? fallback }
 }
 
 /// The AI mask model's state (`segment.model.status`).
