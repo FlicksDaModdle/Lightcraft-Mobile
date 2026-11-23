@@ -63,9 +63,56 @@ jobs:
       - name: Install XcodeGen
         run: brew install xcodegen
       - name: Build Latent
+        env:
+          LATENT_VERSION: 0.1.${{ github.run_number }}
+          LATENT_BUILD: ${{ github.run_number }}
         run: apps/latent-ios/build.sh out
       - uses: actions/upload-artifact@v4
         with:
           name: Latent-iOS
           path: out/Latent-unsigned.ipa
           if-no-files-found: error
+
+  # Every build of main becomes a GitHub Release and the newest entry in the AltStore source
+  # (the `altstore` branch's source.json; add
+  # https://raw.githubusercontent.com/FlicksDaModdle/Lightcraft-Mobile/altstore/source.json in AltStore).
+  publish:
+    needs: ios
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    concurrency:
+      group: latent-publish
+      cancel-in-progress: false
+    env:
+      GH_TOKEN: ${{ github.token }}
+      VERSION: 0.1.${{ github.run_number }}
+      TAG: latent-v0.1.${{ github.run_number }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: Latent-iOS
+          path: out
+      - name: Publish the release
+        run: |
+          mv out/Latent-unsigned.ipa out/Latent.ipa
+          gh release create "$TAG" out/Latent.ipa --target "$GITHUB_SHA" --title "Latent $VERSION" \
+            --notes "Build ${{ github.run_number }} of main ($GITHUB_SHA). Unsigned: AltStore or Sideloadly signs it with your Apple ID."
+      - name: Update the AltStore source
+        run: |
+          size=$(stat -c %s out/Latent.ipa)
+          url="https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/Latent.ipa"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          mkdir -p /tmp/src && cd /tmp/src
+          if git ls-remote --exit-code "https://x-access-token:$GH_TOKEN@github.com/$GITHUB_REPOSITORY.git" altstore >/dev/null; then
+            git clone --depth 1 --branch altstore "https://x-access-token:$GH_TOKEN@github.com/$GITHUB_REPOSITORY.git" .
+          else
+            git init -b altstore . && git remote add origin "https://x-access-token:$GH_TOKEN@github.com/$GITHUB_REPOSITORY.git"
+          fi
+          python3 "$GITHUB_WORKSPACE/apps/latent-ios/altstore/update_source.py" source.json "$VERSION" "${{ github.run_number }}" "$url" "$size"
+          git add source.json
+          git commit -m "Latent $VERSION"
+          git push origin altstore

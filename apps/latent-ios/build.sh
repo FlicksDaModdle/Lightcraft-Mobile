@@ -15,8 +15,10 @@ cargo build --release --target aarch64-apple-ios -p lightcraft-latent --manifest
 # 2. the Swift app
 cd "$here"
 xcodegen generate
+# LATENT_VERSION / LATENT_BUILD (CI sets them from the run number) so each build is newer than the last
 xcodebuild -project Latent.xcodeproj -target Latent -sdk iphoneos -configuration Release \
   CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+  MARKETING_VERSION="${LATENT_VERSION:-0.1.0}" CURRENT_PROJECT_VERSION="${LATENT_BUILD:-1}" \
   SYMROOT="$here/build" build
 
 # 3. an unsigned IPA
