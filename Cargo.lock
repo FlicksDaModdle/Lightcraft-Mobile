@@ -4230,8 +4230,10 @@ name = "lightcraft-latent"
 version = "0.21.1"
 dependencies = [
  "lightcraft-codecs",
+ "lightcraft-develop",
  "lightcraft-engine",
  "lightcraft-pipeline",
+ "lightcraft-raster",
  "log",
  "serde_json",
 ]
