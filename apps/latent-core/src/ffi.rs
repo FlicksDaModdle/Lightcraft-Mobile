@@ -358,3 +358,32 @@ pub unsafe extern "C" fn latent_export_free(e: *mut LatentExport) {
         drop(Box::from_raw(std::ptr::slice_from_raw_parts_mut(e.bytes, e.len)));
     }
 }
+
+/// Give photo `id` a depth map of `w × h` bytes (0 near … 255 far, upright); a null or short
+/// buffer takes it away.
+///
+/// # Safety
+/// `core` from [`latent_open`]; `data` null or `len` readable bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn latent_set_depth(core: *const Core, id: u64, w: u32, h: u32, data: *const u8, len: usize) {
+    // SAFETY: as documented above
+    let Some(c) = (unsafe { self::core(core) }) else { return };
+    let bytes: &[u8] = if data.is_null() || len == 0 {
+        &[]
+    } else {
+        // SAFETY: the caller promises `len` readable bytes at `data`
+        unsafe { std::slice::from_raw_parts(data, len) }
+    };
+    c.set_depth(id, w as usize, h as usize, bytes);
+}
+
+/// The photo's depth map as the photo is framed, near white, far black. Null on failure.
+///
+/// # Safety
+/// `core` from [`latent_open`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn latent_render_depth(core: *const Core, id: u64, max_w: u32, max_h: u32) -> *mut LatentImage {
+    // SAFETY: as documented above
+    let Some(c) = (unsafe { self::core(core) }) else { return std::ptr::null_mut() };
+    give_image(c.render_depth(id, max_w as usize, max_h as usize))
+}

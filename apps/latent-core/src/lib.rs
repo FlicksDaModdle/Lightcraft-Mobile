@@ -104,6 +104,49 @@ impl Core {
         Ok((out.file_name, out.bytes))
     }
 
+    /// The photo's depth map as the photo is framed (cropped, straightened, flipped): near white,
+    /// far black, to fit `max_w` × `max_h`. Black all over without a depth map.
+    pub fn render_depth(&self, id: u64, max_w: usize, max_h: usize) -> Result<Image, String> {
+        use lightcraft_develop::{Mask, MaskComponent, MaskOp, MaskShape};
+        const VIEW_ID: u16 = 65_000;
+        let mut job = self.lock().render_job(PhotoId(id), max_w.max(1), max_h.max(1), false, true).ok_or("no such photo")?;
+        // a mask whose strength is the nearness, shown white on black, without changing the photo
+        let mut d = (*job.settings).clone();
+        d.masks.retain(|m| m.id != u32::from(VIEW_ID));
+        d.masks.push(Mask {
+            id: u32::from(VIEW_ID),
+            components: vec![MaskComponent {
+                name: None,
+                op: MaskOp::Add,
+                invert: false,
+                shape: MaskShape::DepthRange { lo: 0.0, hi: 0.0, feather: 1.0 },
+            }],
+            ..Default::default()
+        });
+        job.settings = std::sync::Arc::new(d);
+        job.request.overlay = lightcraft_pipeline::Overlay::Mask {
+            id: VIEW_ID,
+            view: lightcraft_pipeline::MaskView::WhiteOnBlack,
+            color: [255, 255, 255],
+            opacity: 100,
+        };
+        job.key ^= 0x4445_5054_4800_0000;
+        job.cache = None;
+        self.finish(job.run())
+    }
+
+    /// Give photo `id` a depth map: `w × h` bytes, 0 nearest … 255 farthest, over the photo as
+    /// the camera stood it (upright, before the user's rotation). An empty or ill-sized map takes
+    /// the photo's depth map away. Lens Blur's Focus Range and Depth Range masks use it.
+    pub fn set_depth(&self, id: u64, w: usize, h: usize, data: &[u8]) {
+        let map = (w > 0 && h > 0 && data.len() == w.saturating_mul(h)).then(|| lightcraft_raster::Image::<u8> {
+            width: w,
+            height: h,
+            data: data.to_vec(),
+        });
+        self.lock().set_depth_map(PhotoId(id), map);
+    }
+
     /// Where the SAM 3 model (AI masks) is looked for: a folder holding `model.safetensors`,
     /// `vocab.json` and `merges.txt`.
     pub fn set_ai_model_dir(&self, dir: &Path) {
@@ -451,6 +494,29 @@ mod tests {
             let r = core.export(id, &small.replace("jpeg", f));
             assert!(r.is_ok_and(|(_, b)| !b.is_empty()), "{f} exports");
         }
+    }
+
+    #[test]
+    fn a_depth_map_moves_the_lens_blur_focus() {
+        let core = Core::demo();
+        let photos = ok(&core.execute("catalog.query", ""));
+        let id = photos["photos"][0]["id"].as_u64().unwrap_or(0);
+        ok(&core.execute("library.select", &json!({"ids": [id], "active": id}).to_string()));
+        let blur = json!({"settings": {"lens_blur": {"enabled": true, "amount": 100.0, "focal_range": 20.0, "focal_distance": 10.0}}});
+        ok(&core.execute("develop.merge", &blur.to_string()));
+        let px = |c: &Core| c.render(id, 96, 96).map(|i| i.rgba).unwrap_or_default();
+        let before = px(&core);
+        let (w, h) = (32, 32);
+        let map: Vec<u8> = (0..w * h).map(|i| if i % w < w / 2 { 0 } else { 255 }).collect();
+        core.set_depth(id, w, h, &map);
+        assert_ne!(px(&core), before, "the depth map decides what is sharp");
+        let view = core.render_depth(id, 64, 64);
+        let Ok(v) = view else { panic!("{:?}", view.err()) };
+        let at = |x: usize| v.rgba.get(4 * ((v.height / 2) * v.width + x)).copied();
+        let (near, far) = (at(2), at(v.width - 3));
+        assert!(near > far, "the depth view shows near brighter than far: {near:?} {far:?}");
+        core.set_depth(id, 0, 0, &[]);
+        assert_eq!(px(&core), before, "taking it away restores the blur");
     }
 
     #[test]

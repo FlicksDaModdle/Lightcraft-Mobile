@@ -66,6 +66,9 @@ struct EditorView: View {
         }
         .overlay(alignment: .top) { toast }
         .animation(.glass, value: model.toast)
+        .sheet(isPresented: $model.showDepthModel) {
+            DepthModelSheet { model.estimateDepth() }
+        }
         .sheet(isPresented: $sharing) {
             ShareView(photos: library, current: model.photo.id)
                 .presentationDragIndicator(.visible)
@@ -378,6 +381,15 @@ struct EditorView: View {
                             .scaledToFit()
                             .shadow(color: .black.opacity(background == EditorBackground.black.rawValue || zoom > 1 ? 0 : 0.35), radius: 16, y: 6)
                             .frame(width: geo.size.width, height: geo.size.height)
+                        if model.showDepth, model.tool == .blur, let dv = model.depthView {
+                            Image(decorative: dv, scale: 1)
+                                .resizable()
+                                .interpolation(.high)
+                                .scaledToFit()
+                                .frame(width: geo.size.width, height: geo.size.height)
+                                .transition(.opacity)
+                                .allowsHitTesting(false)
+                        }
                         if model.mode == .masks && chrome, model.currentMask != nil {
                             MaskCanvas(model: model, imageSize: CGSize(width: img.width, height: img.height), size: geo.size, zoom: zoom)
                                 .allowsHitTesting(!moving)
@@ -486,7 +498,19 @@ struct EditorView: View {
                 if zoom <= 1.01 { moving = false }
                 model.zoomChanged(zoom)
             }
-            .onTapGesture { if !drawsOnPhoto && model.mode != .crop { chromeHidden.toggle() } }
+            .onTapGesture { at in
+                if model.tapToFocus && model.tool == .blur, let img = model.image {
+                    // undo the zoom, then find the point on the fitted picture
+                    let c = CGPoint(x: geo.size.width / 2, y: geo.size.height / 2)
+                    let q = CGPoint(x: c.x + (at.x - c.x - pan.width) / zoom, y: c.y + (at.y - c.y - pan.height) / zoom)
+                    let s = Swift.min(geo.size.width / CGFloat(img.width), geo.size.height / CGFloat(img.height))
+                    let fw = CGFloat(img.width) * s, fh = CGFloat(img.height) * s
+                    let u = CGPoint(x: (q.x - (geo.size.width - fw) / 2) / fw, y: (q.y - (geo.size.height - fh) / 2) / fh)
+                    if (0...1).contains(u.x) && (0...1).contains(u.y) { model.focus(atShown: u) }
+                    return
+                }
+                if !drawsOnPhoto && model.mode != .crop { chromeHidden.toggle() }
+            }
             .onChange(of: model.mode) { _, m in if m == .crop { resetZoom() } }
             .onLongPressGesture(minimumDuration: 0.3, maximumDistance: 24, perform: {}, onPressingChanged: { pressing in
                 hold?.cancel()
@@ -621,7 +645,9 @@ struct EditorView: View {
                 case .mixer: stepHeader("Color mix")
                 case .grading: stepHeader("Color grading")
                 case .light: lightHeader
-                case .blur: blurHeader
+                case .blur:
+                    blurHeader
+                    if model.blurOn { depthControls }
                 case .curve: curveHeader
                 default: EmptyView()
                 }
@@ -741,7 +767,91 @@ struct EditorView: View {
         .padding(.bottom, 4)
     }
 
+    /// Blur by depth: Subject or Depth, the Focus Range over the photo's depths, tap to focus,
+    /// and the depth map itself.
+    @ViewBuilder
+    private var depthControls: some View {
+        if model.depth != nil {
+            VStack(spacing: 10) {
+                Picker("Blur by", selection: Binding(get: { model.depthBlur }, set: { $0 ? model.useDepth() : model.useSubject() })) {
+                    Text("Subject").tag(false)
+                    Text("Depth").tag(true)
+                }
+                .pickerStyle(.segmented)
+                if model.depthBlur, let d = model.depth {
+                    HStack(spacing: 8) {
+                        Text("Focus range").font(.system(size: 15, weight: .semibold))
+                        if d.source == "estimated" { tag("Estimated") }
+                        Spacer()
+                        Button { withAnimation(.glass) { model.tapToFocus.toggle() } } label: {
+                            Image(systemName: "scope")
+                                .frame(width: 36, height: 32)
+                                .latentGlass(in: Capsule(), tint: model.tapToFocus ? Theme.accent : nil, interactive: true)
+                        }
+                        .accessibilityLabel(Text(model.tapToFocus ? "Tap the photo to focus there" : "Tap to focus"))
+                        Button { withAnimation(.glass) { model.showDepth.toggle() } } label: {
+                            Image(systemName: model.showDepth ? "square.3.layers.3d.down.right.slash" : "square.3.layers.3d.down.right")
+                                .frame(width: 36, height: 32)
+                                .latentGlass(in: Capsule(), tint: model.showDepth ? Theme.accent : nil, interactive: true)
+                        }
+                        .accessibilityLabel(Text(model.showDepth ? "Show the photo" : "Show the depth map"))
+                        Menu {
+                            Button { model.estimateDepth() } label: { Label(d.source == "estimated" ? "Estimate again" : "Estimate with the depth model", systemImage: "wand.and.rays") }
+                            Button { model.showDepthModel = true } label: { Label("Depth model\u{2026}", systemImage: "cpu") }
+                            Button(role: .destructive) { model.removeDepth() } label: { Label("Remove the depth map", systemImage: "trash") }
+                        } label: {
+                            Image(systemName: "ellipsis").frame(width: 36, height: 32).latentGlass(in: Capsule(), interactive: true)
+                        }
+                        .accessibilityLabel(Text("Depth options"))
+                    }
+                    .font(.system(size: 14, weight: .semibold))
+                    FocusRangeBar(
+                        histogram: d.histogram,
+                        lo: model.focalDistance - model.focalRange / 2,
+                        hi: model.focalDistance + model.focalRange / 2,
+                        begin: { model.beginFocusRange() },
+                        change: { model.setFocusRange($0, $1) },
+                        end: { model.end() })
+                    if model.tapToFocus {
+                        Text("Tap the photo where it should be sharp.")
+                            .font(.system(size: 12)).foregroundStyle(Theme.secondaryText)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
+            }
+            .foregroundStyle(.white)
+            .padding(.horizontal, 16)
+            .padding(.bottom, 4)
+            .opacity(focused && model.active != "focus.range" ? 0 : 1)
+            .animation(.glass, value: model.depthBlur)
+        } else {
+            HStack(spacing: 10) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Blur by depth").font(.system(size: 14, weight: .semibold))
+                    Text(model.depthBusy ? "Looking for depth\u{2026}" : "This photo has no depth recorded. Estimate it to blur by distance.")
+                        .font(.system(size: 12)).foregroundStyle(Theme.secondaryText)
+                }
+                Spacer()
+                if model.depthBusy {
+                    ProgressView().tint(.white)
+                } else {
+                    Button { model.estimateDepth() } label: {
+                        Label(DepthModel.installed ? "Estimate" : "Get model", systemImage: "square.3.layers.3d.down.right")
+                            .font(.system(size: 13, weight: .semibold))
+                            .padding(.horizontal, 12).frame(height: 32)
+                            .latentGlass(in: Capsule(), tint: Theme.accent.opacity(0.8), interactive: true)
+                    }
+                }
+            }
+            .foregroundStyle(.white)
+            .padding(.horizontal, 16)
+            .padding(.bottom, 6)
+            .opacity(focused ? 0 : 1)
+        }
+    }
+
     private var focusTitle: String {
+        if model.depthBlur { return "By depth" }
         if let id = model.focusMask, let m = model.masks.first(where: { $0.id == id }) { return m.name }
         switch model.focusShape {
         case "round": return "Circle"

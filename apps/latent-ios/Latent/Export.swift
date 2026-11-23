@@ -91,6 +91,8 @@ enum Exporter {
         var used = Set<String>()
         for (i, id) in ids.enumerated() {
             await progress(i + 1)
+            // a photo not opened since launch: its depth map, for a depth-driven lens blur
+            DepthMaps.load(id)
             let (name, data) = try await Task.detached(priority: .userInitiated) {
                 try Engine.shared.export(id, options: options)
             }.value

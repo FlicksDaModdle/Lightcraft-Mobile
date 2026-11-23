@@ -1,0 +1,460 @@
+import AVFoundation
+import CoreML
+import CoreVideo
+import ImageIO
+import SwiftUI
+import UIKit
+
+/// A photo's depth map: one byte a pixel, 0 nearest … 255 farthest, over the photo as the camera
+/// stood it (before the user's own rotation), with a histogram for the Focus Range bar.
+struct DepthMap: Sendable {
+    let width: Int
+    let height: Int
+    let data: [UInt8]
+    /// "camera" (the iPhone recorded it) or "estimated" (the depth model made it).
+    let source: String
+
+    /// 64 bins from near to far, each 0…1 of the fullest.
+    var histogram: [Double] {
+        var bins = [Int](repeating: 0, count: 64)
+        for v in data { bins[Int(v) >> 2] += 1 }
+        let top = Double(bins.max() ?? 1)
+        return bins.map { top > 0 ? Double($0) / top : 0 }
+    }
+
+    /// The depth (0 near … 1 far) at a point of the map (0…1 across and down), averaged a little.
+    func depth(at p: CGPoint) -> Double? {
+        guard width > 0, height > 0, p.x.isFinite, p.y.isFinite else { return nil }
+        let cx = Int((p.x * CGFloat(width)).rounded(.down)), cy = Int((p.y * CGFloat(height)).rounded(.down))
+        var sum = 0, n = 0
+        for y in Swift.max(cy - 2, 0)...Swift.min(cy + 2, height - 1) {
+            for x in Swift.max(cx - 2, 0)...Swift.min(cx + 2, width - 1) {
+                sum += Int(data[y * width + x])
+                n += 1
+            }
+        }
+        return n > 0 ? Double(sum) / Double(n) / 255 : nil
+    }
+
+    /// From raw values where bigger means nearer (disparity, or the model's relative depth): the
+    /// 2nd and 98th percentiles span near to far, so a few outliers don't flatten the rest.
+    init?(nearness values: [Float], width: Int, height: Int, source: String) {
+        guard width > 0, height > 0, values.count == width * height else { return nil }
+        let finite = values.filter(\.isFinite).sorted()
+        guard finite.count > 16 else { return nil }
+        let lo = finite[finite.count / 50], hi = finite[finite.count - 1 - finite.count / 50]
+        let span = Swift.max(hi - lo, 1e-6)
+        data = values.map { v in
+            guard v.isFinite else { return 255 }
+            let near = Swift.min(Swift.max((v - lo) / span, 0), 1)
+            return UInt8(((1 - near) * 255).rounded())
+        }
+        self.width = width
+        self.height = height
+        self.source = source
+    }
+
+    init(width: Int, height: Int, data: [UInt8], source: String) {
+        self.width = width
+        self.height = height
+        self.data = data
+        self.source = source
+    }
+}
+
+enum DepthMaps {
+    /// Where depth maps are kept: Application Support/Depth, one file per photo.
+    static var folder: URL {
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        let dir = base.appendingPathComponent("Depth", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }
+
+    private static func file(_ id: UInt64) -> URL { folder.appendingPathComponent("\(id).depth") }
+
+    /// A depth map made before (file: width and height as 4-byte little-endian, a source byte, the bytes).
+    static func cached(_ id: UInt64) -> DepthMap? {
+        guard let d = try? Data(contentsOf: file(id)), d.count > 9 else { return nil }
+        let u32 = { (o: Int) in d[o..<(o + 4)].enumerated().reduce(0) { $0 | Int($1.element) << (8 * $1.offset) } }
+        let (w, h) = (u32(0), u32(4))
+        guard w > 0, h > 0, d.count == 9 + w * h else { return nil }
+        return DepthMap(width: w, height: h, data: [UInt8](d[9...]), source: d[8] == 1 ? "camera" : "estimated")
+    }
+
+    static func save(_ id: UInt64, _ m: DepthMap) {
+        var d = Data()
+        for v in [m.width, m.height] { for i in 0..<4 { d.append(UInt8((v >> (8 * i)) & 0xff)) } }
+        d.append(m.source == "camera" ? 1 : 0)
+        d.append(contentsOf: m.data)
+        try? d.write(to: file(id), options: .atomic)
+    }
+
+    static func forget(_ id: UInt64) { try? FileManager.default.removeItem(at: file(id)) }
+
+    /// Hand a photo's saved depth map to the engine (before rendering or exporting it).
+    static func load(_ id: UInt64) {
+        if let m = cached(id) { Engine.shared.setDepth(id, m) }
+    }
+
+    /// The photo file's own path, from the engine.
+    static func path(of id: UInt64) -> URL? {
+        let info = (try? Engine.shared.run("photo.inspect", ["id": id])) as? [String: Any]
+        guard let src = info?["source"] as? [String: Any], let p = src["path"] as? String, !p.isEmpty else { return nil }
+        return URL(fileURLWithPath: p)
+    }
+
+    // MARK: from the camera
+
+    /// The depth the iPhone recorded with the photo (Portrait shots, and others where it captured
+    /// depth), turned upright.
+    static func fromCamera(_ url: URL) -> DepthMap? {
+        guard let src = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
+        for type in [kCGImageAuxiliaryDataTypeDisparity, kCGImageAuxiliaryDataTypeDepth] {
+            guard let info = CGImageSourceCopyAuxiliaryDataInfoAtIndex(src, 0, type) as? [AnyHashable: Any],
+                  var depth = try? AVDepthData(fromDictionaryRepresentation: info)
+            else { continue }
+            depth = depth.converting(toDepthDataType: kCVPixelFormatType_DisparityFloat32)
+            let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any]
+            if let raw = props?[kCGImagePropertyOrientation] as? UInt32, let o = CGImagePropertyOrientation(rawValue: raw) {
+                depth = depth.applyingExifOrientation(o)
+            }
+            let buf = depth.depthDataMap
+            if let m = floats(buf).flatMap({ DepthMap(nearness: $0.values, width: $0.w, height: $0.h, source: "camera") }) { return m }
+        }
+        return nil
+    }
+
+    private static func floats(_ buf: CVPixelBuffer) -> (values: [Float], w: Int, h: Int)? {
+        CVPixelBufferLockBaseAddress(buf, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(buf, .readOnly) }
+        let w = CVPixelBufferGetWidth(buf), h = CVPixelBufferGetHeight(buf)
+        let row = CVPixelBufferGetBytesPerRow(buf)
+        guard let base = CVPixelBufferGetBaseAddress(buf), w > 0, h > 0 else { return nil }
+        let format = CVPixelBufferGetPixelFormatType(buf)
+        var out = [Float](repeating: 0, count: w * h)
+        for y in 0..<h {
+            let line = base.advanced(by: y * row)
+            for x in 0..<w {
+                switch format {
+                case kCVPixelFormatType_DisparityFloat32, kCVPixelFormatType_DepthFloat32, kCVPixelFormatType_OneComponent32Float:
+                    out[y * w + x] = line.assumingMemoryBound(to: Float.self)[x]
+                case kCVPixelFormatType_DisparityFloat16, kCVPixelFormatType_DepthFloat16, kCVPixelFormatType_OneComponent16Half:
+                    out[y * w + x] = Float(line.assumingMemoryBound(to: Float16.self)[x])
+                case kCVPixelFormatType_OneComponent8:
+                    out[y * w + x] = Float(line.assumingMemoryBound(to: UInt8.self)[x])
+                default:
+                    return nil
+                }
+            }
+        }
+        return (out, w, h)
+    }
+
+    // MARK: estimated
+
+    /// Make a depth map with the depth model (Depth Anything V2 Small) from the photo file.
+    static func estimate(_ url: URL) throws -> DepthMap {
+        guard let model = DepthModel.load() else { throw EngineError(message: "The depth model isn't installed.") }
+        guard let src = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let image = CGImageSourceCreateThumbnailAtIndex(src, 0, [
+                  kCGImageSourceCreateThumbnailFromImageAlways: true,
+                  kCGImageSourceCreateThumbnailWithTransform: true,
+                  kCGImageSourceThumbnailMaxPixelSize: 1024,
+              ] as CFDictionary)
+        else { throw EngineError(message: "This photo couldn't be read for depth.") }
+        let desc = model.modelDescription
+        guard let input = desc.inputDescriptionsByName.first(where: { $0.value.type == .image }),
+              let constraint = input.value.imageConstraint
+        else { throw EngineError(message: "The depth model has an unexpected input.") }
+        let value = try MLFeatureValue(cgImage: image, constraint: constraint, options: [
+            .cropAndScale: VNImageCropAndScaleOptionScaleFill,
+        ])
+        let out = try model.prediction(from: MLDictionaryFeatureProvider(dictionary: [input.key: value]))
+        guard let name = desc.outputDescriptionsByName.keys.sorted().first, let f = out.featureValue(for: name) else {
+            throw EngineError(message: "The depth model gave nothing back.")
+        }
+        var result: (values: [Float], w: Int, h: Int)?
+        if let buf = f.imageBufferValue {
+            result = floats(buf)
+        } else if let a = f.multiArrayValue {
+            let dims = a.shape.map(\.intValue)
+            let (h, w) = (dims.count >= 2 ? dims[dims.count - 2] : 0, dims.last ?? 0)
+            if w > 0, h > 0, a.count >= w * h {
+                let start = a.count - w * h
+                result = ((0..<(w * h)).map { a[start + $0].floatValue }, w, h)
+            }
+        }
+        guard let r = result, let m = DepthMap(nearness: r.values, width: r.w, height: r.h, source: "estimated") else {
+            throw EngineError(message: "The depth model's answer couldn't be read.")
+        }
+        return m
+    }
+}
+
+/// `VNImageCropAndScaleOption.scaleFill` without importing Vision: stretch the photo to the input.
+private let VNImageCropAndScaleOptionScaleFill = 2
+
+// MARK: the depth model
+
+/// Apple's Core ML conversion of Depth Anything V2 Small (Apache-2.0), downloaded on request.
+enum DepthModel {
+    static let name = "DepthAnythingV2SmallF16"
+    static let repo = "https://huggingface.co/apple/coreml-depth-anything-v2-small"
+    static let files = ["Manifest.json", "Data/com.apple.CoreML/model.mlmodel", "Data/com.apple.CoreML/weights/weight.bin"]
+    static let size = "50 MB"
+
+    static var folder: URL {
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        let dir = base.appendingPathComponent("Models", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }
+
+    static var compiled: URL { folder.appendingPathComponent("\(name).mlmodelc", isDirectory: true) }
+    static var installed: Bool { FileManager.default.fileExists(atPath: compiled.path) }
+
+    private static let lock = NSLock()
+    private static var cachedModel: MLModel?
+
+    static func load() -> MLModel? {
+        lock.lock()
+        defer { lock.unlock() }
+        if let m = cachedModel { return m }
+        guard installed else { return nil }
+        let c = MLModelConfiguration()
+        c.computeUnits = .all
+        cachedModel = try? MLModel(contentsOf: compiled, configuration: c)
+        return cachedModel
+    }
+
+    static func remove() {
+        lock.lock()
+        cachedModel = nil
+        lock.unlock()
+        try? FileManager.default.removeItem(at: compiled)
+    }
+}
+
+/// Downloads the depth model's files, then compiles it for this iPhone.
+@MainActor
+final class DepthModelDownload: ObservableObject {
+    @Published private(set) var progress: Double?
+    @Published private(set) var problem: String?
+    @Published private(set) var installed = DepthModel.installed
+    private var observation: NSKeyValueObservation?
+
+    func start() {
+        guard progress == nil else { return }
+        problem = nil
+        progress = 0
+        Task {
+            do {
+                let pkg = FileManager.default.temporaryDirectory.appendingPathComponent("\(DepthModel.name).mlpackage", isDirectory: true)
+                try? FileManager.default.removeItem(at: pkg)
+                // the weights are nearly all of it: they get the bar
+                for f in DepthModel.files {
+                    guard let url = URL(string: "\(DepthModel.repo)/resolve/main/\(DepthModel.name).mlpackage/\(f)") else { continue }
+                    let dest = pkg.appendingPathComponent(f)
+                    try FileManager.default.createDirectory(at: dest.deletingLastPathComponent(), withIntermediateDirectories: true)
+                    let tmp = try await fetch(url, tracked: f.hasSuffix("weight.bin"))
+                    try FileManager.default.moveItem(at: tmp, to: dest)
+                }
+                progress = 1
+                let built = try await Task.detached(priority: .userInitiated) { try MLModel.compileModel(at: pkg) }.value
+                try? FileManager.default.removeItem(at: DepthModel.compiled)
+                try FileManager.default.moveItem(at: built, to: DepthModel.compiled)
+                try? FileManager.default.removeItem(at: pkg)
+                installed = true
+                progress = nil
+            } catch {
+                problem = error.localizedDescription
+                progress = nil
+            }
+        }
+    }
+
+    private func fetch(_ url: URL, tracked: Bool) async throws -> URL {
+        try await withCheckedThrowingContinuation { done in
+            let task = URLSession.shared.downloadTask(with: url) { file, response, error in
+                if let error { return done.resume(throwing: error) }
+                guard let file, (response as? HTTPURLResponse)?.statusCode == 200 else {
+                    return done.resume(throwing: EngineError(message: "The download didn't come through. Check your connection and try again."))
+                }
+                // keep the file: the system deletes it when this returns
+                let keep = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+                do {
+                    try FileManager.default.moveItem(at: file, to: keep)
+                    done.resume(returning: keep)
+                } catch {
+                    done.resume(throwing: error)
+                }
+            }
+            if tracked {
+                observation = task.progress.observe(\.fractionCompleted) { [weak self] p, _ in
+                    let f = p.fractionCompleted
+                    Task { @MainActor in self?.progress = Swift.min(f, 0.99) }
+                }
+            }
+            task.resume()
+        }
+    }
+
+    func remove() {
+        DepthModel.remove()
+        installed = false
+    }
+}
+
+/// Getting (or removing) the depth model.
+struct DepthModelSheet: View {
+    @StateObject private var download = DepthModelDownload()
+    @Environment(\.dismiss) private var dismiss
+    let installed: () -> Void
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Label("Depth model", systemImage: "square.3.layers.3d.down.right").font(.system(size: 18, weight: .semibold))
+                        Text("Estimates how far away everything in a photo is, so Lens Blur can blur by distance in photos the iPhone didn't record depth for. It runs on this iPhone; nothing is uploaded.")
+                            .font(.system(size: 14)).foregroundStyle(Theme.secondaryText)
+                    }
+                    .padding(.vertical, 4)
+                }
+                Section {
+                    if download.installed {
+                        Label("Installed", systemImage: "checkmark.circle.fill").foregroundStyle(.green)
+                        Button(role: .destructive) { download.remove() } label: { Label("Remove the model", systemImage: "trash") }
+                    } else if let p = download.progress {
+                        VStack(alignment: .leading, spacing: 8) {
+                            ProgressView(value: p).tint(Theme.accent)
+                            Text(p >= 1 ? "Preparing it for this iPhone\u{2026}" : "Downloading\u{2026} \(Int(p * 100))%")
+                                .font(.system(size: 13)).foregroundStyle(Theme.secondaryText).monospacedDigit()
+                        }
+                    } else {
+                        Button { download.start() } label: { Label("Download (\(DepthModel.size))", systemImage: "arrow.down.circle") }
+                    }
+                    if let problem = download.problem {
+                        Text(problem).font(.system(size: 13)).foregroundStyle(.red)
+                    }
+                } footer: {
+                    Text("Depth Anything V2 Small, converted for Core ML by Apple, from Hugging Face. Licence: Apache 2.0.")
+                }
+                Section {
+                    if let url = URL(string: DepthModel.repo) {
+                        Link(destination: url) { Label("About the model", systemImage: "safari") }
+                    }
+                }
+            }
+            .navigationTitle("Depth model")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } }
+            }
+            .onChange(of: download.installed) { _, now in if now { installed() } }
+        }
+        .preferredColorScheme(.dark)
+    }
+}
+
+/// The Focus Range bar: the photo's depths from near to far as a histogram, and the sharp range
+/// over it. Drag the middle to move it, either end to widen or narrow it.
+struct FocusRangeBar: View {
+    let histogram: [Double]
+    /// The range, 0 near … 100 far.
+    let lo: Double
+    let hi: Double
+    let begin: () -> Void
+    let change: (Double, Double) -> Void
+    let end: () -> Void
+    @State private var drag: (part: Int, lo: Double, hi: Double)?
+
+    var body: some View {
+        VStack(spacing: 6) {
+            GeometryReader { geo in
+                let w = geo.size.width, h = geo.size.height
+                let x = { (v: Double) in CGFloat(v / 100) * w }
+                ZStack(alignment: .topLeading) {
+                    // the depths
+                    Path { p in
+                        let n = Swift.max(histogram.count, 1)
+                        p.move(to: CGPoint(x: 0, y: h))
+                        for (i, v) in histogram.enumerated() {
+                            let x0 = CGFloat(i) / CGFloat(n) * w, x1 = CGFloat(i + 1) / CGFloat(n) * w
+                            let y = h - CGFloat(Swift.max(v, 0.02)) * (h - 6)
+                            p.addLine(to: CGPoint(x: x0, y: y))
+                            p.addLine(to: CGPoint(x: x1, y: y))
+                        }
+                        p.addLine(to: CGPoint(x: w, y: h))
+                        p.closeSubpath()
+                    }
+                    .fill(Color.white.opacity(0.35))
+                    RoundedRectangle(cornerRadius: 6).fill(Color.white.opacity(0.06))
+                    // the sharp range
+                    let l = x(lo), r = x(hi)
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(Color.white.opacity(0.18))
+                        .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(Color.white, lineWidth: 2.5))
+                        .frame(width: Swift.max(r - l, 14), height: h)
+                        .offset(x: l)
+                    Circle().strokeBorder(Color.white, lineWidth: 2.5).frame(width: 22, height: 22)
+                        .offset(x: (l + r) / 2 - 11, y: h / 2 - 11)
+                    ForEach([l, r].indices, id: \.self) { i in
+                        Capsule().fill(Color.white).frame(width: 8, height: h * 0.6)
+                            .overlay(Capsule().fill(Color.black.opacity(0.25)).frame(width: 2, height: h * 0.3))
+                            .offset(x: (i == 0 ? l : r) - 4, y: h * 0.2)
+                    }
+                }
+                .contentShape(Rectangle())
+                .gesture(
+                    DragGesture(minimumDistance: 0)
+                        .onChanged { g in
+                            if drag == nil {
+                                let sx = g.startLocation.x
+                                let near = { (v: Double) in abs(sx - x(v)) < 22 }
+                                // an end, else the middle (moves the whole range)
+                                let part = near(lo) && !near(hi) ? 0 : (near(hi) && !near(lo) ? 1 : 2)
+                                drag = (part, lo, hi)
+                                begin()
+                            }
+                            guard let d = drag else { return }
+                            let dv = Double(g.translation.width / Swift.max(w, 1)) * 100
+                            switch d.part {
+                            case 0: change(Swift.min(Swift.max(d.lo + dv, 0), d.hi - 2), d.hi)
+                            case 1: change(d.lo, Swift.max(Swift.min(d.hi + dv, 100), d.lo + 2))
+                            default:
+                                let span = d.hi - d.lo
+                                let nl = Swift.min(Swift.max(d.lo + dv, 0), 100 - span)
+                                change(nl, nl + span)
+                            }
+                        }
+                        .onEnded { _ in
+                            drag = nil
+                            end()
+                        }
+                )
+            }
+            .frame(height: 46)
+            HStack {
+                Text("Near")
+                Spacer()
+                Text("Far")
+            }
+            .font(.system(size: 12))
+            .foregroundStyle(Theme.secondaryText)
+        }
+        .accessibilityElement()
+        .accessibilityLabel(Text("Focus range"))
+        .accessibilityValue(Text("From \(Int(lo)) to \(Int(hi)), near 0, far 100"))
+        .accessibilityAdjustableAction { dir in
+            begin()
+            let step = dir == .increment ? 2.0 : -2.0
+            let span = hi - lo
+            let nl = Swift.min(Swift.max(lo + step, 0), 100 - span)
+            change(nl, nl + span)
+            end()
+        }
+    }
+}

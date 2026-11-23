@@ -223,7 +223,13 @@ impl DecodedSource {
     pub fn info_or(&self, header: SourceInfo) -> SourceInfo {
         match &self.info {
             Some(info) => {
-                SourceInfo { native_long: info.native_long.or(header.native_long), lens: pinned_lens(info.lens, header.lens), ..info.clone() }
+                // a depth map the app gave the photo stays when the decoder's mattes have none
+                let depth = header.mattes.as_deref().and_then(|m| m.depth()).filter(|_| !info.mattes.as_deref().is_some_and(|m| m.depth().is_some()));
+                let mattes = match depth {
+                    Some(d) => Some(Arc::new(info.mattes.as_deref().cloned().unwrap_or_default().with_depth(d.clone()))),
+                    None => info.mattes.clone(),
+                };
+                SourceInfo { native_long: info.native_long.or(header.native_long), lens: pinned_lens(info.lens, header.lens), mattes, ..info.clone() }
             }
             None => SourceInfo { camera_tone: self.camera_tone.or(header.camera_tone), ..header },
         }

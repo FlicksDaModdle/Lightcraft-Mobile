@@ -132,6 +132,7 @@ final class EditorModel: ObservableObject {
 
     func open() {
         attempt("library.select", ["ids": [photo.id], "active": photo.id])
+        loadDepth()
         refresh()
         render()
     }
@@ -800,7 +801,7 @@ final class EditorModel: ObservableObject {
 
     /// Keep the subject (shape "auto"), a fixed shape ("round", "wide", "tall") or a mask sharp.
     func setFocus(shape: String? = nil, mask: UInt32? = nil) {
-        var patch: [String: Any] = ["focus_mask": mask.map { NSNumber(value: $0) } ?? NSNull()]
+        var patch: [String: Any] = ["focus_mask": mask.map { NSNumber(value: $0) } ?? NSNull(), "focal_range": 0.0]
         if let shape { patch["shape"] = shape }
         mergeBlur(patch, "Lens Blur Focus")
     }
@@ -820,6 +821,145 @@ final class EditorModel: ObservableObject {
             render()
         } catch {
             toast = error.localizedDescription
+        }
+    }
+
+    // MARK: depth
+
+    /// The photo's depth map, when it has one (from the iPhone, or estimated).
+    @Published private(set) var depth: DepthMap?
+    /// Looking for one, or estimating it.
+    @Published private(set) var depthBusy = false
+    @Published private(set) var focalDistance = 0.0
+    @Published private(set) var focalRange = 0.0
+    /// Blur by depth (a Focus Range) rather than by the subject.
+    var depthBlur: Bool { depth != nil && focalRange > 0 && focusMask == nil && focusShape == "auto" }
+    /// The next tap on the photo sets the focus distance.
+    @Published var tapToFocus = false
+    /// The photo is shown as its depth map (near white).
+    @Published var showDepth = false { didSet { renderDepthView() } }
+    @Published private(set) var depthView: CGImage?
+    @Published var showDepthModel = false
+
+    /// The saved depth map, else the one the iPhone recorded with the file.
+    private func loadDepth() {
+        let id = photo.id
+        if let m = DepthMaps.cached(id) {
+            depth = m
+            Engine.shared.setDepth(id, m)
+            return
+        }
+        depthBusy = true
+        Task {
+            let m = await Task.detached(priority: .utility) { () -> DepthMap? in
+                guard let url = DepthMaps.path(of: id), let m = DepthMaps.fromCamera(url) else { return nil }
+                DepthMaps.save(id, m)
+                return m
+            }.value
+            depthBusy = false
+            if let m {
+                depth = m
+                Engine.shared.setDepth(id, m)
+                if blurOn { render() }
+            }
+        }
+    }
+
+    /// Estimate the depth with the depth model (getting it first if needed).
+    func estimateDepth() {
+        guard DepthModel.installed else {
+            showDepthModel = true
+            return
+        }
+        guard !depthBusy else { return }
+        depthBusy = true
+        let id = photo.id
+        Task {
+            let r: Result<DepthMap, Error> = await Task.detached(priority: .userInitiated) {
+                Result {
+                    guard let url = DepthMaps.path(of: id) else { throw EngineError(message: "This photo's file can't be found.") }
+                    return try DepthMaps.estimate(url)
+                }
+            }.value
+            depthBusy = false
+            switch r {
+            case .success(let m):
+                DepthMaps.save(id, m)
+                depth = m
+                Engine.shared.setDepth(id, m)
+                UINotificationFeedbackGenerator().notificationOccurred(.success)
+                if focalRange == 0 { useDepth() } else { render() }
+                renderDepthView()
+            case .failure(let e):
+                toast = e.localizedDescription
+            }
+        }
+    }
+
+    /// Forget the depth map (a new estimate can be made).
+    func removeDepth() {
+        DepthMaps.forget(photo.id)
+        Engine.shared.setDepth(photo.id, nil)
+        depth = nil
+        showDepth = false
+        let patch: [String: Any] = ["focal_range": 0.0]
+        mergeBlur(patch, "Lens Blur Focus")
+    }
+
+    /// Blur by depth: a range around the nearest busy depths to start with.
+    func useDepth() {
+        guard let d = depth else { return }
+        // start at the nearest fifth with something in it
+        let h = d.histogram
+        let first = h.firstIndex { $0 > 0.15 } ?? 0
+        let c = Swift.min(Double(first) / Double(Swift.max(h.count, 1)) * 100 + 10, 90)
+        var patch: [String: Any] = ["focal_distance": c, "focal_range": 20.0, "focus_mask": NSNull(), "shape": "auto", "enabled": true]
+        if (controls["lensBlur.amount"]?.value ?? 0) == 0 { patch["amount"] = 50.0 }
+        mergeBlur(patch, "Lens Blur Focus")
+    }
+
+    func useSubject() {
+        let patch: [String: Any] = ["focal_range": 0.0]
+        mergeBlur(patch, "Lens Blur Focus")
+    }
+
+    func beginFocusRange() {
+        active = "focus.range"
+        attempt("develop.beginInteraction", ["label": "Focus Range"])
+    }
+
+    /// The Focus Range moved (0 near … 100 far).
+    func setFocusRange(_ lo: Double, _ hi: Double) {
+        let lo = Swift.min(Swift.max(lo, 0), 100), hi = Swift.min(Swift.max(hi, lo + 1), 100)
+        focalDistance = (lo + hi) / 2
+        focalRange = hi - lo
+        if attempt("develop.merge", ["settings": ["lens_blur": ["focal_distance": focalDistance, "focal_range": focalRange]], "label": "Focus Range"]) {
+            render()
+        }
+    }
+
+    /// A tap on the photo (shown picture, 0…1 across and down) with Tap to focus on.
+    func focus(atShown u: CGPoint) {
+        guard let d = depth else { return }
+        // the map lies over the whole upright photo; the shown picture is cropped, turned, flipped
+        guard let v = d.depth(at: toMask(u)) else { return }
+        let half = Swift.max(focalRange, 12) / 2
+        let c = Swift.min(Swift.max(v * 100, half), 100 - half)
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        let patch: [String: Any] = ["focal_distance": c, "focal_range": half * 2, "focus_mask": NSNull(), "shape": "auto"]
+        mergeBlur(patch, "Focus Here")
+        tapToFocus = false
+    }
+
+    private func renderDepthView() {
+        guard showDepth, depth != nil else {
+            depthView = nil
+            return
+        }
+        let id = photo.id
+        let size = renderSize
+        Task {
+            depthView = await Task.detached(priority: .userInitiated) { Engine.shared.renderDepth(id, fitting: size) }.value
         }
     }
 
@@ -1052,6 +1192,8 @@ final class EditorModel: ObservableObject {
             blurOn = lb["enabled"] as? Bool ?? false
             focusMask = (lb["focus_mask"] as? NSNumber)?.uint32Value
             focusShape = lb["shape"] as? String ?? "auto"
+            focalDistance = (lb["focal_distance"] as? NSNumber)?.doubleValue ?? 0
+            focalRange = (lb["focal_range"] as? NSNumber)?.doubleValue ?? 0
             if let i = selectedSpot, !spots.indices.contains(i) { selectedSpot = nil }
             if let sel = selectedMask, !masks.contains(where: { $0.id == sel }) { selectedMask = nil }
             let h = s["hdr"] as? [String: Any]

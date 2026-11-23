@@ -370,6 +370,37 @@ fn permanently_deleting_photos_selects_a_neighbour_in_recently_deleted() {
     assert_eq!(s.selection, Selection::default());
 }
 
+/// A depth map the app gives a photo drives Lens Blur's Focus Range: what is sharp moves with the
+/// range (near half or far half), a new map renders afresh, and taking it away restores the
+/// subject-based blur.
+#[test]
+fn a_depth_map_drives_the_focus_range() {
+    let mut s = demo();
+    let id = s.active().unwrap();
+    s.execute("develop.merge", &json!({"settings": {"lens_blur": {"enabled": true, "amount": 100.0, "focal_range": 20.0, "focal_distance": 10.0}}}))
+        .unwrap();
+    let render = |s: &mut crate::Session| s.render_job(id, 96, 96, false, true).unwrap().run().rendered.unwrap().image;
+    let without = render(&mut s);
+    let (w, h) = (64, 64);
+    let mut d = lightcraft_raster::Image::<u8>::new(w, h);
+    for (i, v) in d.data.iter_mut().enumerate() {
+        *v = if i % w < w / 2 { 5 } else { 250 };
+    }
+    s.set_depth_map(id, Some(d));
+    let near = render(&mut s);
+    assert_ne!(near.data, without.data, "the depth map changes what is sharp");
+    s.execute("develop.merge", &json!({"settings": {"lens_blur": {"focal_distance": 95.0}}})).unwrap();
+    let far = render(&mut s);
+    assert_ne!(far.data, near.data, "moving the range moves the focus");
+    assert!(s.source_info(id).mattes.is_some_and(|m| m.depth().is_some()));
+    s.set_depth_map(id, None);
+    s.execute("develop.merge", &json!({"settings": {"lens_blur": {"focal_distance": 10.0}}})).unwrap();
+    assert_eq!(render(&mut s).data, without.data, "without a map the subject decides again");
+    // an ill-sized map is refused
+    s.set_depth_map(id, Some(lightcraft_raster::Image::<u8> { width: 9, height: 9, data: vec![0; 3] }));
+    assert!(s.depth_maps.is_empty());
+}
+
 #[test]
 fn permanently_deleting_explicit_targets_keeps_the_surviving_selection() {
     let mut s = demo();

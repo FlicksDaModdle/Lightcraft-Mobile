@@ -455,6 +455,12 @@ struct AboutView: View {
                 } header: {
                     Text("Open source")
                 }
+                Section {
+                    Text("Downloaded only if you ask: the SAM 3 model for AI masks (SAM License, from Meta) and the depth model for blur by depth (Depth Anything V2 Small in Apple's Core ML conversion, Apache License 2.0).")
+                        .font(.system(size: 14))
+                } header: {
+                    Text("AI models")
+                }
             }
             .navigationTitle("About")
             .navigationBarTitleDisplayMode(.inline)

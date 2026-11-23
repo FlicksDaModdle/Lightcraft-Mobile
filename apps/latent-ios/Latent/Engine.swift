@@ -122,6 +122,26 @@ final class Engine: @unchecked Sendable {
         return Self.convert(img.pointee)
     }
 
+    /// Give a photo its depth map (nil takes it away).
+    func setDepth(_ id: UInt64, _ m: DepthMap?) {
+        guard let m else {
+            latent_set_depth(core, id, 0, 0, nil, 0)
+            return
+        }
+        m.data.withUnsafeBufferPointer { b in
+            latent_set_depth(core, id, UInt32(m.width), UInt32(m.height), b.baseAddress, b.count)
+        }
+    }
+
+    /// The depth map as the photo is framed: near white, far black.
+    func renderDepth(_ id: UInt64, fitting size: CGSize) -> CGImage? {
+        let w = UInt32(max(1, size.width.rounded()))
+        let h = UInt32(max(1, size.height.rounded()))
+        guard let img = latent_render_depth(core, id, w, h) else { return nil }
+        defer { latent_image_free(img) }
+        return Self.convert(img.pointee)?.image
+    }
+
     /// The whole photo, not cropped or straightened: what the crop box is drawn over.
     func renderUncropped(_ id: UInt64, fitting size: CGSize) -> Rendered? {
         let w = UInt32(max(1, size.width.rounded()))

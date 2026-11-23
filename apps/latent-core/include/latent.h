@@ -73,5 +73,11 @@ typedef struct LatentExport {
 LatentExport *latent_export(const LatentCore *core, uint64_t id, const char *options, char **error);
 void latent_export_free(LatentExport *e);
 
+// Give a photo a depth map: w x h bytes, 0 near ... 255 far, upright. NULL / 0 takes it away.
+void latent_set_depth(const LatentCore *core, uint64_t id, uint32_t w, uint32_t h, const uint8_t *data, size_t len);
+
+// The depth map as the photo is framed: near white, far black.
+LatentImage *latent_render_depth(const LatentCore *core, uint64_t id, uint32_t max_w, uint32_t max_h);
+
 void latent_image_free(LatentImage *img);
 void latent_string_free(char *s);

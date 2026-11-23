@@ -23,6 +23,9 @@ pub enum MatteKind {
     Hair,
     Teeth,
     Glasses,
+    /// Not a selection: how far each pixel is, 0 nearest to 255 farthest (a depth map from the
+    /// camera, or estimated). Depth Range masks and a depth-driven Lens Blur read it.
+    Depth,
 }
 
 impl MatteKind {
@@ -35,6 +38,7 @@ impl MatteKind {
             MatteKind::Hair => 3,
             MatteKind::Teeth => 4,
             MatteKind::Glasses => 5,
+            MatteKind::Depth => 6,
         }
     }
 
@@ -47,6 +51,7 @@ impl MatteKind {
             3 => Some(MatteKind::Hair),
             4 => Some(MatteKind::Teeth),
             5 => Some(MatteKind::Glasses),
+            6 => Some(MatteKind::Depth),
             _ => None,
         }
     }
@@ -87,6 +92,18 @@ impl Mattes {
     /// photo's proxy source.
     pub fn iter(&self) -> impl Iterator<Item = (MatteKind, &Image<u8>)> {
         self.mattes.iter().map(|(k, m)| (*k, m))
+    }
+
+    /// The depth map (0 near … 255 far), if the photo has one.
+    pub fn depth(&self) -> Option<&Image<u8>> {
+        self.mattes.iter().find(|(k, _)| *k == MatteKind::Depth).map(|(_, m)| m)
+    }
+
+    /// These mattes with `depth` as the depth map (replacing any).
+    pub fn with_depth(&self, depth: Image<u8>) -> Mattes {
+        let mut out = Mattes { mattes: self.mattes.iter().filter(|(k, _)| *k != MatteKind::Depth).cloned().collect() };
+        out.push(MatteKind::Depth, depth);
+        out
     }
 
     fn of(&self, kinds: &[MatteKind]) -> Vec<&Image<u8>> {
@@ -317,7 +334,41 @@ pub fn shape_alpha(shape: &MaskShape, frame: &Frame, w: usize, h: usize, img: &R
             s.data.iter_mut().for_each(|v| *v = 1.0 - *v);
             out = s;
         }
-        MaskShape::DepthRange { .. } | MaskShape::Landscape { .. } => {}
+        MaskShape::DepthRange { lo, hi, feather } => {
+            if let Some(d) = mattes.and_then(Mattes::depth) {
+                out = depth_window(&matte_alpha(&[d], frame, w, h), *lo, *hi, *feather);
+            }
+        }
+        MaskShape::Landscape { .. } => {}
+    }
+    out
+}
+
+/// What lies between depths `lo` and `hi` (0 near … 1 far) of `depth`, 1 inside, falling to 0
+/// `feather` beyond either end (0: a hard edge). Non-finite input selects nothing.
+pub fn depth_window(depth: &Plane, lo: f64, hi: f64, feather: f64) -> Plane {
+    let ok = |v: f64, d: f64| if v.is_finite() { v } else { d };
+    let (lo, hi) = (ok(lo, 0.0).clamp(0.0, 1.0) as f32, ok(hi, 1.0).clamp(0.0, 1.0) as f32);
+    let (lo, hi) = (lo.min(hi), lo.max(hi));
+    let f = ok(feather, 0.0).clamp(0.0, 1.0) as f32;
+    let mut out = Plane::new(depth.width, depth.height);
+    for (o, &d) in out.data.iter_mut().zip(&depth.data) {
+        let gap = if d < lo {
+            lo - d
+        } else if d > hi {
+            d - hi
+        } else {
+            0.0
+        };
+        *o = if !d.is_finite() {
+            0.0
+        } else if gap <= 0.0 {
+            1.0
+        } else if f <= 1e-6 {
+            0.0
+        } else {
+            1.0 - smooth(0.0, f, gap)
+        };
     }
     out
 }

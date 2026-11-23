@@ -330,6 +330,10 @@ pub struct Session {
     /// Ops applied since the last `drain_log` (for persistence).
     pending_log: Vec<Op>,
     pub media: media::MediaCache,
+    /// Depth maps the app gave photos (0 near … 255 far, over the upright photo), with a
+    /// generation that changes each time one is set: Lens Blur's Focus Range and Depth Range masks
+    /// read them.
+    pub depth_maps: std::collections::HashMap<PhotoId, (u64, Arc<lightcraft_raster::Image<u8>>)>,
     /// Current time provider (ISO 8601); injectable for tests and wasm.
     pub clock: Box<dyn Fn() -> String + Send>,
     depth: u32,
@@ -469,6 +473,7 @@ impl Session {
     pub fn new() -> Session {
         Session {
             library_generation: LIBRARY_GEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            depth_maps: Default::default(),
             auto_sync: false,
             catalog: Catalog::new(),
             source: LibrarySource::All,

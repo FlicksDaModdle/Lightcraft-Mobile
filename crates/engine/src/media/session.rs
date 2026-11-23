@@ -61,6 +61,8 @@ impl crate::Session {
         // Temporary "before" settings must not replace the photo's cached develop hash.
         let settings_hash =
             if before { settings.hash64() ^ crate::files::hot_pixel_key(&settings) } else { self.media.settings_hashes.get(id, &settings) };
+        // a new depth map renders afresh
+        let settings_hash = settings_hash ^ self.depth_salt(id);
         let salt = self.media.denoise_salt(id, &settings);
         let profile_salt = self.media.camera_profile_salt(&settings.profile.id);
         let lens = super::quick::lens_key(&p);
@@ -104,7 +106,7 @@ impl crate::Session {
             level,
             source,
             origin: p.source.clone(),
-            info: source_info(&p),
+            info: self.with_depth(p.id, source_info(&p)),
             settings,
             request,
             key,
@@ -194,7 +196,7 @@ impl crate::Session {
             level,
             source,
             origin: p.source.clone(),
-            info: source_info(&p),
+            info: self.with_depth(p.id, source_info(&p)),
             settings: Arc::new(settings.clone()),
             request: RenderRequest { apply_crop: true, ..RenderRequest::fit(edge, edge) },
             key: (ck.0 as u64) ^ ((ck.0 >> 64) as u64),
@@ -250,7 +252,7 @@ impl crate::Session {
             level,
             source,
             origin: p.source.clone(),
-            info: source_info(&p),
+            info: self.with_depth(p.id, source_info(&p)),
             settings: Arc::new(settings),
             request: RenderRequest { apply_crop: true, ..RenderRequest::fit(edge, edge) },
             key: (ck.0 as u64) ^ ((ck.0 >> 64) as u64),
@@ -608,9 +610,39 @@ impl crate::Session {
     /// Prefer decoder facts to header-only metadata for pixel-statistics commands.
     pub fn source_info(&self, id: PhotoId) -> SourceInfo {
         let photo = self.catalog.photo(id);
-        let header = photo.map(|p| source_info(p)).unwrap_or_default();
+        let header = self.with_depth(id, photo.map(|p| source_info(p)).unwrap_or_default());
         let profile = photo.and_then(|p| self.media.camera_profile_of(p)).map(|(tag, _)| tag);
         self.media.source_facts(id, header, profile.as_deref())
+    }
+
+    /// Give photo `id` a depth map (0 near … 255 far, over the photo as the camera stood it,
+    /// before the user's rotation), or take it away (`None`, or an empty or ill-sized map).
+    pub fn set_depth_map(&mut self, id: PhotoId, depth: Option<lightcraft_raster::Image<u8>>) {
+        static GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        match depth.filter(|d| d.width > 0 && d.height > 0 && d.data.len() == d.width * d.height) {
+            Some(d) => {
+                let g = GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                self.depth_maps.insert(id, (g, Arc::new(d)));
+            }
+            None => {
+                self.depth_maps.remove(&id);
+            }
+        }
+    }
+
+    /// `info` with photo `id`'s depth map among its mattes, when it has one.
+    pub(crate) fn with_depth(&self, id: PhotoId, info: SourceInfo) -> SourceInfo {
+        let Some((_, d)) = self.depth_maps.get(&id) else { return info };
+        let mattes = match info.mattes.as_deref() {
+            Some(m) => m.with_depth((**d).clone()),
+            None => lightcraft_pipeline::masks::Mattes::default().with_depth((**d).clone()),
+        };
+        SourceInfo { mattes: Some(Arc::new(mattes)), ..info }
+    }
+
+    /// Changes whenever photo `id`'s depth map does (0 without one).
+    fn depth_salt(&self, id: PhotoId) -> u64 {
+        self.depth_maps.get(&id).map_or(0, |(g, _)| g.wrapping_mul(0x517c_c1b7_2722_0a95) | 1)
     }
 
     /// The source proxy for pixel-statistics commands (auto tone/WB), loading synchronously.

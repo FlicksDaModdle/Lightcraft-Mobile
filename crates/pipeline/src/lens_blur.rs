@@ -1,5 +1,10 @@
 //! Lens Blur: a shallow depth of field added after the fact.
 //!
+//! With a depth map (a [`MatteKind::Depth`](crate::masks::MatteKind) matte) and a Focus Range
+//! (`focal_range` above 0, nothing else chosen to keep sharp), what is in focus is what lies within
+//! `focal_range` of `focal_distance` (both 0 near … 100 far); the blur grows with the depth beyond
+//! it, Transition setting how fast, so the circle of confusion follows the scene's depth.
+//!
 //! Without a depth map, the scene has two depths: what is in focus (the photo's subject, or the
 //! selection of the mask [`LensBlur::focus_mask`](lightcraft_develop::LensBlur) names) and
 //! everything else. A pixel's circle of confusion is `R · (1 − focus)`, `R` set by Blur Amount
@@ -27,7 +32,7 @@
 //! It runs on the scene-linear image (white-balanced and denoised, before exposure: a blur is
 //! linear, so exposure commutes with it), on the CPU, for both renderers.
 
-use lightcraft_develop::{BrushStroke, DevelopSettings, Mask, MaskShape};
+use lightcraft_develop::{BrushStroke, DevelopSettings, LensBlur, Mask, MaskShape};
 use lightcraft_raster::{Plane, Rgb32f};
 
 use crate::geometry::Frame;
@@ -179,6 +184,27 @@ fn smooth(e0: f32, e1: f32, x: f32) -> f32 {
     t * t * (3.0 - 2.0 * t)
 }
 
+/// Whether the focus comes from the depth map: a Focus Range is set, the photo has a depth map,
+/// and neither a mask nor a fixed shape says what is in focus.
+pub fn depth_driven(s: &DevelopSettings, mattes: Option<&Mattes>) -> bool {
+    let b = &s.lens_blur;
+    b.focal_range.is_finite()
+        && b.focal_range > 0.0
+        && focus_mask(s).is_none()
+        && b.focus_area(s.crop_center()).is_none()
+        && mattes.is_some_and(|m| m.depth().is_some())
+}
+
+/// The depth-map focus: the Focus Range as a [`MaskShape::DepthRange`] (0..1), its edges softened
+/// by Transition (a sharp cut at 0, a fifth of the depth range at 100).
+fn depth_focus_shape(s: &DevelopSettings) -> MaskShape {
+    let b = &s.lens_blur;
+    let c = (if b.focal_distance.is_finite() { b.focal_distance } else { 0.0 }).clamp(0.0, 100.0) / 100.0;
+    let half = (b.focal_range.clamp(0.0, 100.0) / 100.0) / 2.0;
+    let t = if b.transition.is_finite() { b.transition.clamp(0.0, 100.0) } else { LensBlur::DEFAULT_TRANSITION };
+    MaskShape::DepthRange { lo: (c - half).max(0.0), hi: (c + half).min(1.0), feather: 0.005 + 0.2 * t / 100.0 }
+}
+
 /// What is in focus, 0..1 per pixel of `img` (scene-linear, before exposure, output resolution).
 pub fn focus(img: &Rgb32f, s: &DevelopSettings, frame: &Frame, mattes: Option<&Mattes>) -> Plane {
     focus_with(img, s, frame, mattes, None)
@@ -191,6 +217,7 @@ fn focus_with(img: &Rgb32f, s: &DevelopSettings, frame: &Frame, mattes: Option<&
     let (w, h) = (img.width, img.height);
     let log_l = img.map(crate::local::log_lum);
     let mut a = match (focus_mask(s), s.lens_blur.focus_area(s.crop_center())) {
+        _ if depth_driven(s, mattes) => masks::shape_alpha(&depth_focus_shape(s), frame, w, h, img, &log_l, 0.0, mattes),
         (Some(m), _) => masks::evaluate_one(m, frame, w, h, img, &log_l, s.light.exposure as f32, mattes),
         // a fixed shape: where it was moved to, else the middle of the crop (in photo
         // coordinates, so it stays put in a zoomed view)
@@ -336,8 +363,13 @@ pub fn apply_with(
     if r >= 0.5 {
         let focus = crate::timed("lens blur focus", || focus_with(img, s, frame, mattes, subject));
         if focus.data.len() == img.data.len() {
-            // the blur grows with the distance from what is in focus, as with depth
-            let ramp = crate::timed("lens blur transition", || transition_ramp(&focus, transition_px(s, px_per_long), px_per_long, origin));
+            // the blur grows with the distance from what is in focus, as with depth (with a depth
+            // map, the focus itself already grows with the depth)
+            let ramp = if depth_driven(s, mattes) {
+                None
+            } else {
+                crate::timed("lens blur transition", || transition_ramp(&focus, transition_px(s, px_per_long), px_per_long, origin))
+            };
             let coc: Vec<f32> = focus.data.iter().enumerate().map(|(i, f)| (1.0 - f) * ramp.as_ref().map_or(1.0, |r| r.at(i))).collect();
             blur(img, &coc, r, boost_of(s.lens_blur.boost), origin);
         }
@@ -899,6 +931,44 @@ mod tests {
         // an unknown shape in the JSON reads as Auto (never an error)
         let b: lightcraft_develop::LensBlur = serde_json::from_value(serde_json::json!({"shape": "hexagon"})).unwrap();
         assert_eq!(b.shape, FocusShape::Auto);
+    }
+
+    /// With a depth map and a Focus Range, what is sharp is what lies at the chosen depth: moving
+    /// the range from near to far moves the sharp part from the near half to the far half, and a
+    /// Depth Range mask selects the same. Without a depth map the range changes nothing.
+    #[test]
+    fn the_focus_range_follows_the_depth_map() {
+        use crate::masks::{MatteKind, Mattes};
+        let (w, h) = (200, 100);
+        let mut s = on(100.0);
+        s.lens_blur.focal_range = 20.0;
+        s.lens_blur.focal_distance = 10.0;
+        let fr = frame(&s, w, h);
+        let img = Rgb32f::filled(w, h, [0.2; 3]);
+        // the left half is near, the right half far
+        let mut depth = lightcraft_raster::Image::<u8>::new(w, h);
+        for (i, v) in depth.data.iter_mut().enumerate() {
+            *v = if i % w < w / 2 { 10 } else { 240 };
+        }
+        let mut m = Mattes::default();
+        m.push(MatteKind::Depth, depth);
+        assert!(depth_driven(&s, Some(&m)));
+        let near = focus(&img, &s, &fr, Some(&m));
+        assert!(near.get(40, 50) > 0.99 && near.get(160, 50) < 0.01, "{} {}", near.get(40, 50), near.get(160, 50));
+        s.lens_blur.focal_distance = 92.0;
+        let far = focus(&img, &s, &fr, Some(&m));
+        assert!(far.get(40, 50) < 0.01 && far.get(160, 50) > 0.99, "{} {}", far.get(40, 50), far.get(160, 50));
+        // a Depth Range mask reads the same map
+        let log_l = img.map(crate::local::log_lum);
+        let shape = MaskShape::DepthRange { lo: 0.0, hi: 0.2, feather: 0.0 };
+        let a = crate::masks::shape_alpha(&shape, &fr, w, h, &img, &log_l, 0.0, Some(&m));
+        assert!(a.get(40, 50) > 0.99 && a.get(160, 50) < 0.01);
+        // no depth map: the subject estimate decides, as before
+        assert!(!depth_driven(&s, None));
+        // hostile ranges stay finite
+        s.lens_blur.focal_distance = f64::NAN;
+        s.lens_blur.transition = f64::INFINITY;
+        assert!(focus(&img, &s, &fr, Some(&m)).data.iter().all(|v| v.is_finite()));
     }
 
     /// With a Transition the blur grows with the distance from the focus, as a lens renders what
