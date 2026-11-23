@@ -490,14 +490,8 @@ struct EditorView: View {
                 model.zoomChanged(zoom)
             }
             .onTapGesture { at in
-                if model.tapToFocus && model.tool == .blur, let img = model.image {
-                    // undo the zoom, then find the point on the fitted picture
-                    let c = CGPoint(x: geo.size.width / 2, y: geo.size.height / 2)
-                    let q = CGPoint(x: c.x + (at.x - c.x - pan.width) / zoom, y: c.y + (at.y - c.y - pan.height) / zoom)
-                    let s = Swift.min(geo.size.width / CGFloat(img.width), geo.size.height / CGFloat(img.height))
-                    let fw = CGFloat(img.width) * s, fh = CGFloat(img.height) * s
-                    let u = CGPoint(x: (q.x - (geo.size.width - fw) / 2) / fw, y: (q.y - (geo.size.height - fh) / 2) / fh)
-                    if (0...1).contains(u.x) && (0...1).contains(u.y) { model.focus(atShown: u) }
+                if model.tapToFocus && model.tool == .blur {
+                    if let u = shownPoint(at, in: geo.size) { model.focus(atShown: u) }
                     return
                 }
                 if !drawsOnPhoto && model.mode != .crop { chromeHidden.toggle() }
@@ -531,6 +525,21 @@ struct EditorView: View {
 
     /// Masks and Remove draw with one finger, so there the photo moves with two.
     private var drawsOnPhoto: Bool { model.mode == .masks || model.mode == .remove }
+
+    /// Where a tap on the photo area lands on the shown picture (0…1 across and down), the zoom
+    /// undone; nil off the picture.
+    private func shownPoint(_ at: CGPoint, in size: CGSize) -> CGPoint? {
+        guard let img = model.image, img.width > 0, img.height > 0 else { return nil }
+        let cx = size.width / 2
+        let cy = size.height / 2
+        let qx: CGFloat = cx + (at.x - cx - pan.width) / zoom
+        let qy: CGFloat = cy + (at.y - cy - pan.height) / zoom
+        let scale: CGFloat = Swift.min(size.width / CGFloat(img.width), size.height / CGFloat(img.height))
+        let fw: CGFloat = CGFloat(img.width) * scale
+        let fh: CGFloat = CGFloat(img.height) * scale
+        let u = CGPoint(x: (qx - (size.width - fw) / 2) / fw, y: (qy - (size.height - fh) / 2) / fh)
+        return (0...1).contains(u.x) && (0...1).contains(u.y) ? u : nil
+    }
 
     private func resetZoom() {
         withAnimation(.glass) {

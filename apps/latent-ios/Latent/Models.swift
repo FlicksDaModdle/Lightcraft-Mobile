@@ -12,6 +12,12 @@ struct Photo: Identifiable, Hashable {
     /// "pick", "reject" or "none".
     let flag: String
     let format: String
+    /// What search looks in besides the file name: camera, title, keywords.
+    let searchText: String
+
+    func matches(_ q: String) -> Bool {
+        fileName.localizedCaseInsensitiveContains(q) || searchText.localizedCaseInsensitiveContains(q)
+    }
 
     init?(_ json: Any) {
         guard let d = json as? [String: Any], let id = (d["id"] as? NSNumber)?.uint64Value else { return nil }
@@ -22,6 +28,8 @@ struct Photo: Identifiable, Hashable {
         rating = (d["rating"] as? NSNumber)?.intValue ?? 0
         flag = (d["flag"] as? String)?.lowercased() ?? "none"
         format = (d["format"] as? String)?.lowercased() ?? ""
+        searchText = ([d["camera"] as? String, d["title"] as? String] + ((d["keywords"] as? [String]) ?? []).map { Optional($0) })
+            .compactMap { $0 }.joined(separator: " ")
     }
 }
 

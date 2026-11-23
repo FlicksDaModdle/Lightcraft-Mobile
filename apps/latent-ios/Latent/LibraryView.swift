@@ -3,14 +3,12 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 /// The two places photos come from: Latent's own library, and the photos on this iPhone.
-enum HomeTab: String, CaseIterable, Identifiable {
-    case library, device
-    var id: String { rawValue }
-    var label: String { self == .library ? "Library" : "On iPhone" }
-    var symbol: String { self == .library ? "photo.stack" : "iphone" }
+enum HomeTab: String, Hashable {
+    case library, device, search
 }
 
-/// The home screen: a glass top bar, the chosen tab's grid, and a floating glass tab bar.
+/// The home screen: the system's Liquid Glass tab bar (Library, On iPhone, and Search on its own
+/// at the end), each tab with Latent's glass top bar over its grid.
 struct LibraryView: View {
     @StateObject private var library = Library()
     @State private var tab: HomeTab = .library
@@ -20,27 +18,37 @@ struct LibraryView: View {
     @State private var pickingFiles = false
     @State private var sharing: Photo?
     @State private var showAbout = false
-    @Namespace private var glass
+    @State private var query = ""
 
     var body: some View {
-        ZStack(alignment: .bottom) {
-            VStack(spacing: 0) {
-                topBar
-                Group {
-                    switch tab {
-                    case .library:
-                        LibraryGrid(library: library, open: $open, sharing: $sharing, browseDevice: { withAnimation(.glass) { tab = .device } }, addPhotos: { pickingPhotos = true })
-                    case .device:
-                        DeviceView(library: library) { photo in open = photo }
-                    }
+        TabView(selection: $tab) {
+            Tab("Library", systemImage: "photo.stack", value: HomeTab.library) {
+                VStack(spacing: 0) {
+                    topBar
+                    LibraryGrid(library: library, open: $open, sharing: $sharing, browseDevice: { tab = .device }, addPhotos: { pickingPhotos = true })
                 }
-                .transition(.opacity)
+                .background(Color.black.ignoresSafeArea())
             }
-            tabBar
+            Tab("On iPhone", systemImage: "iphone", value: HomeTab.device) {
+                VStack(spacing: 0) {
+                    topBar
+                    DeviceView(library: library) { photo in open = photo }
+                }
+                .background(Color.black.ignoresSafeArea())
+            }
+            Tab(value: HomeTab.search, role: .search) {
+                NavigationStack {
+                    SearchGrid(library: library, query: query, open: $open, sharing: $sharing)
+                        .navigationTitle("Search")
+                        .background(Color.black.ignoresSafeArea())
+                }
+                .searchable(text: $query, prompt: Text("File name, camera, title or keyword"))
+            }
         }
-        .background(Color.black.ignoresSafeArea())
+        .tabBarMinimizeBehavior(.onScrollDown)
+        .tint(Theme.accent)
         .preferredColorScheme(.dark)
-        .animation(.glass, value: tab)
+        .onChange(of: tab) { _, _ in UISelectionFeedbackGenerator().selectionChanged() }
         .photosPicker(isPresented: $pickingPhotos, selection: $picked, matching: .images, photoLibrary: .shared())
         .fileImporter(isPresented: $pickingFiles, allowedContentTypes: [.image, .rawImage], allowsMultipleSelection: true) { result in
             guard case .success(let urls) = result else { return }
@@ -139,44 +147,6 @@ struct LibraryView: View {
         .padding(.bottom, 8)
     }
 
-    private var tabBar: some View {
-        HStack(spacing: 4) {
-            ForEach(HomeTab.allCases) { t in
-                VStack(spacing: 3) {
-                    Image(systemName: t.symbol).font(.system(size: 20, weight: .medium))
-                        .symbolEffect(.bounce, value: tab == t)
-                    Text(t.label).font(.system(size: 11, weight: .semibold))
-                }
-                .foregroundStyle(tab == t ? Theme.accent : .white)
-                .frame(width: 104, height: 54)
-                .background {
-                    if tab == t {
-                        Capsule()
-                            .fill(Color.white.opacity(0.12))
-                            .matchedGeometryEffect(id: "tab", in: glass)
-                    }
-                }
-                .contentShape(Capsule())
-                // a plain tap, not a button inside interactive glass, so the touch always lands
-                .onTapGesture { choose(t) }
-                .accessibilityElement(children: .ignore)
-                .accessibilityLabel(Text(t.label))
-                .accessibilityAddTraits(tab == t ? [.isButton, .isSelected] : .isButton)
-                .accessibilityAction { choose(t) }
-            }
-        }
-        .padding(5)
-        .latentGlass(in: Capsule())
-        .shadow(color: .black.opacity(0.35), radius: 18, y: 8)
-        .padding(.bottom, 8)
-        .zIndex(1)
-    }
-
-    private func choose(_ t: HomeTab) {
-        guard tab != t else { return }
-        UISelectionFeedbackGenerator().selectionChanged()
-        withAnimation(.glass) { tab = t }
-    }
 }
 
 /// Latent's own photos: the filter as the title, the count, sort, and the grid.
@@ -213,7 +183,6 @@ struct LibraryGrid: View {
                 }
                 .animation(.glass, value: shown.map(\.id))
             }
-            Color.clear.frame(height: 90)
         }
         .scrollIndicators(.hidden)
         .refreshable { library.reload() }
@@ -469,5 +438,40 @@ struct AboutView: View {
             }
         }
         .preferredColorScheme(.dark)
+    }
+}
+
+/// Search: the library's photos whose file name, camera, title or keywords hold the query.
+struct SearchGrid: View {
+    @ObservedObject var library: Library
+    let query: String
+    @Binding var open: Photo?
+    @Binding var sharing: Photo?
+    private let columns = Array(repeating: GridItem(.flexible(), spacing: 2), count: 4)
+
+    var body: some View {
+        let q = query.trimmingCharacters(in: .whitespaces)
+        let found = q.isEmpty ? [] : library.photos.filter { $0.matches(q) }
+        ScrollView {
+            if q.isEmpty {
+                ContentUnavailableView("Search your library", systemImage: "magnifyingglass", description: Text("Find photos by file name, camera, title or keyword."))
+                    .padding(.top, 80)
+            } else if found.isEmpty {
+                ContentUnavailableView.search(text: q).padding(.top, 80)
+            } else {
+                LazyVGrid(columns: columns, spacing: 2) {
+                    ForEach(found) { photo in
+                        Button { open = photo } label: { LibraryCell(photo: photo) }
+                            .buttonStyle(.plain)
+                            .contextMenu {
+                                Button { open = photo } label: { Label("Edit", systemImage: "slider.horizontal.3") }
+                                Button { sharing = photo } label: { Label("Share\u{2026}", systemImage: "square.and.arrow.up") }
+                            }
+                            .accessibilityLabel(Text(photo.fileName))
+                    }
+                }
+            }
+        }
+        .scrollIndicators(.hidden)
     }
 }

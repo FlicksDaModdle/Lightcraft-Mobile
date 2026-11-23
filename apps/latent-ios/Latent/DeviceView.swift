@@ -118,7 +118,6 @@ struct DeviceView: View {
                             .accessibilityLabel(Text(asset.creationDate.map { $0.formatted(date: .abbreviated, time: .shortened) } ?? "Photo"))
                         }
                     }
-                    Color.clear.frame(height: 90)
                 }
                 .scrollIndicators(.hidden)
                 .refreshable { album.load() }
