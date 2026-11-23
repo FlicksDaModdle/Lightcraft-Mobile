@@ -298,7 +298,7 @@ enum Mode: String, CaseIterable {
     }
 
     /// Whether this build has the mode.
-    var available: Bool { [.presets, .crop, .edit, .masks].contains(self) }
+    var available: Bool { [.presets, .crop, .edit, .masks, .remove].contains(self) }
 }
 
 /// The point curve's channels: the engine's name, what it's called, and its colour.
@@ -494,3 +494,48 @@ struct AIModelStatus {
         folder = d["dir"] as? String ?? ""
     }
 }
+
+/// A spot the Remove tool fixed (`develop.get` → `spots`): where, how, and where it takes from.
+struct SpotItem {
+    let mode: String
+    /// The target: one point (a round spot) or a brushed path, in mask coordinates.
+    let points: [CGPoint]
+    /// Radius as a fraction of the long edge.
+    let size: Double
+    let feather: Double
+    let opacity: Double
+    /// Offset of the source from the target (nil: none, as for fill).
+    let source: CGPoint?
+
+    init?(_ json: Any) {
+        guard let d = json as? [String: Any] else { return nil }
+        mode = (d["mode"] as? String)?.lowercased() ?? "remove"
+        points = (d["points"] as? [[String: Any]] ?? []).compactMap { p in
+            guard let x = (p["x"] as? NSNumber)?.doubleValue, let y = (p["y"] as? NSNumber)?.doubleValue else { return nil }
+            return CGPoint(x: x, y: y)
+        }
+        size = (d["size"] as? NSNumber)?.doubleValue ?? 0.02
+        feather = (d["feather"] as? NSNumber)?.doubleValue ?? 50
+        opacity = (d["opacity"] as? NSNumber)?.doubleValue ?? 100
+        if let o = d["source_offset"] as? [String: Any], let x = (o["x"] as? NSNumber)?.doubleValue, let y = (o["y"] as? NSNumber)?.doubleValue {
+            source = CGPoint(x: x, y: y)
+        } else {
+            source = nil
+        }
+        if points.isEmpty { return nil }
+    }
+
+    /// Middle of the target.
+    var center: CGPoint {
+        let n = CGFloat(points.count)
+        return CGPoint(x: points.map(\.x).reduce(0, +) / n, y: points.map(\.y).reduce(0, +) / n)
+    }
+}
+
+/// The Remove tool's ways of fixing a spot.
+let spotModes: [(id: String, label: String, symbol: String)] = [
+    ("remove", "Remove", "eraser"),
+    ("heal", "Heal", "bandage"),
+    ("clone", "Clone", "square.on.square"),
+    ("fill", "Fill", "rectangle.dashed"),
+]

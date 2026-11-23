@@ -18,6 +18,11 @@ struct EditorView: View {
     @State private var chromeHidden = false
     @State private var showingOriginal = false
     @State private var hold: Task<Void, Never>?
+    /// Pinch zoom: the scale and where the zoomed photo has been moved to.
+    @State private var zoom: CGFloat = 1
+    @State private var pan: CGSize = .zero
+    @State private var pinchStart: (zoom: CGFloat, pan: CGSize)?
+    @State private var panStart: CGSize?
     @AppStorage("editorBackground") private var background = EditorBackground.photo.rawValue
     /// The colour taken from the photo, for the "From photo" background.
     @State private var ambient: Color?
@@ -180,7 +185,10 @@ struct EditorView: View {
                     .padding(.horizontal, 8)
                     .padding(.top, 6)
                 Group {
-                    if model.mode == .masks {
+                    if model.mode == .remove {
+                        PresetsBar(title: "Remove", cancel: { withAnimation(.glass) { model.cancelRemove() } }, done: { withAnimation(.glass) { model.doneRemove() } })
+                            .latentGlassID("bottomBar", in: glass)
+                    } else if model.mode == .masks {
                         PresetsBar(title: "Masking", cancel: { withAnimation(.glass) { model.cancelMasks() } }, done: { withAnimation(.glass) { model.doneMasks() } })
                             .latentGlassID("bottomBar", in: glass)
                     } else if model.mode == .crop {
@@ -359,18 +367,26 @@ struct EditorView: View {
                         ProgressView().tint(.white).frame(width: geo.size.width, height: geo.size.height)
                     }
                 } else if let img = showingOriginal ? (model.original ?? model.image) : model.image {
-                    Image(decorative: img, scale: 1)
-                        .resizable()
-                        .interpolation(.high)
-                        .allowedDynamicRange(model.showingHDR && !showingOriginal ? .high : .standard)
-                        .scaledToFit()
-                        .shadow(color: .black.opacity(background == EditorBackground.black.rawValue ? 0 : 0.35), radius: 16, y: 6)
-                        .frame(width: geo.size.width, height: geo.size.height)
+                    // the photo and what is drawn on it zoom together
+                    ZStack {
+                        Image(decorative: img, scale: 1)
+                            .resizable()
+                            .interpolation(.high)
+                            .allowedDynamicRange(model.showingHDR && !showingOriginal ? .high : .standard)
+                            .scaledToFit()
+                            .shadow(color: .black.opacity(background == EditorBackground.black.rawValue || zoom > 1 ? 0 : 0.35), radius: 16, y: 6)
+                            .frame(width: geo.size.width, height: geo.size.height)
+                        if model.mode == .masks && chrome, model.currentMask != nil {
+                            MaskCanvas(model: model, imageSize: CGSize(width: img.width, height: img.height), size: geo.size, zoom: zoom)
+                        }
+                        if model.mode == .remove && chrome {
+                            SpotCanvas(model: model, imageSize: CGSize(width: img.width, height: img.height), size: geo.size, zoom: zoom)
+                        }
+                    }
+                    .scaleEffect(zoom)
+                    .offset(pan)
                 } else {
                     ProgressView().tint(.white).frame(width: geo.size.width, height: geo.size.height)
-                }
-                if model.mode == .masks && chrome, let img = model.image, model.currentMask != nil {
-                    MaskCanvas(model: model, imageSize: CGSize(width: img.width, height: img.height), size: geo.size)
                 }
                 if model.mode == .masks && chrome && !focused {
                     HStack(alignment: .bottom) {
@@ -383,7 +399,24 @@ struct EditorView: View {
                     .frame(width: geo.size.width, height: geo.size.height, alignment: .bottom)
                     .transition(.opacity)
                 }
-                if showHistogram && chrome && model.tool != .curve && model.mode != .crop && model.mode != .masks && !focused {
+                if zoom > 1.01 {
+                    Button { resetZoom() } label: {
+                        Text("\(Int((zoom * 100).rounded()))%")
+                            .font(.system(size: 13, weight: .semibold))
+                            .monospacedDigit()
+                            .contentTransition(.numericText())
+                            .padding(.horizontal, 12)
+                            .frame(height: 30)
+                            .latentGlass(in: Capsule(), interactive: true)
+                    }
+                    .foregroundStyle(.white)
+                    .frame(maxWidth: .infinity, alignment: .trailing)
+                    .padding(.trailing, 12)
+                    .padding(.top, 8)
+                    .accessibilityLabel(Text("Zoom \(Int((zoom * 100).rounded())) percent. Fit the photo"))
+                    .transition(.opacity.combined(with: .scale(scale: 0.8)))
+                }
+                if showHistogram && chrome && model.tool != .curve && model.mode != .crop && model.mode != .masks && model.mode != .remove && !focused && zoom <= 1.01 {
                     HistogramView(bins: model.histogram, hdrStops: model.showingHDR ? model.headroom : nil)
                         .frame(height: model.showingHDR ? 62 : 50)
                         .padding(.horizontal, 10)
@@ -417,10 +450,26 @@ struct EditorView: View {
                 }
             }
             .contentShape(Rectangle())
-            .onTapGesture { if model.mode != .crop && model.mode != .masks { chromeHidden.toggle() } }
+            .clipped()
+            .simultaneousGesture(pinch(geo.size), including: model.mode == .crop ? .subviews : .all)
+            .simultaneousGesture(panWhenZoomed(geo.size), including: zoom > 1.01 && !drawsOnPhoto ? .all : .subviews)
+            .onTapGesture(count: 2) {
+                guard model.mode != .crop else { return }
+                withAnimation(.glass) {
+                    if zoom > 1.01 {
+                        zoom = 1
+                        pan = .zero
+                    } else {
+                        zoom = 2.5
+                    }
+                }
+                model.zoomChanged(zoom)
+            }
+            .onTapGesture { if !drawsOnPhoto && model.mode != .crop { chromeHidden.toggle() } }
+            .onChange(of: model.mode) { _, m in if m == .crop { resetZoom() } }
             .onLongPressGesture(minimumDuration: 0.3, maximumDistance: 24, perform: {}, onPressingChanged: { pressing in
                 hold?.cancel()
-                if pressing && model.mode != .crop && model.mode != .masks {
+                if pressing && model.mode != .crop && !drawsOnPhoto {
                     // a hold, not a tap: show the photo as it was
                     hold = Task {
                         try? await Task.sleep(nanoseconds: 250_000_000)
@@ -433,8 +482,73 @@ struct EditorView: View {
                 }
             })
             .accessibilityLabel(Text("Photo"))
-            .accessibilityHint(Text("Tap to hide the controls. Touch and hold to see the original."))
+            .accessibilityHint(Text("Tap to hide the controls. Touch and hold to see the original. Pinch or double-tap to zoom."))
+            .accessibilityZoomAction { action in
+                withAnimation(.glass) {
+                    zoom = Swift.min(Swift.max(zoom * (action.direction == .zoomIn ? 1.5 : 1 / 1.5), 1), 8)
+                    if zoom <= 1.01 { pan = .zero }
+                }
+                model.zoomChanged(zoom)
+            }
         }
+    }
+
+    /// Masks and Remove draw with one finger, so the photo pans with two (while pinching).
+    private var drawsOnPhoto: Bool { model.mode == .masks || model.mode == .remove }
+
+    private func resetZoom() {
+        withAnimation(.glass) {
+            zoom = 1
+            pan = .zero
+        }
+        model.zoomChanged(1)
+    }
+
+    /// Keep the zoomed photo covering the view.
+    private func clampPan(_ p: CGSize, _ size: CGSize, _ z: CGFloat) -> CGSize {
+        let mx = size.width * (z - 1) / 2
+        let my = size.height * (z - 1) / 2
+        return CGSize(width: Swift.min(Swift.max(p.width, -mx), mx), height: Swift.min(Swift.max(p.height, -my), my))
+    }
+
+    /// Two fingers: zoom around the point between them, and move with them.
+    private func pinch(_ size: CGSize) -> some Gesture {
+        MagnifyGesture(minimumScaleDelta: 0.005)
+            .onChanged { v in
+                if pinchStart == nil {
+                    pinchStart = (zoom, pan)
+                    model.pinching = true
+                }
+                guard let s = pinchStart else { return }
+                let z = Swift.min(Swift.max(s.zoom * v.magnification, 1), 8)
+                let c = CGPoint(x: size.width / 2, y: size.height / 2)
+                // the photo point that was under the fingers when the pinch began stays under them
+                let px = (v.startLocation.x - c.x - s.pan.width) / s.zoom
+                let py = (v.startLocation.y - c.y - s.pan.height) / s.zoom
+                zoom = z
+                pan = clampPan(CGSize(width: v.location.x - c.x - px * z, height: v.location.y - c.y - py * z), size, z)
+            }
+            .onEnded { _ in
+                pinchStart = nil
+                model.pinching = false
+                if zoom < 1.05 {
+                    resetZoom()
+                } else {
+                    model.zoomChanged(zoom)
+                }
+            }
+    }
+
+    /// One finger moves a zoomed photo (when nothing is drawn with it).
+    private func panWhenZoomed(_ size: CGSize) -> some Gesture {
+        DragGesture(minimumDistance: 8)
+            .onChanged { v in
+                guard zoom > 1.01, pinchStart == nil, !drawsOnPhoto else { return }
+                if panStart == nil { panStart = pan }
+                let s = panStart ?? .zero
+                pan = clampPan(CGSize(width: s.width + v.translation.width, height: s.height + v.translation.height), size, zoom)
+            }
+            .onEnded { _ in panStart = nil }
     }
 
     // MARK: the card
@@ -446,6 +560,7 @@ struct EditorView: View {
                 case .presets: presetsPanel
                 case .crop: cropPanel
                 case .masks: masksPanel
+                case .remove: removePanel
                 default:
                     editPanel
                     ToolStrip(model: model).opacity(focused ? 0 : 1)
@@ -1177,6 +1292,114 @@ struct EditorView: View {
                 model.updateMaskShape(shape)
                 model.end()
             })
+    }
+
+    // MARK: remove
+
+    private var removePanel: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 6) {
+                ForEach(spotModes, id: \.id) { m in
+                    let on = model.spotMode == m.id
+                    Button { withAnimation(.glass) { model.setSpotMode(m.id) } } label: {
+                        VStack(spacing: 5) {
+                            Image(systemName: m.symbol).font(.system(size: 19)).frame(height: 24)
+                                .symbolEffect(.bounce, value: on)
+                            Text(m.label).font(.system(size: 11))
+                        }
+                        .foregroundStyle(on ? Color.white : Theme.secondaryText)
+                        .frame(maxWidth: .infinity, minHeight: 58)
+                        .background {
+                            if on {
+                                RoundedRectangle(cornerRadius: 14, style: .continuous).fill(Color.white.opacity(0.08))
+                                    .latentGlass(in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                                    .matchedGeometryEffect(id: "spotMode", in: glass)
+                            }
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(Text(m.label))
+                    .accessibilityAddTraits(on ? .isSelected : [])
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.top, 10)
+            .opacity(focused ? 0 : 1)
+            spotSlider("Size", key: "size", value: model.spotSize, min: 0.3, max: 20, scale: 100, decimals: 1)
+            spotSlider("Feather", key: "feather", value: model.spotFeather, min: 0, max: 100, scale: 1, decimals: 0)
+            spotSlider("Opacity", key: "opacity", value: model.spotOpacity, min: 1, max: 100, scale: 1, decimals: 0)
+            HStack(spacing: 10) {
+                Button { withAnimation(.glass) { model.showSpots.toggle() } } label: {
+                    Image(systemName: model.showSpots ? "circle.dashed.inset.filled" : "circle.dashed")
+                        .contentTransition(.symbolEffect(.replace))
+                        .frame(width: 40, height: 40)
+                        .latentGlass(in: Circle(), interactive: true)
+                }
+                .accessibilityLabel(Text(model.showSpots ? "Hide the spots" : "Show the spots"))
+                if let i = model.selectedSpot, model.spots.indices.contains(i) {
+                    if ["heal", "clone", "remove"].contains(model.spots[i].mode) {
+                        Button { model.newSource() } label: {
+                            Label("New source", systemImage: "arrow.triangle.2.circlepath").font(.system(size: 13, weight: .semibold))
+                                .padding(.horizontal, 12).frame(height: 40)
+                                .latentGlass(in: Capsule(), interactive: true)
+                        }
+                    }
+                    Button(role: .destructive) { withAnimation(.glass) { model.deleteSpot() } } label: {
+                        Image(systemName: "trash").frame(width: 40, height: 40).latentGlass(in: Circle(), interactive: true)
+                    }
+                    .accessibilityLabel(Text("Delete spot"))
+                }
+                Spacer()
+                Menu {
+                    Button { model.findDust() } label: { Label("Find sensor dust", systemImage: "sparkle.magnifyingglass") }
+                    Button { model.selectedSpot = nil } label: { Label("Deselect", systemImage: "xmark.circle") }
+                        .disabled(model.selectedSpot == nil)
+                } label: {
+                    Image(systemName: "ellipsis").font(.system(size: 16, weight: .semibold)).frame(width: 40, height: 40)
+                        .latentGlass(in: Circle(), interactive: true)
+                }
+                .accessibilityLabel(Text("More remove options"))
+            }
+            .font(.system(size: 15, weight: .semibold))
+            .foregroundStyle(.white)
+            .padding(.horizontal, 16)
+            .padding(.top, 4)
+            .opacity(focused ? 0 : 1)
+            Text(removeHint)
+                .font(.system(size: 12))
+                .foregroundStyle(Theme.secondaryText)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 20)
+                .padding(.vertical, 8)
+                .opacity(focused ? 0 : 1)
+        }
+        .animation(.glass, value: model.selectedSpot)
+    }
+
+    private var removeHint: String {
+        if model.selectedSpot != nil {
+            return "Drag the spot to move it, or its pin to take from somewhere else. Tap elsewhere for a new spot."
+        }
+        switch model.spotMode {
+        case "heal": return "Brush over a blemish; it's replaced with texture from nearby, blended to match."
+        case "clone": return "Brush over something; it's covered with an exact copy from nearby."
+        case "fill": return "Brush over something; it's rebuilt from the surroundings, with no single source."
+        default: return "Tap or brush over what to take away. Pinch to zoom in for small things."
+        }
+    }
+
+    /// A Remove setting: for the next spot, and the selected one.
+    private func spotSlider(_ label: String, key: String, value: Double, min: Double, max: Double, scale: Double, decimals: Int) -> some View {
+        let c = Control(id: "spot.\(label)", label: label, min: min, max: max, defaultValue: value * scale,
+                        step: decimals == 0 ? 1 : 0.1, decimals: decimals, value: value * scale, track: .plain)
+        let editing = model.selectedSpot != nil
+        return LatentSlider(
+            control: c,
+            onBegin: { if editing { model.beginSpot(label) } },
+            onChange: { model.spotSetting(key, $0 / scale) },
+            onEnd: { if editing { model.end() } },
+            onReset: {})
+            .opacity(focused && model.active != c.id ? 0 : 1)
     }
 
     // MARK: presets
@@ -2030,6 +2253,7 @@ struct MaskCanvas: View {
     @ObservedObject var model: EditorModel
     let imageSize: CGSize
     let size: CGSize
+    var zoom: CGFloat = 1
     @State private var stroke: [CGPoint] = []
     @State private var start: (part: MaskPart, at: CGPoint)?
 
@@ -2078,6 +2302,10 @@ struct MaskCanvas: View {
         .gesture(
             DragGesture(minimumDistance: 0)
                 .onChanged { g in
+                    if model.pinching {
+                        stroke = []
+                        return
+                    }
                     guard let m = model.currentPart else { return }
                     switch m.kind {
                     case "object", "colorRange":
@@ -2374,5 +2602,162 @@ struct StraightenDial: View {
 
     private var label: String {
         abs(angle) < 0.05 ? "0\u{00B0}" : String(format: "%.1f\u{00B0}", angle)
+    }
+}
+
+/// Remove's drawing area: tap or brush to add a spot; drag a spot to move it, or its source pin
+/// to take from somewhere else.
+struct SpotCanvas: View {
+    @ObservedObject var model: EditorModel
+    let imageSize: CGSize
+    let size: CGSize
+    var zoom: CGFloat = 1
+    @State private var stroke: [CGPoint] = []
+    /// What a drag moves ("target" or "source"), from where, and whether its undo step began.
+    @State private var dragging: (kind: String, last: CGPoint, began: Bool)?
+
+    private var fitted: CGRect {
+        guard imageSize.width > 0, imageSize.height > 0 else { return .zero }
+        let s = Swift.min(size.width / imageSize.width, size.height / imageSize.height)
+        let w = imageSize.width * s
+        let h = imageSize.height * s
+        return CGRect(x: (size.width - w) / 2, y: (size.height - h) / 2, width: w, height: h)
+    }
+
+    private func toMask(_ q: CGPoint) -> CGPoint {
+        let f = fitted
+        return model.toMask(CGPoint(x: (q.x - f.minX) / Swift.max(f.width, 1), y: (q.y - f.minY) / Swift.max(f.height, 1)))
+    }
+
+    private func toView(_ m: CGPoint) -> CGPoint {
+        let f = fitted
+        let u = model.fromMask(m)
+        return CGPoint(x: f.minX + u.x * f.width, y: f.minY + u.y * f.height)
+    }
+
+    private var perLongEdge: CGFloat {
+        let f = fitted
+        let a = model.photoAspect
+        let perWidth = f.width / Swift.max(model.cropRect.width, 1e-6)
+        return a >= 1 ? perWidth : perWidth / Swift.max(a, 1e-6)
+    }
+
+    private func radius(_ sp: SpotItem) -> CGFloat { Swift.max(CGFloat(sp.size) * perLongEdge, 3) }
+
+    private func sourceCenter(_ sp: SpotItem) -> CGPoint? {
+        guard let o = sp.source, sp.mode != "fill" else { return nil }
+        let c = sp.center
+        return toView(CGPoint(x: c.x + o.x, y: c.y + o.y))
+    }
+
+    /// The spot under a point, nearest first.
+    private func hit(_ p: CGPoint) -> Int? {
+        var best: (Int, CGFloat)?
+        for (i, sp) in model.spots.enumerated() {
+            let r = Swift.max(radius(sp), 16 / zoom)
+            let d = sp.points.map { hypot(toView($0).x - p.x, toView($0).y - p.y) }.min() ?? .infinity
+            if d <= r, d < (best?.1 ?? .infinity) { best = (i, d) }
+        }
+        return best?.0
+    }
+
+    var body: some View {
+        ZStack {
+            if model.showSpots || model.selectedSpot != nil {
+                ForEach(Array(model.spots.enumerated()), id: \.offset) { i, sp in
+                    if model.showSpots || i == model.selectedSpot { outline(sp, selected: i == model.selectedSpot) }
+                }
+            }
+            if !stroke.isEmpty {
+                Path { p in p.addLines(stroke) }
+                    .stroke(Color.white.opacity(0.35), style: StrokeStyle(lineWidth: Swift.max(4, CGFloat(model.spotSize) * perLongEdge * 2), lineCap: .round, lineJoin: .round))
+            }
+        }
+        .frame(width: size.width, height: size.height)
+        .contentShape(Rectangle())
+        .gesture(
+            DragGesture(minimumDistance: 0)
+                .onChanged { g in
+                    if model.pinching {
+                        stroke = []
+                        return
+                    }
+                    if dragging == nil && stroke.isEmpty {
+                        let p = g.startLocation
+                        if let i = model.selectedSpot, model.spots.indices.contains(i), let src = sourceCenter(model.spots[i]),
+                           hypot(src.x - p.x, src.y - p.y) < 22 / zoom {
+                            dragging = ("source", p, false)
+                        } else if let i = hit(p) {
+                            if model.selectedSpot != i { model.selectedSpot = i }
+                            dragging = ("target", p, false)
+                        } else {
+                            stroke = [p]
+                            return
+                        }
+                    }
+                    if let d = dragging {
+                        guard hypot(g.location.x - d.last.x, g.location.y - d.last.y) > 0.5 else { return }
+                        if !d.began { model.beginSpot(d.kind == "source" ? "Move Source" : "Move Spot") }
+                        let a = toMask(d.last)
+                        let b = toMask(g.location)
+                        model.updateSpot([d.kind == "source" ? "moveSource" : "move": [Double(b.x - a.x), Double(b.y - a.y)]])
+                        dragging = (d.kind, g.location, true)
+                    } else if let last = stroke.last, hypot(g.location.x - last.x, g.location.y - last.y) > 3 / zoom {
+                        stroke.append(g.location)
+                    }
+                }
+                .onEnded { g in
+                    if let d = dragging {
+                        dragging = nil
+                        if d.began { model.end() }
+                        return
+                    }
+                    let pts = stroke
+                    stroke = []
+                    guard let first = pts.first, !model.pinching else { return }
+                    if hypot(g.translation.width, g.translation.height) < 8 {
+                        model.addSpot([toMask(first)])
+                    } else {
+                        model.addSpot(pts.map(toMask))
+                    }
+                }
+        )
+        .accessibilityLabel(Text("Remove drawing area"))
+        .accessibilityHint(Text("Tap or brush over what to take away."))
+    }
+
+    @ViewBuilder
+    private func outline(_ sp: SpotItem, selected: Bool) -> some View {
+        let r = radius(sp)
+        let line = 1.5 / zoom
+        let pts = sp.points.map(toView)
+        ZStack {
+            shape(pts, r)
+                .stroke(Color.white.opacity(selected ? 1 : 0.6), style: StrokeStyle(lineWidth: line, dash: selected ? [] : [4 / zoom, 3 / zoom]))
+            if selected, let src = sourceCenter(sp), let tc = pts.isEmpty ? nil : CGPoint(x: pts.map(\.x).reduce(0, +) / CGFloat(pts.count), y: pts.map(\.y).reduce(0, +) / CGFloat(pts.count)) {
+                let shifted = pts.map { CGPoint(x: $0.x + src.x - tc.x, y: $0.y + src.y - tc.y) }
+                shape(shifted, r)
+                    .stroke(Theme.accent, style: StrokeStyle(lineWidth: line, dash: [4 / zoom, 3 / zoom]))
+                Path { p in
+                    p.move(to: tc)
+                    p.addLine(to: src)
+                }
+                .stroke(Color.white.opacity(0.7), style: StrokeStyle(lineWidth: line, dash: [3 / zoom, 3 / zoom]))
+                Circle().fill(Theme.accent).overlay(Circle().strokeBorder(Color.white, lineWidth: 2 / zoom))
+                    .frame(width: 16 / zoom, height: 16 / zoom).position(src)
+            }
+        }
+        .shadow(color: .black.opacity(0.5), radius: 1.5 / zoom)
+        .allowsHitTesting(false)
+    }
+
+    /// A round spot, or a brushed path as wide as the spot.
+    private func shape(_ pts: [CGPoint], _ r: CGFloat) -> Path {
+        if pts.count == 1, let c = pts.first {
+            return Path(ellipseIn: CGRect(x: c.x - r, y: c.y - r, width: r * 2, height: r * 2))
+        }
+        var p = Path()
+        p.addLines(pts)
+        return p.strokedPath(StrokeStyle(lineWidth: r * 2, lineCap: .round, lineJoin: .round))
     }
 }

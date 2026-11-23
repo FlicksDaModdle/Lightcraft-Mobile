@@ -29,6 +29,10 @@ final class EditorModel: ObservableObject {
                 cropEntry = historyCursor()
                 cropTab = 0
             }
+            if mode == .remove {
+                removeEntry = historyCursor()
+                selectedSpot = nil
+            }
             if mode == .masks {
                 masksEntry = historyCursor()
                 selectedPart = 0
@@ -114,13 +118,16 @@ final class EditorModel: ObservableObject {
 
     private var rendering = false
     private var dirty = false
-    private let renderSize: CGSize
+    private let baseRenderSize: CGSize
+    /// Bigger renders while zoomed in, so the photo stays sharp.
+    private var detail: CGFloat = 1
+    private var renderSize: CGSize { CGSize(width: baseRenderSize.width * detail, height: baseRenderSize.height * detail) }
 
     init(photo: Photo) {
         self.photo = photo
         let screen = UIScreen.main.bounds.size
         let long = Swift.min(Swift.max(screen.width, screen.height) * UIScreen.main.scale, 2048)
-        renderSize = CGSize(width: long, height: long)
+        baseRenderSize = CGSize(width: long, height: long)
     }
 
     func open() {
@@ -769,6 +776,145 @@ final class EditorModel: ObservableObject {
         render()
     }
 
+    // MARK: zoom
+
+    /// Two fingers are on the photo: drawing tools stop so the pinch doesn't paint.
+    @Published var pinching = false
+
+    /// The editor's zoom changed: render bigger past 1.5×, back to screen size near 1×.
+    func zoomChanged(_ zoom: CGFloat) {
+        let want: CGFloat = zoom > 1.5 ? Swift.min(2, 4096 / Swift.max(baseRenderSize.width, 1)) : 1
+        guard abs(want - detail) > 0.01 else { return }
+        detail = want
+        render()
+    }
+
+    // MARK: remove
+
+    @Published private(set) var spots: [SpotItem] = []
+    @Published var selectedSpot: Int? {
+        didSet {
+            guard selectedSpot != oldValue else { return }
+            attempt("spot.select", ["index": selectedSpot.map { $0 as Any } ?? NSNull()])
+            if let i = selectedSpot, spots.indices.contains(i) {
+                let sp = spots[i]
+                spotMode = sp.mode
+                spotSize = sp.size
+                spotFeather = sp.feather
+                spotOpacity = sp.opacity
+            }
+        }
+    }
+    /// Settings for the next spot (and the selected one).
+    @Published var spotMode = "remove"
+    @Published var spotSize = 0.02
+    @Published var spotFeather = 50.0
+    @Published var spotOpacity = 100.0
+    /// Draw the spots' outlines over the photo.
+    @Published var showSpots = true
+    private var removeEntry: Int?
+
+    /// A tap (one point) or a brushed path over what to take away, in mask coordinates.
+    func addSpot(_ points: [CGPoint]) {
+        guard !points.isEmpty else { return }
+        do {
+            let r = try Engine.shared.run("spot.add", [
+                "mode": spotMode, "points": points.map { [Double($0.x), Double($0.y)] },
+                "size": spotSize, "feather": spotFeather, "opacity": spotOpacity,
+            ]) as? [String: Any]
+            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+            refresh()
+            if let i = (r?["index"] as? NSNumber)?.intValue { selectedSpot = i }
+            render()
+        } catch {
+            toast = error.localizedDescription
+        }
+    }
+
+    /// Change the selected spot (during a drag: between beginSpot and end).
+    func updateSpot(_ params: [String: Any]) {
+        guard let i = selectedSpot else { return }
+        var p = params
+        p["index"] = i
+        attempt("spot.update", p)
+        refreshSpots()
+        render()
+    }
+
+    func beginSpot(_ label: String) {
+        active = "spot.\(label)"
+        attempt("develop.beginInteraction", ["label": label])
+    }
+
+    /// A setting slider moved: it sets the next spot, and the selected one.
+    func spotSetting(_ key: String, _ value: Double) {
+        switch key {
+        case "size": spotSize = value
+        case "feather": spotFeather = value
+        default: spotOpacity = value
+        }
+        if selectedSpot != nil { updateSpot([key: value]) }
+    }
+
+    func setSpotMode(_ mode: String) {
+        spotMode = mode
+        UISelectionFeedbackGenerator().selectionChanged()
+        if selectedSpot != nil {
+            attempt("spot.update", ["index": selectedSpot ?? 0, "mode": mode])
+            refresh()
+            render()
+        }
+    }
+
+    func deleteSpot() {
+        guard let i = selectedSpot else { return }
+        if attempt("spot.delete", ["index": i]) {
+            selectedSpot = nil
+            refresh()
+            render()
+        }
+    }
+
+    /// Pick another source for the selected spot.
+    func newSource() {
+        guard let i = selectedSpot else { return }
+        if attempt("spot.refreshSource", ["index": i]) {
+            refresh()
+            render()
+        }
+    }
+
+    /// Find sensor dust and fix each speck.
+    func findDust() {
+        do {
+            let r = try Engine.shared.run("spot.findDust", [:]) as? [String: Any]
+            let n = (r?["added"] as? NSNumber)?.intValue ?? 0
+            toast = n == 0 ? "No dust found" : "Fixed \(n) dust spot\(n == 1 ? "" : "s")"
+            refresh()
+            render()
+        } catch {
+            toast = error.localizedDescription
+        }
+    }
+
+    func cancelRemove() {
+        undoBack(to: removeEntry)
+        selectedSpot = nil
+        mode = .edit
+        refresh()
+        render()
+    }
+
+    func doneRemove() {
+        selectedSpot = nil
+        mode = .edit
+    }
+
+    private func refreshSpots() {
+        guard let s = (try? Engine.shared.run("develop.get", ["id": photo.id])) as? [String: Any] else { return }
+        spots = (s["spots"] as? [Any] ?? []).compactMap(SpotItem.init)
+    }
+
     // MARK: export and settings between photos
 
     /// Edits were copied in this session (the engine keeps them until the app quits).
@@ -854,6 +1000,8 @@ final class EditorModel: ObservableObject {
             wbMode = ((s["wb"] as? [String: Any])?["mode"] as? String) ?? "asShot"
             readCrop(s)
             masks = (s["masks"] as? [Any] ?? []).compactMap(MaskItem.init)
+            spots = (s["spots"] as? [Any] ?? []).compactMap(SpotItem.init)
+            if let i = selectedSpot, !spots.indices.contains(i) { selectedSpot = nil }
             if let sel = selectedMask, !masks.contains(where: { $0.id == sel }) { selectedMask = nil }
             let h = s["hdr"] as? [String: Any]
             hdr = h?["enabled"] as? Bool ?? false
