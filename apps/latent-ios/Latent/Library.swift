@@ -100,6 +100,26 @@ final class Thumbnails: @unchecked Sendable {
         }
     }
 
+    /// A preset's preview on a photo, cached until [`forgetPresets`].
+    func preset(_ id: UInt64, preset: String, longEdge: Int) async -> CGImage? {
+        let key = "\(id)/\(preset)" as NSString
+        if let hit = presetCache.object(forKey: key) { return hit.image }
+        return await withCheckedContinuation { done in
+            queue.addOperation {
+                let img = Engine.shared.presetThumbnail(id, preset: preset, longEdge: longEdge)
+                if let img { self.presetCache.setObject(CGImageBox(img), forKey: key) }
+                done.resume(returning: img)
+            }
+        }
+    }
+
+    func cachedPreset(_ id: UInt64, preset: String) -> CGImage? { presetCache.object(forKey: "\(id)/\(preset)" as NSString)?.image }
+
+    /// Forget the preset previews (the photo's edit changed under them).
+    func forgetPresets() { presetCache.removeAllObjects() }
+
+    private let presetCache = NSCache<NSString, CGImageBox>()
+
     /// Forget a photo's thumbnail (after it was edited).
     func forget(_ id: UInt64) { cache.removeObject(forKey: NSNumber(value: id)) }
 }

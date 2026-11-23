@@ -123,6 +123,28 @@ pub unsafe extern "C" fn latent_render(core: *const Core, id: u64, max_w: u32, m
     give_image(if original { c.render_original(id, w, h) } else { c.render(id, w, h) })
 }
 
+/// Photo `id` uncropped and unstraightened (what the crop box is drawn over). Null on failure.
+///
+/// # Safety
+/// `core` from [`latent_open`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn latent_render_uncropped(core: *const Core, id: u64, max_w: u32, max_h: u32) -> *mut LatentImage {
+    // SAFETY: as documented above
+    let Some(c) = (unsafe { self::core(core) }) else { return std::ptr::null_mut() };
+    give_image(c.render_uncropped(id, max_w as usize, max_h as usize))
+}
+
+/// A preview of preset `preset` (its id) on photo `id`, without editing the photo. Null on failure.
+///
+/// # Safety
+/// `core` from [`latent_open`]; `preset` a NUL-terminated string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn latent_preset_thumb(core: *const Core, id: u64, preset: *const c_char, long_edge: u32) -> *mut LatentImage {
+    // SAFETY: as documented above
+    let (Some(c), Some(preset)) = (unsafe { self::core(core) }, unsafe { text(preset) }) else { return std::ptr::null_mut() };
+    give_image(c.preset_thumb(id, preset, long_edge as usize))
+}
+
 /// A thumbnail of photo `id`, its long edge about `long_edge`. Null on failure.
 ///
 /// # Safety

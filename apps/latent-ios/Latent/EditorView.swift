@@ -6,7 +6,9 @@ struct EditorView: View {
     @StateObject private var model: EditorModel
     @Environment(\.dismiss) private var dismiss
     @Environment(\.verticalSizeClass) private var verticalSize
-    @AppStorage("showHistogram") private var showHistogram = false
+    @AppStorage("histogramShown") private var showHistogram = true
+    @State private var naming = false
+    @State private var newPresetName = ""
     @State private var chromeHidden = false
     @State private var showingOriginal = false
     @State private var hold: Task<Void, Never>?
@@ -127,25 +129,23 @@ struct EditorView: View {
         VStack(spacing: 0) {
             if chrome {
                 topBar.opacity(focused ? 0 : 1)
-                if showHistogram {
-                    HistogramView(bins: model.histogram, hdrStops: model.showingHDR ? model.headroom : nil)
-                        .frame(height: 56)
-                        .padding(.horizontal, 24)
-                        .padding(.bottom, 6)
-                        .opacity(focused ? 0 : 1)
-                }
             }
             photoArea
             if chrome {
                 card
                     .padding(.horizontal, 8)
                     .padding(.top, 6)
-                ModeBar(mode: model.mode) { m in
-                    if m.available {
-                        withAnimation(.easeInOut(duration: 0.2)) { model.mode = m }
-                        if m == .presets { model.loadPresets() }
+                Group {
+                    if model.mode == .presets {
+                        PresetsBar(cancel: { withAnimation { model.cancelPresets() } }, done: { withAnimation { model.donePresets() } })
                     } else {
-                        model.toast = "\(m.label) is not in Latent yet. It's coming in a later build."
+                        ModeBar(mode: model.mode) { m in
+                            if m.available {
+                                withAnimation(.easeInOut(duration: 0.2)) { model.mode = m }
+                            } else {
+                                model.toast = "\(m.label) is not in Latent yet. It's coming in a later build."
+                            }
+                        }
                     }
                 }
                 .opacity(focused ? 0 : 1)
@@ -196,7 +196,13 @@ struct EditorView: View {
     private var photoArea: some View {
         GeometryReader { geo in
             ZStack(alignment: .top) {
-                if let img = showingOriginal ? (model.original ?? model.image) : model.image {
+                if model.mode == .crop && chrome {
+                    if let full = model.fullImage {
+                        CropEditor(model: model, image: full, size: geo.size)
+                    } else {
+                        ProgressView().tint(.white).frame(width: geo.size.width, height: geo.size.height)
+                    }
+                } else if let img = showingOriginal ? (model.original ?? model.image) : model.image {
                     Image(decorative: img, scale: 1)
                         .resizable()
                         .interpolation(.high)
@@ -205,6 +211,19 @@ struct EditorView: View {
                         .frame(width: geo.size.width, height: geo.size.height)
                 } else {
                     ProgressView().tint(.white).frame(width: geo.size.width, height: geo.size.height)
+                }
+                if showHistogram && chrome && model.tool != .curve && model.mode != .crop && !focused {
+                    HistogramView(bins: model.histogram, hdrStops: model.showingHDR ? model.headroom : nil)
+                        .frame(height: model.showingHDR ? 62 : 50)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 6)
+                        .background(Color.black.opacity(0.45), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                        .frame(maxWidth: geo.size.width * 0.72)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.leading, 12)
+                        .padding(.top, 8)
+                        .allowsHitTesting(false)
+                        .transition(.opacity)
                 }
                 if let readout = model.readout {
                     Text(readout)
@@ -226,10 +245,10 @@ struct EditorView: View {
                 }
             }
             .contentShape(Rectangle())
-            .onTapGesture { chromeHidden.toggle() }
+            .onTapGesture { if model.mode != .crop { chromeHidden.toggle() } }
             .onLongPressGesture(minimumDuration: 0.3, maximumDistance: 24, perform: {}, onPressingChanged: { pressing in
                 hold?.cancel()
-                if pressing {
+                if pressing && model.mode != .crop {
                     // a hold, not a tap: show the photo as it was
                     hold = Task {
                         try? await Task.sleep(nanoseconds: 250_000_000)
@@ -460,43 +479,63 @@ struct EditorView: View {
 
     private var presetsPanel: some View {
         VStack(spacing: 0) {
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 8) {
-                    ForEach(model.presetGroups, id: \.self) { g in
-                        Button { model.presetGroup = g } label: {
-                            Text(g)
-                                .font(.system(size: 14, weight: model.presetGroup == g ? .semibold : .regular))
-                                .foregroundStyle(model.presetGroup == g ? Color.black : Color.white)
-                                .padding(.horizontal, 14)
-                                .frame(height: 32)
-                                .background(model.presetGroup == g ? Color.white : Color.white.opacity(0.1), in: Capsule())
-                        }
+            HStack(spacing: 12) {
+                if !model.presetGroup.isEmpty {
+                    Button { withAnimation(.easeInOut(duration: 0.2)) { model.presetGroup = "" } } label: {
+                        Image(systemName: "chevron.left").font(.system(size: 17, weight: .semibold)).frame(width: 30, height: 36)
                     }
+                    .accessibilityLabel(Text("Groups"))
                 }
-                .padding(.horizontal, 16)
-            }
-            .padding(.top, 14)
-            .opacity(focused ? 0 : 1)
-            ScrollView {
-                LazyVGrid(columns: [GridItem(.flexible(), spacing: 8), GridItem(.flexible(), spacing: 8)], spacing: 8) {
-                    ForEach(model.presets.filter { $0.group == model.presetGroup }) { p in
-                        Button { model.apply(p) } label: {
-                            HStack {
-                                Text(p.name).font(.system(size: 14)).lineLimit(1)
-                                Spacer(minLength: 4)
-                                if model.appliedPreset == p.id { Image(systemName: "checkmark").font(.system(size: 12, weight: .bold)) }
-                            }
-                            .foregroundStyle(.white)
+                Text(model.presetGroup.isEmpty ? "Presets" : model.presetGroup)
+                    .font(.system(size: 17, weight: .semibold))
+                Spacer()
+                if model.presetGroup.isEmpty {
+                    Button {
+                        newPresetName = ""
+                        naming = true
+                    } label: {
+                        Label("New", systemImage: "plus").font(.system(size: 14, weight: .medium))
                             .padding(.horizontal, 12)
-                            .frame(height: 40)
-                            .background(Color.white.opacity(model.appliedPreset == p.id ? 0.18 : 0.07), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                            .frame(height: 32)
+                            .latentGlass(in: Capsule(), interactive: true)
+                    }
+                    .accessibilityLabel(Text("Save the current edit as a preset"))
+                }
+            }
+            .foregroundStyle(.white)
+            .padding(.horizontal, 16)
+            .padding(.top, 12)
+            .padding(.bottom, 8)
+            .opacity(focused ? 0 : 1)
+            Rectangle().fill(Theme.separator).frame(height: 1).opacity(focused ? 0 : 1)
+            ScrollView {
+                LazyVStack(spacing: 0) {
+                    if model.presetGroup.isEmpty {
+                        ForEach(model.presetGroups, id: \.self) { g in
+                            Button { withAnimation(.easeInOut(duration: 0.2)) { model.presetGroup = g } } label: {
+                                HStack(spacing: 14) {
+                                    PresetThumb(photo: model.photo.id, preset: model.presets(in: g).first?.id)
+                                    Text(g).font(.system(size: 16))
+                                    Spacer()
+                                    Text("\(model.presets(in: g).count)").font(.system(size: 14)).foregroundStyle(Theme.secondaryText)
+                                    Image(systemName: "chevron.right").font(.system(size: 13, weight: .semibold)).foregroundStyle(Theme.secondaryText)
+                                }
+                                .padding(.horizontal, 16)
+                                .frame(height: 64)
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .foregroundStyle(.white)
+                        }
+                    } else {
+                        ForEach(model.presets(in: model.presetGroup)) { p in
+                            presetRow(p)
                         }
                     }
                 }
-                .padding(.horizontal, 16)
-                .padding(.vertical, 10)
+                .padding(.vertical, 4)
             }
-            .frame(height: 150)
+            .frame(height: model.appliedPreset == nil ? 250 : 196)
             .opacity(focused ? 0 : 1)
             if model.appliedPreset != nil {
                 LatentSlider(
@@ -511,7 +550,46 @@ struct EditorView: View {
                     })
             }
         }
-        .padding(.bottom, 6)
+        .padding(.bottom, 4)
+        .alert("New preset", isPresented: $naming) {
+            TextField("Name", text: $newPresetName)
+            Button("Cancel", role: .cancel) {}
+            Button("Save") { model.createPreset(newPresetName) }
+        } message: {
+            Text("Saves this photo's edit as a preset in User Presets.")
+        }
+    }
+
+    private func presetRow(_ p: Preset) -> some View {
+        let on = model.appliedPreset == p.id
+        return HStack(spacing: 14) {
+            Button { model.apply(p) } label: {
+                HStack(spacing: 14) {
+                    PresetThumb(photo: model.photo.id, preset: p.id)
+                        .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous).strokeBorder(Color.white, lineWidth: on ? 2 : 0))
+                    Text(p.name).font(.system(size: 16, weight: on ? .semibold : .regular))
+                    if p.favorite { Image(systemName: "star.fill").font(.system(size: 11)).foregroundStyle(Theme.secondaryText) }
+                    Spacer()
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            Menu {
+                Button { model.setFavorite(p, !p.favorite) } label: {
+                    Label(p.favorite ? "Remove from Favorites" : "Add to Favorites", systemImage: p.favorite ? "star.slash" : "star")
+                }
+                if !p.builtin {
+                    Button(role: .destructive) { model.deletePreset(p) } label: { Label("Delete", systemImage: "trash") }
+                }
+            } label: {
+                Image(systemName: "ellipsis").font(.system(size: 16, weight: .semibold)).frame(width: 40, height: 44)
+            }
+            .accessibilityLabel(Text("\(p.name) options"))
+        }
+        .foregroundStyle(.white)
+        .padding(.horizontal, 16)
+        .frame(height: 66)
+        .accessibilityAddTraits(on ? .isSelected : [])
     }
 
     // MARK: crop
@@ -892,5 +970,211 @@ struct CurveEditor: View {
         model.beginCurve()
         model.setCurve(pts)
         model.end()
+    }
+}
+
+/// A preset's preview on the photo, loaded in the background.
+struct PresetThumb: View {
+    let photo: UInt64
+    let preset: String?
+    @State private var image: CGImage?
+
+    var body: some View {
+        RoundedRectangle(cornerRadius: 6, style: .continuous)
+            .fill(Color(white: 0.16))
+            .frame(width: 52, height: 52)
+            .overlay {
+                if let image {
+                    Image(decorative: image, scale: 1).resizable().scaledToFill().frame(width: 52, height: 52).transition(.opacity)
+                }
+            }
+            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+            .task(id: preset) {
+                guard let preset else { return }
+                image = Thumbnails.shared.cachedPreset(photo, preset: preset)
+                if image == nil {
+                    let img = await Thumbnails.shared.preset(photo, preset: preset, longEdge: 156)
+                    withAnimation(.easeOut(duration: 0.2)) { image = img }
+                }
+            }
+            .accessibilityHidden(true)
+    }
+}
+
+/// Presets' own bottom bar: put back the edit as it was, or keep it.
+struct PresetsBar: View {
+    let cancel: () -> Void
+    let done: () -> Void
+
+    var body: some View {
+        HStack {
+            Button(action: cancel) { Image(systemName: "xmark").font(.system(size: 18, weight: .semibold)).frame(width: 52, height: 40) }
+                .accessibilityLabel(Text("Cancel presets"))
+            Spacer()
+            Text("Presets").font(.system(size: 16, weight: .semibold))
+            Spacer()
+            Button(action: done) { Image(systemName: "checkmark").font(.system(size: 18, weight: .semibold)).frame(width: 52, height: 40) }
+                .accessibilityLabel(Text("Keep presets"))
+        }
+        .foregroundStyle(.white)
+        .padding(6)
+        .latentGlass(in: Capsule(), interactive: true)
+        .padding(.horizontal, 14)
+        .padding(.top, 8)
+        .padding(.bottom, 4)
+    }
+}
+
+/// The crop box over the whole photo: drag a corner or an edge to resize, inside to move. The
+/// photo outside is dimmed; thirds lines show while dragging. Straighten turns the box over the
+/// photo. The engine (`crop.drag`) keeps the box on the photo and to the aspect lock.
+struct CropEditor: View {
+    @ObservedObject var model: EditorModel
+    let image: CGImage
+    let size: CGSize
+    @State private var drag: (handle: String, from: CGPoint, start: CGRect)?
+
+    /// Where the photo sits in the view, fitted.
+    private var fitted: CGRect {
+        let iw = CGFloat(image.width)
+        let ih = CGFloat(image.height)
+        guard iw > 0, ih > 0 else { return .zero }
+        let s = Swift.min((size.width - 32) / iw, (size.height - 32) / ih)
+        let w = iw * s
+        let h = ih * s
+        return CGRect(x: (size.width - w) / 2, y: (size.height - h) / 2, width: w, height: h)
+    }
+
+    /// Straightened-frame point (0…1) → view point: turned back by the angle about the centre (in
+    /// pixel proportions), then mirrored as the photo is.
+    private func toView(_ p: CGPoint) -> CGPoint {
+        let f = fitted
+        let a = -model.cropAngle * .pi / 180
+        let (w, h) = (f.width, f.height)
+        let dx = (p.x - 0.5) * w
+        let dy = (p.y - 0.5) * h
+        var x = (dx * cos(a) - dy * sin(a)) / w + 0.5
+        var y = (dx * sin(a) + dy * cos(a)) / h + 0.5
+        if model.flipH { x = 1 - x }
+        if model.flipV { y = 1 - y }
+        return CGPoint(x: f.minX + x * w, y: f.minY + y * h)
+    }
+
+    /// The inverse of `toView`.
+    private func toFrame(_ q: CGPoint) -> CGPoint {
+        let f = fitted
+        let (w, h) = (Swift.max(f.width, 1), Swift.max(f.height, 1))
+        var x = (q.x - f.minX) / w
+        var y = (q.y - f.minY) / h
+        if model.flipH { x = 1 - x }
+        if model.flipV { y = 1 - y }
+        let a = model.cropAngle * .pi / 180
+        let dx = (x - 0.5) * w
+        let dy = (y - 0.5) * h
+        return CGPoint(x: (dx * cos(a) - dy * sin(a)) / w + 0.5, y: (dx * sin(a) + dy * cos(a)) / h + 0.5)
+    }
+
+    private var corners: [CGPoint] {
+        let r = model.cropRect
+        return [CGPoint(x: r.minX, y: r.minY), CGPoint(x: r.maxX, y: r.minY), CGPoint(x: r.maxX, y: r.maxY), CGPoint(x: r.minX, y: r.maxY)].map(toView)
+    }
+
+    var body: some View {
+        let f = fitted
+        let q = corners
+        ZStack {
+            Image(decorative: image, scale: 1)
+                .resizable()
+                .interpolation(.high)
+                .frame(width: f.width, height: f.height)
+                .position(x: f.midX, y: f.midY)
+            // dim outside the box
+            Path { p in
+                p.addRect(CGRect(origin: .zero, size: size))
+                p.addLines(q)
+                p.closeSubpath()
+            }
+            .fill(Color.black.opacity(0.6), style: FillStyle(eoFill: true))
+            Path { p in
+                p.addLines(q)
+                p.closeSubpath()
+            }
+            .stroke(Color.white, lineWidth: 1)
+            // thirds
+            Path { p in
+                for t in [1.0 / 3, 2.0 / 3] {
+                    let l = CGFloat(t)
+                    p.move(to: lerp(q[0], q[3], l))
+                    p.addLine(to: lerp(q[1], q[2], l))
+                    p.move(to: lerp(q[0], q[1], l))
+                    p.addLine(to: lerp(q[3], q[2], l))
+                }
+            }
+            .stroke(Color.white.opacity(drag == nil ? 0.35 : 0.7), lineWidth: 0.75)
+            // corner brackets
+            Path { p in
+                for i in 0..<4 {
+                    let c = q[i]
+                    let a = q[(i + 1) % 4]
+                    let b = q[(i + 3) % 4]
+                    p.move(to: towards(c, a, 22))
+                    p.addLine(to: c)
+                    p.addLine(to: towards(c, b, 22))
+                }
+            }
+            .stroke(Color.white, style: StrokeStyle(lineWidth: 4, lineCap: .square, lineJoin: .miter))
+        }
+        .frame(width: size.width, height: size.height)
+        .contentShape(Rectangle())
+        .gesture(
+            DragGesture(minimumDistance: 2)
+                .onChanged { g in
+                    if drag == nil {
+                        let handle = hit(g.startLocation, q)
+                        drag = (handle, toFrame(g.startLocation), model.cropRect)
+                        model.beginCrop()
+                    }
+                    guard let d = drag else { return }
+                    model.dragCrop(d.handle, from: d.from, to: toFrame(g.location), start: d.start)
+                }
+                .onEnded { _ in
+                    drag = nil
+                    model.end()
+                }
+        )
+        .accessibilityLabel(Text("Crop box"))
+        .accessibilityHint(Text("Drag a corner or an edge to crop; drag inside to move the crop."))
+    }
+
+    private func lerp(_ a: CGPoint, _ b: CGPoint, _ t: CGFloat) -> CGPoint { CGPoint(x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t) }
+
+    private func towards(_ a: CGPoint, _ b: CGPoint, _ d: CGFloat) -> CGPoint {
+        let len = Swift.max(hypot(b.x - a.x, b.y - a.y), 1)
+        return CGPoint(x: a.x + (b.x - a.x) / len * Swift.min(d, len / 3), y: a.y + (b.y - a.y) / len * Swift.min(d, len / 3))
+    }
+
+    /// Which handle a touch at `p` takes: a corner, then an edge, else the whole box.
+    private func hit(_ p: CGPoint, _ q: [CGPoint]) -> String {
+        let cornerNames = ["topLeft", "topRight", "bottomRight", "bottomLeft"]
+        if let i = q.indices.min(by: { hypot(q[$0].x - p.x, q[$0].y - p.y) < hypot(q[$1].x - p.x, q[$1].y - p.y) }),
+           hypot(q[i].x - p.x, q[i].y - p.y) < 40 {
+            return cornerNames[i]
+        }
+        let edgeNames = ["top", "right", "bottom", "left"]
+        var best: (Int, CGFloat)?
+        for i in 0..<4 {
+            let d = distance(p, q[i], q[(i + 1) % 4])
+            if d < 28, d < (best?.1 ?? .infinity) { best = (i, d) }
+        }
+        if let b = best { return edgeNames[b.0] }
+        return "move"
+    }
+
+    private func distance(_ p: CGPoint, _ a: CGPoint, _ b: CGPoint) -> CGFloat {
+        let dx = b.x - a.x
+        let dy = b.y - a.y
+        let len2 = Swift.max(dx * dx + dy * dy, 1e-6)
+        let t = Swift.min(Swift.max(((p.x - a.x) * dx + (p.y - a.y) * dy) / len2, 0), 1)
+        return hypot(p.x - (a.x + t * dx), p.y - (a.y + t * dy))
     }
 }

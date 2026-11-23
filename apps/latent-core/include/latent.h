@@ -29,6 +29,10 @@ void latent_close(LatentCore *core);
 char *latent_execute(const LatentCore *core, const char *cmd, const char *params);
 
 LatentImage *latent_render(const LatentCore *core, uint64_t id, uint32_t max_w, uint32_t max_h, bool original);
+// The photo uncropped and unstraightened (the crop box is drawn over it).
+LatentImage *latent_render_uncropped(const LatentCore *core, uint64_t id, uint32_t max_w, uint32_t max_h);
+// A preview of a preset (by id) on the photo, without editing it.
+LatentImage *latent_preset_thumb(const LatentCore *core, uint64_t id, const char *preset, uint32_t long_edge);
 LatentImage *latent_thumb(const LatentCore *core, uint64_t id, uint32_t long_edge);
 
 // An HDR render: half-float RGBA, linear light, SDR white = 1.0, highlights up to `peak`.

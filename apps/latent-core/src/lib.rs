@@ -112,6 +112,32 @@ impl Core {
         self.finish(job.run())
     }
 
+    /// The whole photo, not cropped or straightened (flips and the rest of the edit applied), to
+    /// fit `max_w` × `max_h`: what the crop box is drawn over.
+    pub fn render_uncropped(&self, id: u64, max_w: usize, max_h: usize) -> Result<Image, String> {
+        let job = self.lock().render_job(PhotoId(id), max_w.max(1), max_h.max(1), false, false).ok_or("no such photo")?;
+        self.finish(job.run())
+    }
+
+    /// A preview of preset `preset` on the photo, long edge about `long_edge`: the photo's edit with
+    /// the preset applied at full strength, rendered without changing the photo.
+    pub fn preset_thumb(&self, id: u64, preset: &str, long_edge: usize) -> Result<Image, String> {
+        let job = {
+            let mut s = self.lock();
+            let p = s.presets.iter().find(|x| x.id == preset).cloned().ok_or("unknown preset")?;
+            let d = s.develop_of(PhotoId(id)).ok_or("no such photo")?;
+            let next = p.apply_on(&d, &d, 1.0);
+            let edge = long_edge.max(16);
+            let mut job = s.render_job(PhotoId(id), edge, edge, false, true).ok_or("no such photo")?;
+            let salt = preset.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3));
+            job.settings = std::sync::Arc::new(next);
+            job.key ^= salt.rotate_left(7);
+            job.cache = None;
+            job
+        };
+        self.finish(job.run())
+    }
+
     /// A small square-ish thumbnail with the photo's edits.
     pub fn thumb(&self, id: u64, long_edge: usize) -> Result<Image, String> {
         let job = self.lock().thumb_job(PhotoId(id), long_edge.max(16)).ok_or("no thumbnail for this photo")?;
@@ -285,6 +311,23 @@ mod tests {
         assert!(bits.windows(2).all(|w| w[0] < w[1]), "{bits:?}");
         assert_eq!(f16_bits(1.0), 0x3c00);
         assert!(hdr_position(1.0, 3.0) <= hdr_position(2.0, 3.0) && hdr_position(8.0, 3.0) <= 1.0);
+    }
+
+    #[test]
+    fn a_preset_preview_leaves_the_photo_alone() {
+        let core = Core::demo();
+        let photos = ok(&core.execute("catalog.query", ""));
+        let id = photos["photos"][0]["id"].as_u64().unwrap_or(0);
+        ok(&core.execute("library.select", &json!({"ids": [id], "active": id}).to_string()));
+        let presets = ok(&core.execute("presets.list", ""));
+        let pid = presets[0]["id"].as_str().unwrap_or("").to_string();
+        let before = ok(&core.execute("develop.get", ""));
+        let thumb = core.preset_thumb(id, &pid, 96);
+        assert!(thumb.as_ref().is_ok_and(|t| t.width > 0 && t.width <= 96), "{:?}", thumb.err());
+        assert_eq!(ok(&core.execute("develop.get", "")), before, "a preview must not edit the photo");
+        let plain = core.render(id, 96, 96).map(|i| i.rgba).unwrap_or_default();
+        assert_ne!(thumb.map(|i| i.rgba).unwrap_or_default(), plain, "the preview should show the preset");
+        assert!(core.render_uncropped(id, 96, 96).is_ok());
     }
 
     #[test]

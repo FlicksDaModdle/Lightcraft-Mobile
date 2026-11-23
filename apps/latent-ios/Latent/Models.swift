@@ -215,14 +215,22 @@ struct Preset: Identifiable, Hashable {
     let id: String
     let name: String
     let group: String
+    let favorite: Bool
+    /// Built into the app (can't be deleted or renamed).
+    let builtin: Bool
 
     init?(_ json: Any) {
         guard let d = json as? [String: Any], let id = d["id"] as? String else { return nil }
         self.id = id
         name = d["name"] as? String ?? id
         group = d["group"] as? String ?? ""
+        favorite = d["favorite"] as? Bool ?? false
+        builtin = d["builtin"] as? Bool ?? true
     }
 }
+
+/// The group of favourite presets, listed first when there are any.
+let favoritesGroup = "Favorites"
 
 /// The editing modes along the bottom.
 enum Mode: String, CaseIterable {

@@ -21,7 +21,20 @@ final class EditorModel: ObservableObject {
     @Published var toast: String?
     /// The slider being dragged: everything else fades so the photo can be seen.
     @Published private(set) var active: String?
-    @Published var mode: Mode = .edit
+    @Published var mode: Mode = .edit {
+        didSet {
+            guard mode != oldValue else { return }
+            if mode == .presets { enterPresets() }
+            // the crop box is drawn over the whole photo; every other mode shows the result
+            render()
+        }
+    }
+    /// Crop mode's picture: the whole photo, uncropped and unstraightened.
+    @Published private(set) var fullImage: CGImage?
+    /// The crop box in the straightened frame (0…1), and the flips, from the engine.
+    @Published private(set) var cropRect = CGRect(x: 0, y: 0, width: 1, height: 1)
+    @Published private(set) var flipH = false
+    @Published private(set) var flipV = false
     @Published var mixerBand = 0
     @Published var gradingRange = 0
     @Published private(set) var presets: [Preset] = []
@@ -156,17 +169,76 @@ final class EditorModel: ObservableObject {
 
     // MARK: presets
 
+    /// The groups, favourites first (when there are any), then as the engine lists them.
     var presetGroups: [String] {
-        var seen: [String] = []
+        var seen: [String] = presets.contains { $0.favorite } ? [favoritesGroup] : []
         for p in presets where !seen.contains(p.group) { seen.append(p.group) }
         return seen
     }
 
-    func loadPresets() {
-        guard presets.isEmpty else { return }
+    func presets(in group: String) -> [Preset] {
+        group == favoritesGroup ? presets.filter(\.favorite) : presets.filter { $0.group == group }
+    }
+
+    /// Where the history stood when Presets opened: ✕ goes back there.
+    private var presetsEntry: Int?
+
+    private func historyCursor() -> Int? {
+        ((try? Engine.shared.run("history.list")) as? [String: Any])?["cursor"] as? Int
+    }
+
+    private func enterPresets() {
+        presetsEntry = historyCursor()
+        appliedPreset = nil
+        presetGroup = ""
+        Thumbnails.shared.forgetPresets()
+        loadPresets(force: true)
+    }
+
+    func loadPresets(force: Bool = false) {
+        guard force || presets.isEmpty else { return }
         let list = (try? Engine.shared.run("presets.list")) as? [Any] ?? []
         presets = list.compactMap(Preset.init)
-        if presetGroup.isEmpty { presetGroup = presetGroups.first ?? "" }
+    }
+
+    /// ✕: take back every preset applied since Presets opened.
+    func cancelPresets() {
+        if let entry = presetsEntry {
+            // one undo at a time, stopping if the history stops moving back
+            var last = Int.max
+            while let c = historyCursor(), c > entry, c < last {
+                last = c
+                attempt("edit.undo")
+            }
+        }
+        appliedPreset = nil
+        mode = .edit
+        refresh()
+        render()
+    }
+
+    func donePresets() {
+        appliedPreset = nil
+        mode = .edit
+    }
+
+    func setFavorite(_ p: Preset, _ on: Bool) {
+        attempt("preset.favorite", ["id": p.id, "favorite": on])
+        loadPresets(force: true)
+    }
+
+    func deletePreset(_ p: Preset) {
+        attempt("preset.delete", ["id": p.id])
+        if appliedPreset == p.id { appliedPreset = nil }
+        loadPresets(force: true)
+    }
+
+    /// Save the current edit as a preset in User Presets.
+    func createPreset(_ name: String) {
+        let n = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !n.isEmpty else { return }
+        if attempt("preset.create", ["name": n]) { toast = "Saved preset \u{201C}\(n)\u{201D}" }
+        loadPresets(force: true)
     }
 
     func apply(_ p: Preset) {
@@ -205,7 +277,42 @@ final class EditorModel: ObservableObject {
     func setAngle(_ v: Double) {
         cropAngle = v
         attempt("crop.set", ["angle": v])
-        render()
+        // the box turns over the unturned photo: nothing to render
+        refreshCrop()
+    }
+
+    /// Drag a crop handle (`topLeft`…`left`, or `move`) from `from` to `to`, both in the straightened
+    /// frame, starting from the box as it was at the drag's start. The engine keeps it on the photo
+    /// and to the aspect lock.
+    func dragCrop(_ handle: String, from: CGPoint, to: CGPoint, start: CGRect) {
+        attempt("crop.drag", [
+            "handle": handle, "from": [from.x, from.y], "to": [to.x, to.y],
+            "start": [start.minX, start.minY, start.maxX, start.maxY],
+        ])
+        refreshCrop()
+    }
+
+    func beginCrop() {
+        active = "crop.box"
+        attempt("develop.beginInteraction", ["label": "Crop"])
+    }
+
+    private func refreshCrop() {
+        guard let s = (try? Engine.shared.run("develop.get", ["id": photo.id])) as? [String: Any] else { return }
+        readCrop(s)
+    }
+
+    private func readCrop(_ s: [String: Any]) {
+        let crop = s["crop"] as? [String: Any]
+        let geo = crop?["geometry"] as? [String: Any]
+        cropAngle = (geo?["angle"] as? NSNumber)?.doubleValue ?? 0
+        cropAspect = (crop?["aspect"] as? [NSNumber])?.map(\.intValue)
+        flipH = crop?["flip_h"] as? Bool ?? false
+        flipV = crop?["flip_v"] as? Bool ?? false
+        if let r = geo?["rect"] as? [String: Any] {
+            let v = { (k: String) in CGFloat((r[k] as? NSNumber)?.doubleValue ?? 0) }
+            cropRect = CGRect(x: v("x0"), y: v("y0"), width: v("x1") - v("x0"), height: v("y1") - v("y0"))
+        }
     }
 
     @Published private var chosenAspect: String?
@@ -272,9 +379,7 @@ final class EditorModel: ObservableObject {
         if let s = (try? Engine.shared.run("develop.get", ["id": photo.id])) as? [String: Any] {
             bw = (s["treatment"] as? String) == "bw"
             wbMode = ((s["wb"] as? [String: Any])?["mode"] as? String) ?? "asShot"
-            let crop = s["crop"] as? [String: Any]
-            cropAngle = ((crop?["geometry"] as? [String: Any])?["angle"] as? NSNumber)?.doubleValue ?? 0
-            cropAspect = (crop?["aspect"] as? [NSNumber])?.map(\.intValue)
+            readCrop(s)
             let h = s["hdr"] as? [String: Any]
             hdr = h?["enabled"] as? Bool ?? false
             headroom = (h?["max_ev"] as? NSNumber)?.doubleValue ?? 3
@@ -310,12 +415,16 @@ final class EditorModel: ObservableObject {
         rendering = true
         let id = photo.id
         let size = renderSize
+        let cropping = mode == .crop
         Task {
             let wantHDR = hdr
             let r = await Task.detached(priority: .userInitiated) {
-                (wantHDR ? Engine.shared.renderHDR(id, fitting: size) : nil) ?? Engine.shared.render(id, fitting: size)
+                if cropping { return Engine.shared.renderUncropped(id, fitting: size) }
+                return (wantHDR ? Engine.shared.renderHDR(id, fitting: size) : nil) ?? Engine.shared.render(id, fitting: size)
             }.value
-            if let r {
+            if cropping, let r {
+                fullImage = r.image
+            } else if let r {
                 image = r.image
                 histogram = r.histogram
                 showingHDR = r.peak > 1
