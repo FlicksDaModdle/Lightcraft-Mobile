@@ -387,3 +387,15 @@ pub unsafe extern "C" fn latent_render_depth(core: *const Core, id: u64, max_w: 
     let Some(c) = (unsafe { self::core(core) }) else { return std::ptr::null_mut() };
     give_image(c.render_depth(id, max_w as usize, max_h as usize))
 }
+
+/// A preview of creative profile `profile` (its id) on photo `id`, without editing the photo.
+/// Null on failure.
+///
+/// # Safety
+/// `core` from [`latent_open`]; `profile` a NUL-terminated string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn latent_profile_thumb(core: *const Core, id: u64, profile: *const c_char, long_edge: u32) -> *mut LatentImage {
+    // SAFETY: as documented above
+    let (Some(c), Some(profile)) = (unsafe { self::core(core) }, unsafe { text(profile) }) else { return std::ptr::null_mut() };
+    give_image(c.profile_thumb(id, profile, long_edge as usize))
+}

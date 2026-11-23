@@ -401,6 +401,31 @@ fn a_depth_map_drives_the_focus_range() {
     assert!(s.depth_maps.is_empty());
 }
 
+/// A Depth Range mask selects by the depth map: brightening only the near half changes the near
+/// half's pixels and leaves the far half's.
+#[test]
+fn a_depth_range_mask_selects_by_depth() {
+    let mut s = demo();
+    let id = s.active().unwrap();
+    let (w, h) = (64, 64);
+    let mut d = lightcraft_raster::Image::<u8>::new(w, h);
+    for (i, v) in d.data.iter_mut().enumerate() {
+        *v = if i % w < w / 2 { 5 } else { 250 };
+    }
+    s.set_depth_map(id, Some(d));
+    let render = |s: &mut crate::Session| s.render_job(id, 96, 96, false, true).unwrap().run().rendered.unwrap().image;
+    let before = render(&mut s);
+    let r = s.execute("mask.add", &json!({"kind": "depthRange", "lo": 0.0, "hi": 0.2, "feather": 0.0})).unwrap();
+    let m = r["activeMask"].as_u64().unwrap();
+    s.execute("mask.adjust", &json!({"id": m, "values": {"exposure": 2.0}})).unwrap();
+    let after = render(&mut s);
+    let (iw, ih) = (after.width, after.height);
+    let at = |img: &lightcraft_raster::Rgba8, x: usize| img.data[(ih / 2) * iw + x][0];
+    assert!(at(&after, 3) > at(&before, 3), "the near half is brighter");
+    assert_eq!(at(&after, iw - 4), at(&before, iw - 4), "the far half is untouched");
+    assert!(s.execute("mask.add", &json!({"kind": "depthRange", "lo": f64::NAN})).is_ok(), "hostile numbers are tamed");
+}
+
 #[test]
 fn permanently_deleting_explicit_targets_keeps_the_surviving_selection() {
     let mut s = demo();

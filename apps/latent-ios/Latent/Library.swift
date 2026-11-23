@@ -142,6 +142,21 @@ final class Thumbnails: @unchecked Sendable {
         }
     }
 
+    /// A profile's preview on a photo, cached with the preset previews.
+    func profile(_ id: UInt64, profile: String, longEdge: Int) async -> CGImage? {
+        let key = "profile:\(id)/\(profile)" as NSString
+        if let hit = presetCache.object(forKey: key) { return hit.image }
+        return await withCheckedContinuation { done in
+            queue.addOperation {
+                let img = Engine.shared.profileThumbnail(id, profile: profile, longEdge: longEdge)
+                if let img { self.presetCache.setObject(CGImageBox(img), forKey: key) }
+                done.resume(returning: img)
+            }
+        }
+    }
+
+    func cachedProfile(_ id: UInt64, profile: String) -> CGImage? { presetCache.object(forKey: "profile:\(id)/\(profile)" as NSString)?.image }
+
     /// A preset's preview on a photo, cached until [`forgetPresets`].
     func preset(_ id: UInt64, preset: String, longEdge: Int) async -> CGImage? {
         let key = "\(id)/\(preset)" as NSString

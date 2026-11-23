@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// The editor: the photo as large as the screen allows, and below it one glass card with the
 /// current mode's controls (sliders and tools, presets, or crop), then the modes.
@@ -25,6 +26,7 @@ struct EditorView: View {
     @State private var panStart: CGSize?
     /// While zoomed in Masks or Remove: one finger moves the photo instead of drawing.
     @State private var moving = false
+    @State private var importingLUTs = false
     @AppStorage("editorBackground") private var background = EditorBackground.photo.rawValue
     /// The colour taken from the photo, for the "From photo" background.
     @State private var ambient: Color?
@@ -190,7 +192,10 @@ struct EditorView: View {
                     .padding(.horizontal, 8)
                     .padding(.top, 6)
                 Group {
-                    if model.mode == .remove {
+                    if model.profilesOpen && model.mode == .edit {
+                        PresetsBar(title: "Profile", cancel: { model.cancelProfiles() }, done: { model.doneProfiles() })
+                            .latentGlassID("bottomBar", in: glass)
+                    } else if model.mode == .remove {
                         PresetsBar(title: "Remove", cancel: { withAnimation(.glass) { model.cancelRemove() } }, done: { withAnimation(.glass) { model.doneRemove() } })
                             .latentGlassID("bottomBar", in: glass)
                     } else if model.mode == .masks {
@@ -608,8 +613,12 @@ struct EditorView: View {
                 case .masks: masksPanel
                 case .remove: removePanel
                 default:
-                    editPanel
-                    ToolStrip(model: model).opacity(focused ? 0 : 1)
+                    if model.profilesOpen {
+                        profilesPanel
+                    } else {
+                        editPanel
+                        ToolStrip(model: model).opacity(focused ? 0 : 1)
+                    }
                 }
             }
             .id(model.mode)
@@ -922,6 +931,8 @@ struct EditorView: View {
             .tint(Theme.accent)
             .fixedSize()
             Spacer()
+            stepButton("Profile", symbol: "camera.filters") { model.openProfiles() }
+                .accessibilityLabel(Text("Profile"))
             stepButton("Curve", symbol: "chart.line.uptrend.xyaxis") { model.tool = .curve }
         }
         .padding(.horizontal, 20)
@@ -1133,8 +1144,8 @@ struct EditorView: View {
                 Button { choose(t.kind, op: op) } label: { Label(maskKindLabel(t.kind), systemImage: t.symbol) }
             }
         }
-        Section("By colour or brightness") {
-            ForEach(maskTools.filter { ["colorRange", "luminanceRange"].contains($0.kind) }, id: \.kind) { t in
+        Section("By colour, brightness or depth") {
+            ForEach(maskTools.filter { ["colorRange", "luminanceRange", "depthRange"].contains($0.kind) }, id: \.kind) { t in
                 Button { choose(t.kind, op: op) } label: { Label(t.label, systemImage: t.symbol) }
             }
         }
@@ -1276,6 +1287,24 @@ struct EditorView: View {
                 .padding(.horizontal, 20)
                 .padding(.vertical, 6)
                 partSlider("Refine", key: "refine", part: part, min: 0, max: 100, scale: 1, fallback: 50)
+            case "depthRange":
+                if model.depth == nil {
+                    HStack {
+                        Text("No depth map for this photo yet.").font(.system(size: 13)).foregroundStyle(Theme.secondaryText)
+                        Spacer()
+                        Button { model.estimateDepth() } label: {
+                            Label(DepthModel.installed ? "Estimate" : "Get model", systemImage: "square.3.layers.3d.down.right")
+                                .font(.system(size: 13, weight: .semibold)).padding(.horizontal, 12).frame(height: 30)
+                                .latentGlass(in: Capsule(), interactive: true)
+                        }
+                        .foregroundStyle(.white)
+                    }
+                    .padding(.horizontal, 20)
+                    .padding(.vertical, 6)
+                }
+                partSlider("Nearest", key: "lo", part: part, min: 0, max: 100, scale: 100, fallback: 0)
+                partSlider("Farthest", key: "hi", part: part, min: 0, max: 100, scale: 100, fallback: 0.3)
+                partSlider("Soften", key: "feather", part: part, min: 0, max: 100, scale: 100, fallback: 0.1)
             case "luminanceRange":
                 partSlider("From", key: "lo", part: part, min: 0, max: 100, scale: 100, fallback: 0.6)
                 partSlider("To", key: "hi", part: part, min: 0, max: 100, scale: 100, fallback: 1)
@@ -1301,7 +1330,8 @@ struct EditorView: View {
         case "radial": return "Drag out from a centre to draw it; drag inside it to move it."
         case "object": return model.objectExclude ? "Tap parts to leave out of the selection." : "Tap what to select; tap again to add more of it."
         case "colorRange": return model.addColorSample ? "Tap another colour to include it too (up to five)." : "Tap a colour in the photo; everything that colour is selected."
-        case "luminanceRange": return "Selects by brightness, from dark (0) to bright (100)."
+        case "luminanceRange": return "Tap the photo to pick a brightness; it selects from dark (0) to bright (100)."
+        case "depthRange": return "Tap the photo to pick a distance; it selects from near (0) to far (100)."
         case "sky": return "Bright, smooth sky reaching the top of the photo, found without AI."
         case "subject": return "The photo's main subject, found without AI."
         case "background": return "Everything but the main subject, found without AI."
@@ -1617,6 +1647,96 @@ struct EditorView: View {
             onEnd: { if editing { model.end() } },
             onReset: {})
             .opacity(focused && model.active != c.id ? 0 : 1)
+    }
+
+    // MARK: profiles
+
+    private var profilesPanel: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 8) {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 6) {
+                        ForEach(model.profileGroups, id: \.self) { g in
+                            let on = model.profileGroup == g
+                            Button { withAnimation(.glass) { model.profileGroup = g } } label: {
+                                Text(g).font(.system(size: 13, weight: on ? .semibold : .regular))
+                                    .foregroundStyle(on ? Color.black : Color.white)
+                                    .padding(.horizontal, 12).frame(height: 30)
+                                    .background(on ? Color.white : Color.white.opacity(0.1), in: Capsule())
+                            }
+                        }
+                    }
+                    .padding(.leading, 16)
+                }
+                Button { importingLUTs = true } label: {
+                    Image(systemName: "square.and.arrow.down")
+                        .font(.system(size: 15, weight: .semibold))
+                        .frame(width: 38, height: 32)
+                        .latentGlass(in: Capsule(), interactive: true)
+                }
+                .foregroundStyle(.white)
+                .padding(.trailing, 14)
+                .accessibilityLabel(Text("Import LUTs"))
+            }
+            .padding(.top, 12)
+            .opacity(focused ? 0 : 1)
+            ScrollView(.horizontal, showsIndicators: false) {
+                LazyHStack(spacing: 10) {
+                    ForEach(model.profiles(in: model.profileGroup)) { p in profileCell(p) }
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 10)
+            }
+            .frame(height: 132)
+            .opacity(focused ? 0 : 1)
+            LatentSlider(
+                control: model.profileAmountControl,
+                onBegin: { model.beginProfileAmount() },
+                onChange: { model.setProfileAmount($0) },
+                onEnd: { model.end() },
+                onReset: {
+                    model.beginProfileAmount()
+                    model.setProfileAmount(100)
+                    model.end()
+                })
+            Text("Import .cube LUTs from Files (single files, folders or .zip); they work like the built-in profiles.")
+                .font(.system(size: 12))
+                .foregroundStyle(Theme.secondaryText)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 20)
+                .padding(.vertical, 6)
+                .opacity(focused ? 0 : 1)
+        }
+        .fileImporter(isPresented: $importingLUTs, allowedContentTypes: [UTType(filenameExtension: "cube") ?? .data, .zip, .folder, .data], allowsMultipleSelection: true) { r in
+            if case .success(let urls) = r { model.importLUTs(urls) }
+        }
+    }
+
+    private func profileCell(_ p: ProfileItem) -> some View {
+        let on = p.id == model.profileID
+        return Button { model.applyProfile(p) } label: {
+            VStack(spacing: 6) {
+                ProfileThumb(photo: model.photo.id, profile: p.id)
+                    .frame(width: 84, height: 84)
+                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(on ? Theme.accent : Color.white.opacity(0.12), lineWidth: on ? 2.5 : 1))
+                    .overlay(alignment: .topTrailing) {
+                        if p.favorite { Image(systemName: "heart.fill").font(.system(size: 10)).foregroundStyle(.white).padding(5).shadow(radius: 2) }
+                    }
+                    .scaleEffect(on ? 1.04 : 1)
+                Text(p.name).font(.system(size: 11, weight: on ? .semibold : .regular)).lineLimit(1).frame(width: 84)
+                    .foregroundStyle(on ? Color.white : Theme.secondaryText)
+            }
+        }
+        .buttonStyle(.plain)
+        .contextMenu {
+            Button { model.favoriteProfile(p) } label: { Label(p.favorite ? "Remove from favorites" : "Add to favorites", systemImage: p.favorite ? "heart.slash" : "heart") }
+            if p.imported {
+                Button(role: .destructive) { model.deleteProfile(p) } label: { Label("Delete LUT", systemImage: "trash") }
+            }
+        }
+        .accessibilityLabel(Text(p.name))
+        .accessibilityAddTraits(on ? .isSelected : [])
     }
 
     // MARK: presets
@@ -2575,6 +2695,10 @@ struct MaskCanvas: View {
                     let tap = hypot(g.translation.width, g.translation.height) < 10
                     if tap, model.currentPart?.kind == "object" { model.objectPoint(toMask(g.location)) }
                     if tap, model.currentPart?.kind == "colorRange" { model.sampleColor(toMask(g.location)) }
+                    if tap, ["luminanceRange", "depthRange"].contains(model.currentPart?.kind ?? "") {
+                        let f = fitted
+                        model.pickRange(atShown: CGPoint(x: (g.location.x - f.minX) / Swift.max(f.width, 1), y: (g.location.y - f.minY) / Swift.max(f.height, 1)))
+                    }
                     if !stroke.isEmpty {
                         model.brushStroke(stroke.map(toMask))
                         stroke = []
@@ -2979,5 +3103,30 @@ struct SpotCanvas: View {
         var p = Path()
         p.addLines(pts)
         return p.strokedPath(StrokeStyle(lineWidth: r * 2, lineCap: .round, lineJoin: .round))
+    }
+}
+
+/// A profile's preview on the photo.
+struct ProfileThumb: View {
+    let photo: UInt64
+    let profile: String
+    @State private var image: CGImage?
+
+    var body: some View {
+        ZStack {
+            Color(white: 0.12)
+            if let image {
+                Image(decorative: image, scale: 1).resizable().scaledToFill().transition(.opacity)
+            } else {
+                Shimmer()
+            }
+        }
+        .task(id: profile) {
+            image = Thumbnails.shared.cachedProfile(photo, profile: profile)
+            if image == nil {
+                let img = await Thumbnails.shared.profile(photo, profile: profile, longEdge: 200)
+                withAnimation(.easeOut(duration: 0.2)) { image = img }
+            }
+        }
     }
 }

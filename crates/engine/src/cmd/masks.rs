@@ -40,6 +40,8 @@ fn shape_from(kind: &str, p: &Value, c: &str) -> Result<MaskShape> {
             lo_feather: f64_or(p, "loFeather", 0.1),
             hi_feather: f64_or(p, "hiFeather", 0.1),
         },
+        // what lies between two depths of the photo's depth map (0 near … 1 far); nothing without one
+        "depthRange" => MaskShape::DepthRange { lo: f64_or(p, "lo", 0.0), hi: f64_or(p, "hi", 0.3), feather: f64_or(p, "feather", 0.1) },
         "colorRange" => {
             let samples: Vec<[f64; 3]> = p
                 .get("samples")
@@ -60,7 +62,9 @@ fn shape_from(kind: &str, p: &Value, c: &str) -> Result<MaskShape> {
         other => {
             return Err(bad(
                 c,
-                format!("unknown mask kind `{other}` (brush|linear|radial|sky|subject|background|luminanceRange|colorRange|object|prompt)"),
+                format!(
+                    "unknown mask kind `{other}` (brush|linear|radial|sky|subject|background|luminanceRange|colorRange|depthRange|object|prompt)"
+                ),
             ));
         }
     })
@@ -256,7 +260,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Create New Mask",
             [],
             None,
-            "{kind: brush|linear|radial|sky|subject|background|luminanceRange|colorRange|object|prompt, ...shape params (start/end, center/rx/ry/angle/feather, lo/hi…; object: points/exclude [[x,y],…]; prompt: text; object/prompt: seg? a stored segmentation, no model needed), name?} — AI kinds need the SAM 3 model; in the app a prompt returns {pending} and the mask appears when found",
+            "{kind: brush|linear|radial|sky|subject|background|luminanceRange|colorRange|depthRange|object|prompt, ...shape params (start/end, center/rx/ry/angle/feather, lo/hi…; object: points/exclude [[x,y],…]; prompt: text; object/prompt: seg? a stored segmentation, no model needed), name?} — AI kinds need the SAM 3 model; in the app a prompt returns {pending} and the mask appears when found",
             has_active,
             |s, p| {
                 let kind = str_param(p, "kind").unwrap_or("radial").to_string();

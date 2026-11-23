@@ -408,6 +408,7 @@ let maskTools: [(kind: String, label: String, symbol: String, ai: Bool)] = [
     ("radial", "Radial", "circle.dashed", false),
     ("colorRange", "Color range", "eyedropper", false),
     ("luminanceRange", "Brightness range", "circle.lefthalf.filled", false),
+    ("depthRange", "Depth range", "square.3.layers.3d.down.right", false),
 ]
 
 func maskSymbol(_ kind: String) -> String { maskTools.first { $0.kind == kind }?.symbol ?? "circle.dashed.inset.filled" }
@@ -542,3 +543,21 @@ let spotModes: [(id: String, label: String, symbol: String)] = [
     ("clone", "Clone", "square.on.square"),
     ("fill", "Fill", "rectangle.dashed"),
 ]
+
+/// A creative profile (`profiles.list`): built in, or a LUT the user imported.
+struct ProfileItem: Identifiable, Hashable {
+    let id: String
+    let name: String
+    let group: String
+    let favorite: Bool
+    let imported: Bool
+
+    init?(_ json: Any) {
+        guard let d = json as? [String: Any], let id = d["id"] as? String else { return nil }
+        self.id = id
+        name = d["name"] as? String ?? id
+        group = d["group"] as? String ?? "Profiles"
+        favorite = d["favorite"] as? Bool ?? false
+        imported = d["imported"] as? Bool ?? false
+    }
+}

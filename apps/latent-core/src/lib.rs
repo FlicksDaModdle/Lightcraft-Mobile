@@ -254,6 +254,32 @@ impl Core {
         self.finish(job.run())
     }
 
+    /// A preview of creative profile `profile` (built in, or an imported LUT) on the photo, long
+    /// edge about `long_edge`, at the photo's profile Amount (100 when it has none): rendered
+    /// without changing the photo.
+    pub fn profile_thumb(&self, id: u64, profile: &str, long_edge: usize) -> Result<Image, String> {
+        let job = {
+            let mut s = self.lock();
+            let known = lightcraft_engine::presets::PROFILES.iter().any(|p| p.id == profile) || s.lut_profiles.iter().any(|p| p.id == profile);
+            if !known {
+                return Err("unknown profile".into());
+            }
+            let mut d = (*s.develop_of(PhotoId(id)).ok_or("no such photo")?).clone();
+            d.profile.id = profile.to_string();
+            if d.profile.amount <= 0.0 {
+                d.profile.amount = 100.0;
+            }
+            let edge = long_edge.max(16);
+            let mut job = s.render_job(PhotoId(id), edge, edge, false, true).ok_or("no such photo")?;
+            let salt = profile.bytes().fold(0x9e37_79b9_7f4a_7c15u64, |h, b| (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3));
+            job.settings = std::sync::Arc::new(d);
+            job.key ^= salt.rotate_left(11);
+            job.cache = None;
+            job
+        };
+        self.finish(job.run())
+    }
+
     /// A small square-ish thumbnail with the photo's edits.
     pub fn thumb(&self, id: u64, long_edge: usize) -> Result<Image, String> {
         let job = self.lock().thumb_job(PhotoId(id), long_edge.max(16)).ok_or("no thumbnail for this photo")?;
@@ -517,6 +543,36 @@ mod tests {
         assert!(near > far, "the depth view shows near brighter than far: {near:?} {far:?}");
         core.set_depth(id, 0, 0, &[]);
         assert_eq!(px(&core), before, "taking it away restores the blur");
+    }
+
+    #[test]
+    fn a_lut_imports_as_a_profile_and_previews_without_editing() {
+        let core = Core::demo();
+        let photos = ok(&core.execute("catalog.query", ""));
+        let id = photos["photos"][0]["id"].as_u64().unwrap_or(0);
+        ok(&core.execute("library.select", &json!({"ids": [id], "active": id}).to_string()));
+        // a 2×2×2 LUT that swaps red and blue
+        let mut cube = String::from("TITLE \"Swap\"\nLUT_3D_SIZE 2\n");
+        for b in 0..2 {
+            for g in 0..2 {
+                for r in 0..2 {
+                    cube.push_str(&format!("{b} {g} {r}\n"));
+                }
+            }
+        }
+        let dir = std::env::temp_dir().join(format!("latent-lut-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let file = dir.join("Swap.cube");
+        let _ = std::fs::write(&file, cube);
+        let r = ok(&core.execute("profile.import", &json!({"paths": [file.to_string_lossy()]}).to_string()));
+        let pid = r["imported"][0]["id"].as_str().unwrap_or_default().to_string();
+        assert!(pid.starts_with("lut:"), "{r}");
+        let before = ok(&core.execute("develop.get", ""));
+        let thumb = core.profile_thumb(id, &pid, 96).map(|i| i.rgba).unwrap_or_default();
+        assert_eq!(ok(&core.execute("develop.get", "")), before, "a preview must not edit the photo");
+        assert_ne!(thumb, core.thumb(id, 96).map(|i| i.rgba).unwrap_or_default(), "the preview shows the LUT");
+        assert!(core.profile_thumb(id, "lut:nope", 96).is_err());
+        ok(&core.execute("develop.profile", &json!({"id": pid, "amount": 100}).to_string()));
     }
 
     #[test]

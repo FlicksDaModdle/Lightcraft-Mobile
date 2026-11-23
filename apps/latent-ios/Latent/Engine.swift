@@ -151,6 +151,13 @@ final class Engine: @unchecked Sendable {
         return Self.convert(img.pointee)
     }
 
+    /// A preview of a creative profile (built in, or an imported LUT) on the photo (not changed).
+    func profileThumbnail(_ id: UInt64, profile: String, longEdge: Int) -> CGImage? {
+        guard let img = latent_profile_thumb(core, id, profile, UInt32(max(16, longEdge))) else { return nil }
+        defer { latent_image_free(img) }
+        return Self.convert(img.pointee)?.image
+    }
+
     /// A preview of a preset on the photo (the photo is not changed).
     func presetThumbnail(_ id: UInt64, preset: String, longEdge: Int) -> CGImage? {
         guard let img = latent_preset_thumb(core, id, preset, UInt32(max(16, longEdge))) else { return nil }

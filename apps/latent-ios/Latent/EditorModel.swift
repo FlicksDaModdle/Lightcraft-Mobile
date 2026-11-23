@@ -214,6 +214,8 @@ final class EditorModel: ObservableObject {
             mode = .masks
             UIImpactFeedbackGenerator(style: .light).impactOccurred()
             if kind == "colorRange" { toast = "Tap a colour in the photo to select everywhere it appears." }
+            if kind == "luminanceRange" { toast = "Tap the photo to pick a brightness, then adjust the range." }
+            if kind == "depthRange" { toast = depth == nil ? "This photo has no depth map yet. Make one in Blur." : "Tap the photo to pick a depth, then adjust the range." }
             render()
             refreshThumbs()
         } catch {
@@ -940,15 +942,88 @@ final class EditorModel: ObservableObject {
 
     /// A tap on the photo (shown picture, 0…1 across and down) with Tap to focus on.
     func focus(atShown u: CGPoint) {
-        guard let d = depth else { return }
-        // the map lies over the whole upright photo; the shown picture is cropped, turned, flipped
-        guard let v = d.depth(at: toMask(u)) else { return }
-        let half = Swift.max(focalRange, 12) / 2
-        let c = Swift.min(Swift.max(v * 100, half), 100 - half)
-        UIImpactFeedbackGenerator(style: .light).impactOccurred()
-        let patch: [String: Any] = ["focal_distance": c, "focal_range": half * 2, "focus_mask": NSNull(), "shape": "auto"]
-        mergeBlur(patch, "Focus Here")
-        tapToFocus = false
+        guard depth != nil else { return }
+        Task {
+            guard let v = await depthValue(atShown: u) else { return }
+            let half = Swift.max(focalRange, 12) / 2
+            let c = Swift.min(Swift.max(v * 100, half), 100 - half)
+            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+            let patch: [String: Any] = ["focal_distance": c, "focal_range": half * 2, "focus_mask": NSNull(), "shape": "auto"]
+            mergeBlur(patch, "Focus Here")
+            tapToFocus = false
+        }
+    }
+
+    /// The depth (0 near … 1 far) at a point of the shown picture, read from the depth map as the
+    /// engine frames it (crop, rotation, straightening and flips included).
+    func depthValue(atShown u: CGPoint) async -> Double? {
+        let id = photo.id
+        guard let img = await Task.detached(priority: .userInitiated, operation: { Engine.shared.renderDepth(id, fitting: CGSize(width: 320, height: 320)) }).value,
+              let b = Self.pixel(img, at: u)
+        else { return nil }
+        // the view shows nearness as 1 − smoothstep(depth): undo the smoothstep
+        let s = Swift.min(Swift.max(1 - (b.r + b.g + b.b) / 3, 0), 1)
+        return 0.5 - sin(asin(1 - 2 * s) / 3)
+    }
+
+    /// The brightness (0…1 on the luminance range's scale, −8…+4 EV) at a point of the shown picture.
+    func brightness(atShown u: CGPoint) async -> Double? {
+        let id = photo.id
+        guard let r = await Task.detached(priority: .userInitiated, operation: { Engine.shared.render(id, fitting: CGSize(width: 320, height: 320)) }).value,
+              let p = Self.pixel(r.image, at: u)
+        else { return nil }
+        let lin = { (v: Double) in v <= 0.04045 ? v / 12.92 : pow((v + 0.055) / 1.055, 2.4) }
+        let y = 0.2126 * lin(p.r) + 0.7152 * lin(p.g) + 0.0722 * lin(p.b)
+        return Swift.min(Swift.max((log2(Swift.max(y, 1e-6)) + 8) / 12, 0), 1)
+    }
+
+    /// One pixel's colour (0…1) at a point of an image (0…1 across and down).
+    static func pixel(_ img: CGImage, at u: CGPoint) -> (r: Double, g: Double, b: Double)? {
+        guard img.width > 0, img.height > 0, (0...1).contains(u.x), (0...1).contains(u.y),
+              let space = CGColorSpace(name: CGColorSpace.sRGB)
+        else { return nil }
+        var px = [UInt8](repeating: 0, count: 4)
+        let ok: Bool = px.withUnsafeMutableBytes { buf in
+            guard let ctx = CGContext(data: buf.baseAddress, width: 1, height: 1, bitsPerComponent: 8, bytesPerRow: 4, space: space,
+                                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+            else { return false }
+            let x = Swift.min(Int(u.x * CGFloat(img.width)), img.width - 1)
+            let y = Swift.min(Int(u.y * CGFloat(img.height)), img.height - 1)
+            // draw so pixel (x, y) (top-down) lands on the one-pixel context
+            ctx.draw(img, in: CGRect(x: -x, y: -(img.height - 1 - y), width: img.width, height: img.height))
+            return true
+        }
+        guard ok else { return nil }
+        return (Double(px[0]) / 255, Double(px[1]) / 255, Double(px[2]) / 255)
+    }
+
+    /// A tap with a brightness or depth range part selected: centre its range on what was tapped.
+    func pickRange(atShown u: CGPoint) {
+        guard let part = currentPart else { return }
+        Task {
+            var shape = part.shape
+            switch part.kind {
+            case "luminanceRange":
+                guard let y = await brightness(atShown: u) else { return }
+                let half = Swift.max(((part.number("hi", 1) - part.number("lo", 0.6)) / 2), 0.08)
+                shape["lo"] = Swift.max(y - half, 0)
+                shape["hi"] = Swift.min(y + half, 1)
+            case "depthRange":
+                guard let d = await depthValue(atShown: u) else {
+                    toast = "This photo has no depth map yet. Make one in Blur."
+                    return
+                }
+                let half = Swift.max(((part.number("hi", 0.3) - part.number("lo", 0)) / 2), 0.06)
+                shape["lo"] = Swift.max(d - half, 0)
+                shape["hi"] = Swift.min(d + half, 1)
+            default:
+                return
+            }
+            UISelectionFeedbackGenerator().selectionChanged()
+            beginMask("Pick Range")
+            updateMaskShape(shape)
+            end()
+        }
     }
 
     private func renderDepthView() {
@@ -961,6 +1036,114 @@ final class EditorModel: ObservableObject {
         Task {
             depthView = await Task.detached(priority: .userInitiated) { Engine.shared.renderDepth(id, fitting: size) }.value
         }
+    }
+
+    // MARK: profiles
+
+    /// The profile browser is open in place of the sliders.
+    @Published var profilesOpen = false
+    @Published private(set) var profiles: [ProfileItem] = []
+    @Published private(set) var profileID = "lc.color"
+    @Published private(set) var profileAmount = 100.0
+    @Published var profileGroup = ""
+    private var profilesEntry: Int?
+
+    var profileName: String { profiles.first { $0.id == profileID }?.name ?? "Profile" }
+
+    var profileGroups: [String] {
+        var out: [String] = profiles.contains(where: \.favorite) ? ["Favorites"] : []
+        for p in profiles where !out.contains(p.group) { out.append(p.group) }
+        return out
+    }
+
+    func profiles(in group: String) -> [ProfileItem] {
+        group == "Favorites" ? profiles.filter(\.favorite) : profiles.filter { $0.group == group }
+    }
+
+    func loadProfiles() {
+        profiles = ((try? Engine.shared.run("profiles.list")) as? [Any] ?? []).compactMap(ProfileItem.init)
+    }
+
+    func openProfiles() {
+        loadProfiles()
+        profilesEntry = historyCursor()
+        profileGroup = profiles.first { $0.id == profileID }?.group ?? profileGroups.first ?? ""
+        withAnimation(.glass) { profilesOpen = true }
+    }
+
+    func cancelProfiles() {
+        undoBack(to: profilesEntry)
+        refresh()
+        render()
+        withAnimation(.glass) { profilesOpen = false }
+    }
+
+    func doneProfiles() { withAnimation(.glass) { profilesOpen = false } }
+
+    func applyProfile(_ p: ProfileItem) {
+        guard p.id != profileID else { return }
+        UISelectionFeedbackGenerator().selectionChanged()
+        command("develop.profile", ["id": p.id])
+    }
+
+    var profileAmountControl: Control {
+        Control(id: "profile.amount", label: "Amount", min: 0, max: 200, defaultValue: 100, step: 1, decimals: 0, value: profileAmount)
+    }
+
+    func beginProfileAmount() {
+        active = "profile.amount"
+        attempt("develop.beginInteraction", ["label": "Profile Amount"])
+    }
+
+    func setProfileAmount(_ v: Double) {
+        profileAmount = v
+        if attempt("develop.profile", ["id": profileID, "amount": v]) { render() }
+    }
+
+    func favoriteProfile(_ p: ProfileItem) {
+        attempt("profile.favorite", ["id": p.id, "favorite": !p.favorite])
+        loadProfiles()
+    }
+
+    func deleteProfile(_ p: ProfileItem) {
+        guard attempt("profile.deleteImported", ["id": p.id]) else { return }
+        loadProfiles()
+        refresh()
+        render()
+        if profiles(in: profileGroup).isEmpty { profileGroup = profileGroups.first ?? "" }
+    }
+
+    /// Import `.cube` LUTs (files, folders or zips the Files picker chose) as profiles.
+    func importLUTs(_ urls: [URL]) {
+        let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("LUTs-\(UUID().uuidString)", isDirectory: true)
+        try? FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
+        var paths: [String] = []
+        for u in urls {
+            let scoped = u.startAccessingSecurityScopedResource()
+            defer { if scoped { u.stopAccessingSecurityScopedResource() } }
+            let dest = tmp.appendingPathComponent(u.lastPathComponent)
+            if (try? FileManager.default.copyItem(at: u, to: dest)) != nil { paths.append(dest.path) }
+        }
+        guard !paths.isEmpty else {
+            toast = "Those files couldn't be read."
+            return
+        }
+        do {
+            let r = try Engine.shared.run("profile.import", ["paths": paths]) as? [String: Any]
+            let done = (r?["imported"] as? [[String: Any]]) ?? []
+            let failed = (r?["failed"] as? [Any])?.count ?? 0
+            loadProfiles()
+            if let g = done.first?["group"] as? String { profileGroup = g }
+            UINotificationFeedbackGenerator().notificationOccurred(done.isEmpty ? .error : .success)
+            if done.isEmpty {
+                toast = "No LUTs found. Latent reads .cube files, folders of them, and .zip files."
+            } else {
+                toast = "Imported \(done.count) LUT\(done.count == 1 ? "" : "s")" + (failed > 0 ? " (\(failed) couldn't be read)" : "")
+            }
+        } catch {
+            toast = error.localizedDescription
+        }
+        try? FileManager.default.removeItem(at: tmp)
     }
 
     // MARK: zoom
@@ -1188,6 +1371,9 @@ final class EditorModel: ObservableObject {
             readCrop(s)
             masks = (s["masks"] as? [Any] ?? []).compactMap(MaskItem.init)
             spots = (s["spots"] as? [Any] ?? []).compactMap(SpotItem.init)
+            let prof = s["profile"] as? [String: Any] ?? [:]
+            profileID = prof["id"] as? String ?? "lc.color"
+            profileAmount = (prof["amount"] as? NSNumber)?.doubleValue ?? 100
             let lb = s["lens_blur"] as? [String: Any] ?? [:]
             blurOn = lb["enabled"] as? Bool ?? false
             focusMask = (lb["focus_mask"] as? NSNumber)?.uint32Value
