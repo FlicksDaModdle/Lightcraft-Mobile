@@ -43,7 +43,7 @@ jobs:
       - run: cargo test -p lightcraft-ios -p lightcraft-latent
 
   ios:
-    runs-on: macos-15
+    runs-on: macos-26
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
@@ -53,9 +53,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: latent-ios
-      - name: Use Xcode 26 (the iOS 26 SDK, for Liquid Glass) when the runner has it
+      - name: Use the newest Xcode (27 for the iOS 27 SDK, else 26)
         run: |
-          x=$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1 || true)
+          ls -d /Applications/Xcode*.app
+          x=$(ls -d /Applications/Xcode_27*.app 2>/dev/null | sort -V | tail -1 || true)
+          [ -n "$x" ] || x=$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1 || true)
           if [ -n "$x" ]; then sudo xcode-select -s "$x"; fi
           xcodebuild -version
       - name: Install XcodeGen
