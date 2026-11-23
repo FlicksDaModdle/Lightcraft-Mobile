@@ -74,6 +74,22 @@ impl Core {
         (Core { session: Mutex::new(session) }, problem)
     }
 
+    /// Export photo `id` with its edits. `options` is the engine's export options as JSON
+    /// (camelCase: format, quality, resize {mode, value}, hdr, metadata, removeLocation,
+    /// watermark {text, size, opacity, anchor}, colorSpace…; anything left out keeps its default).
+    /// Returns the file name and its bytes.
+    pub fn export(&self, id: u64, options: &str) -> Result<(String, Vec<u8>), String> {
+        use lightcraft_engine::export::ExportOptions;
+        let o: ExportOptions = if options.trim().is_empty() {
+            ExportOptions::default()
+        } else {
+            serde_json::from_str(options).map_err(|e| format!("export options: {e}"))?
+        };
+        let prepared = lightcraft_engine::export::prepare_export(&mut self.lock(), PhotoId(id), &o, 1)?;
+        let out = prepared.run()?;
+        Ok((out.file_name, out.bytes))
+    }
+
     /// Where the SAM 3 model (AI masks) is looked for: a folder holding `model.safetensors`,
     /// `vocab.json` and `merges.txt`.
     pub fn set_ai_model_dir(&self, dir: &Path) {
@@ -381,6 +397,28 @@ mod tests {
         assert!(object["error"].is_string(), "an object mask needs the model: {object}");
         let polled: Value = serde_json::from_str(&core.poll()).unwrap_or_default();
         assert_eq!(polled["busy"], json!(false), "{polled}");
+    }
+
+    #[test]
+    fn an_export_is_an_image_file() {
+        let core = Core::demo();
+        let photos = ok(&core.execute("catalog.query", ""));
+        let id = photos["photos"][0]["id"].as_u64().unwrap_or(0);
+        let small = r#"{"format":"jpeg","quality":80,"resize":{"mode":"longEdge","value":400}}"#;
+        let jpeg = core.export(id, small);
+        let Ok((name, bytes)) = jpeg else { panic!("{:?}", jpeg.err()) };
+        assert!(name.to_lowercase().ends_with(".jpg"), "{name}");
+        assert_eq!(&bytes[..2], &[0xff, 0xd8], "a JPEG starts with SOI");
+        let png = core.export(id, &small.replace("jpeg", "png")).map(|(_, b)| b).unwrap_or_default();
+        assert_eq!(png.get(..4), Some(&b"\x89PNG"[..]));
+        let marked = small.replace("}}", r#"},"watermark":{"text":"LATENT","size":0.2,"opacity":1}}"#);
+        let marked = core.export(id, &marked).map(|(_, b)| b);
+        assert!(marked.is_ok_and(|b| b != bytes), "a watermark changes the file");
+        assert!(core.export(id, "{nonsense").is_err());
+        for f in ["tiff", "avif", "jxl", "webp"] {
+            let r = core.export(id, &small.replace("jpeg", f));
+            assert!(r.is_ok_and(|(_, b)| !b.is_empty()), "{f} exports");
+        }
     }
 
     #[test]

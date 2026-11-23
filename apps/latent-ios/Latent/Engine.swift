@@ -138,6 +138,22 @@ final class Engine: @unchecked Sendable {
         return Self.convert(img.pointee)?.image
     }
 
+    /// Export a photo with its edits. `options` are the engine's export options (format, quality,
+    /// resize, hdr, metadata, removeLocation, watermark, colorSpace…). Slow: call off the main thread.
+    func export(_ id: UInt64, options: [String: Any]) throws -> (name: String, data: Data) {
+        let json = String(data: try JSONSerialization.data(withJSONObject: options), encoding: .utf8) ?? "{}"
+        var problem: UnsafeMutablePointer<CChar>? = nil
+        guard let out = latent_export(core, id, json, &problem) else {
+            let message = problem.map { String(cString: $0) } ?? "The photo couldn't be exported."
+            if let problem { latent_string_free(problem) }
+            throw EngineError(message: message)
+        }
+        defer { latent_export_free(out) }
+        let name = out.pointee.name.map { String(cString: $0) } ?? "Photo"
+        let data = out.pointee.bytes.map { Data(bytes: $0, count: out.pointee.len) } ?? Data()
+        return (name, data)
+    }
+
     private static func convert(_ img: LatentImage) -> Rendered? {
         let w = Int(img.width)
         let h = Int(img.height)

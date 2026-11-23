@@ -58,5 +58,17 @@ void latent_set_ai_model_dir(const LatentCore *core, const char *dir);
 // Take in finished background work: {"changed": bool, "messages": [...], "busy": bool}.
 char *latent_poll(const LatentCore *core);
 
+// An exported file.
+typedef struct LatentExport {
+    char *name;
+    uint8_t *bytes;
+    size_t len;
+} LatentExport;
+
+// Export a photo with the engine's export options as JSON (format, quality, resize, hdr, metadata,
+// removeLocation, watermark…). NULL on failure; `error` (may be NULL) receives why.
+LatentExport *latent_export(const LatentCore *core, uint64_t id, const char *options, char **error);
+void latent_export_free(LatentExport *e);
+
 void latent_image_free(LatentImage *img);
 void latent_string_free(char *s);

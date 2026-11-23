@@ -280,3 +280,58 @@ pub unsafe extern "C" fn latent_poll(core: *const Core) -> *mut c_char {
         None => give_string(r#"{"changed":false,"messages":[],"busy":false}"#.to_string()),
     }
 }
+
+/// An exported file: its name and bytes (give it back with [`latent_export_free`]).
+#[repr(C)]
+pub struct LatentExport {
+    pub name: *mut c_char,
+    pub bytes: *mut u8,
+    pub len: usize,
+}
+
+/// Export photo `id` with `options` (the engine's export options as JSON; see `Core::export`).
+/// Null on failure, and `error` (if not null) receives why.
+///
+/// # Safety
+/// `core` from [`latent_open`]; `options` NUL-terminated or null; `error` null or writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn latent_export(core: *const Core, id: u64, options: *const c_char, error: *mut *mut c_char) -> *mut LatentExport {
+    // SAFETY: as documented above
+    let (c, o) = unsafe { (self::core(core), text(options)) };
+    let result = match c {
+        Some(c) => c.export(id, o.unwrap_or("")),
+        None => Err("no library".to_string()),
+    };
+    match result {
+        Ok((name, bytes)) => {
+            let mut b = bytes.into_boxed_slice();
+            let out = LatentExport { name: give_string(name), bytes: b.as_mut_ptr(), len: b.len() };
+            std::mem::forget(b);
+            Box::into_raw(Box::new(out))
+        }
+        Err(e) => {
+            if !error.is_null() {
+                // SAFETY: the caller promises `error` is writable
+                unsafe { *error = give_string(e) };
+            }
+            std::ptr::null_mut()
+        }
+    }
+}
+
+/// Give back an export from [`latent_export`].
+///
+/// # Safety
+/// `e` is null or from [`latent_export`], and not used again.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn latent_export_free(e: *mut LatentExport) {
+    if e.is_null() {
+        return;
+    }
+    // SAFETY: from Box::into_raw in latent_export; the name and bytes were made there
+    unsafe {
+        let e = Box::from_raw(e);
+        latent_string_free(e.name);
+        drop(Box::from_raw(std::ptr::slice_from_raw_parts_mut(e.bytes, e.len)));
+    }
+}

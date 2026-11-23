@@ -16,9 +16,17 @@ struct EditorView: View {
     @State private var chromeHidden = false
     @State private var showingOriginal = false
     @State private var hold: Task<Void, Never>?
+    @AppStorage("editorBackground") private var background = EditorBackground.charcoal.rawValue
+    @State private var sharing = false
+    @State private var info: InfoBox?
+    @State private var savingPreset = false
+    @State private var presetName = ""
+    /// The library's photos, for sharing several at once.
+    private let library: [Photo]
 
-    init(photo: Photo) {
+    init(photo: Photo, library: [Photo] = []) {
         _model = StateObject(wrappedValue: EditorModel(photo: photo))
+        self.library = library.isEmpty ? [photo] : library
     }
 
     /// Sideways, or after a tap on the photo, the photo is shown alone.
@@ -34,8 +42,23 @@ struct EditorView: View {
                 editScreen
             }
         }
-        .background(Color.black.ignoresSafeArea())
+        .background((EditorBackground(rawValue: background) ?? .charcoal).color.ignoresSafeArea())
+        .animation(.easeInOut(duration: 0.3), value: background)
         .overlay(alignment: .top) { toast }
+        .sheet(isPresented: $sharing) {
+            ShareView(photos: library, current: model.photo.id)
+                .presentationDragIndicator(.visible)
+        }
+        .sheet(item: $info) { box in
+            PhotoInfoView(info: box.info).presentationDetents([.medium, .large])
+        }
+        .alert("New preset", isPresented: $savingPreset) {
+            TextField("Name", text: $presetName)
+            Button("Cancel", role: .cancel) {}
+            Button("Save") { model.createPreset(presetName) }
+        } message: {
+            Text("Saves this photo's edits (but not crop, masks or spots) as a preset.")
+        }
         .statusBarHidden(!chrome)
         .animation(.easeInOut(duration: 0.22), value: chrome)
         .animation(.easeInOut(duration: 0.18), value: focused)
@@ -166,28 +189,81 @@ struct EditorView: View {
                 .accessibilityLabel(Text("Back"))
             Spacer()
             HStack(spacing: 0) {
-                Button { model.undo() } label: { Image(systemName: "arrow.uturn.backward").frame(width: 44, height: 44) }
+                Button { model.undo() } label: { Image(systemName: "arrow.uturn.backward").frame(width: 42, height: 44) }
                     .disabled(!model.canUndo)
                     .accessibilityLabel(Text("Undo"))
-                Button { model.redo() } label: { Image(systemName: "arrow.uturn.forward").frame(width: 44, height: 44) }
+                Button { model.redo() } label: { Image(systemName: "arrow.uturn.forward").frame(width: 42, height: 44) }
                     .disabled(!model.canRedo)
                     .accessibilityLabel(Text("Redo"))
             }
             .padding(.horizontal, 4)
             .latentGlass(in: Capsule(), interactive: true)
-            Menu {
-                Button { model.auto() } label: { Label("Auto settings", systemImage: "wand.and.stars") }
-                Toggle(isOn: $showHistogram) { Label("Show histogram", systemImage: "chart.bar.xaxis") }
-                Button(role: .destructive) { model.resetAll() } label: { Label("Reset all edits", systemImage: "arrow.counterclockwise") }
-            } label: {
-                glassIcon("ellipsis")
+            HStack(spacing: 0) {
+                Button { sharing = true } label: { Image(systemName: "square.and.arrow.up").frame(width: 42, height: 44) }
+                    .accessibilityLabel(Text("Share"))
+                Button { model.saveToPhotos() } label: {
+                    Group {
+                        if model.saving {
+                            ProgressView().tint(.white)
+                        } else {
+                            Image(systemName: "square.and.arrow.down")
+                        }
+                    }
+                    .frame(width: 42, height: 44)
+                }
+                .disabled(model.saving)
+                .accessibilityLabel(Text("Save to Photos"))
             }
-            .accessibilityLabel(Text("More"))
+            .padding(.horizontal, 4)
+            .latentGlass(in: Capsule(), interactive: true)
+            moreMenu
         }
         .font(.system(size: 17, weight: .medium))
         .foregroundStyle(.white)
         .padding(.horizontal, 16)
         .frame(height: 52)
+    }
+
+    private var moreMenu: some View {
+        Menu {
+            ControlGroup {
+                Button { if let d = model.info() { info = InfoBox(info: d) } } label: { Label("Info", systemImage: "info.circle") }
+                Button { showHistogram.toggle() } label: {
+                    Label(showHistogram ? "Hide histogram" : "Histogram", systemImage: "chart.bar.xaxis")
+                }
+                Button { sharing = true } label: { Label("Export", systemImage: "square.and.arrow.up") }
+            }
+            Menu {
+                Toggle(isOn: $showHistogram) { Label("Histogram", systemImage: "chart.bar.xaxis") }
+                Picker(selection: $background) {
+                    ForEach(EditorBackground.allCases) { b in
+                        Text(b.label).tag(b.rawValue)
+                    }
+                } label: {
+                    Label("Background", systemImage: "square.fill.on.square")
+                }
+                .pickerStyle(.menu)
+            } label: {
+                Label("View options", systemImage: "eye")
+            }
+            Section {
+                Button { model.copySettings() } label: { Label("Copy edits", systemImage: "doc.on.doc") }
+                Button { model.pasteSettings() } label: { Label("Paste edits", systemImage: "doc.on.clipboard") }
+                    .disabled(!model.canPaste)
+                Button { model.applyPrevious() } label: { Label("Apply from previous photo", systemImage: "arrow.uturn.left.square") }
+                Button {
+                    presetName = ""
+                    savingPreset = true
+                } label: { Label("Create preset", systemImage: "plus.circle") }
+            }
+            Section {
+                Button { model.auto() } label: { Label("Auto settings", systemImage: "wand.and.stars") }
+                Button(role: .destructive) { model.resetAll() } label: { Label("Reset all edits", systemImage: "arrow.counterclockwise") }
+            }
+        } label: {
+            glassIcon("ellipsis")
+        }
+        .accessibilityLabel(Text("More"))
     }
 
     private func glassIcon(_ name: String, weight: Font.Weight = .medium) -> some View {
@@ -212,6 +288,7 @@ struct EditorView: View {
                         .interpolation(.high)
                         .allowedDynamicRange(model.showingHDR && !showingOriginal ? .high : .standard)
                         .scaledToFit()
+                        .shadow(color: .black.opacity(background == EditorBackground.black.rawValue ? 0 : 0.35), radius: 16, y: 6)
                         .frame(width: geo.size.width, height: geo.size.height)
                 } else {
                     ProgressView().tint(.white).frame(width: geo.size.width, height: geo.size.height)
@@ -1652,6 +1729,37 @@ struct AIModelsSheet: View {
         HStack(alignment: .top, spacing: 10) {
             Text("\(n)").font(.system(size: 13, weight: .bold)).frame(width: 22, height: 22).background(Circle().fill(Color.white.opacity(0.15)))
             Text(text).font(.system(size: 15))
+        }
+    }
+}
+
+/// A dictionary that a sheet can be shown for.
+struct InfoBox: Identifiable {
+    let id = UUID()
+    let info: [String: Any]
+}
+
+/// What surrounds the photo while editing.
+enum EditorBackground: String, CaseIterable, Identifiable {
+    case charcoal, gray, neutral, black, white
+    var id: String { rawValue }
+    var label: String {
+        switch self {
+        case .charcoal: return "Charcoal"
+        case .gray: return "Dark gray"
+        case .neutral: return "Neutral 18% gray"
+        case .black: return "Black"
+        case .white: return "White"
+        }
+    }
+    var color: Color {
+        switch self {
+        case .charcoal: return Color(red: 0.075, green: 0.078, blue: 0.086)
+        case .gray: return Color(white: 0.17)
+        // 18% reflectance is about 46% in sRGB: the grey a photo is judged against
+        case .neutral: return Color(white: 0.46)
+        case .black: return .black
+        case .white: return Color(white: 0.96)
         }
     }
 }

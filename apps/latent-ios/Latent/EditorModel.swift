@@ -550,6 +550,63 @@ final class EditorModel: ObservableObject {
     }
 
     @discardableResult
+    // MARK: export and settings between photos
+
+    /// Edits were copied in this session (the engine keeps them until the app quits).
+    private static var copied = false
+    @Published private(set) var canPaste = EditorModel.copied
+    /// A quick save is running.
+    @Published private(set) var saving = false
+
+    /// Save the photo to Photos with the export settings.
+    func saveToPhotos() {
+        guard !saving else { return }
+        saving = true
+        let id = photo.id
+        let settings = ExportPrefs.shared.settings
+        Task {
+            do {
+                let files = try await Exporter.run([id], settings: settings)
+                try await Exporter.saveToPhotos(files)
+                UINotificationFeedbackGenerator().notificationOccurred(.success)
+                toast = "Saved to Photos (\(settings.summary))"
+            } catch {
+                UINotificationFeedbackGenerator().notificationOccurred(.error)
+                toast = error.localizedDescription
+            }
+            saving = false
+        }
+    }
+
+    func copySettings() {
+        guard attempt("develop.copy") else { return }
+        Self.copied = true
+        canPaste = true
+        toast = "Edits copied (crop, masks and spots stay with this photo)"
+    }
+
+    func pasteSettings() {
+        guard attempt("develop.paste", ["ids": [photo.id]]) else { return }
+        afterBulkChange("Edits pasted")
+    }
+
+    func applyPrevious() {
+        guard attempt("develop.pastePrevious", ["ids": [photo.id]]) else { return }
+        afterBulkChange("Edits from the previous photo applied")
+    }
+
+    private func afterBulkChange(_ message: String) {
+        Thumbnails.shared.forgetPresets()
+        refresh()
+        render()
+        toast = message
+    }
+
+    /// The photo's file and camera details.
+    func info() -> [String: Any]? {
+        (try? Engine.shared.run("photo.inspect", ["id": photo.id])) as? [String: Any]
+    }
+
     private func attempt(_ name: String, _ params: [String: Any] = [:]) -> Bool {
         do {
             try Engine.shared.run(name, params)

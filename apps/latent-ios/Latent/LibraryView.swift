@@ -53,7 +53,7 @@ struct LibraryView: View {
                 }
             }
             .fullScreenCover(item: $open, onDismiss: { library.reload() }) { photo in
-                EditorView(photo: photo)
+                EditorView(photo: photo, library: library.photos)
             }
             .alert("Latent", isPresented: Binding(get: { library.notice != nil }, set: { if !$0 { library.notice = nil } })) {
                 Button("OK", role: .cancel) {}
