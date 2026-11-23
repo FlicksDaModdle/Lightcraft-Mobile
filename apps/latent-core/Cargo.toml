@@ -27,7 +27,8 @@ default = ["heif"]
 heif = ["lightcraft-codecs/heif"]
 
 [dependencies]
-lightcraft-engine = { workspace = true }
+# `sam`: AI masks (Sky, Subject, Background) with the SAM 3 model the user installs
+lightcraft-engine = { workspace = true, features = ["sam"] }
 lightcraft-codecs = { workspace = true }
 lightcraft-pipeline = { workspace = true }
 serde_json = { workspace = true }

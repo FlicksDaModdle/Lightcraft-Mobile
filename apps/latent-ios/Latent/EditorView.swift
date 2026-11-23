@@ -11,6 +11,8 @@ struct EditorView: View {
     @State private var newPresetName = ""
     @State private var renamingMask = false
     @State private var maskName = ""
+    @State private var describing = false
+    @State private var description = ""
     @State private var chromeHidden = false
     @State private var showingOriginal = false
     @State private var hold: Task<Void, Never>?
@@ -500,6 +502,9 @@ struct EditorView: View {
             HStack(spacing: 10) {
                 Text("Masks").font(.system(size: 17, weight: .semibold))
                 Spacer()
+                if model.aiBusy {
+                    ProgressView().tint(.white).scaleEffect(0.8)
+                }
                 if model.currentMask != nil {
                     Button { model.maskOverlay.toggle() } label: {
                         Image(systemName: model.maskOverlay ? "eye" : "eye.slash").font(.system(size: 15, weight: .semibold)).frame(width: 36, height: 32)
@@ -511,11 +516,21 @@ struct EditorView: View {
                     Button { model.addMask("linear") } label: { Label("Linear gradient", systemImage: "rectangle.split.1x2") }
                     Button { model.addMask("radial") } label: { Label("Radial gradient", systemImage: "circle.dashed") }
                     Divider()
-                    ForEach(["Subject", "Sky", "Background"], id: \.self) { k in
-                        Button {
-                            model.toast = "\(k) masks need the SAM 3 AI model (about 3.4 GB), which this build doesn't include."
-                        } label: { Label(k, systemImage: k == "Sky" ? "cloud.sun" : "person.crop.rectangle") }
-                    }
+                    Button { model.addMask("subject") } label: { Label("Subject", systemImage: "person.crop.rectangle") }
+                    Button { model.addMask("sky") } label: { Label("Sky", systemImage: "cloud.sun") }
+                    Button { model.addMask("background") } label: { Label("Background", systemImage: "photo") }
+                    Divider()
+                    Button { model.addAIMask("object") } label: { Label("Select object (AI)", systemImage: "hand.tap") }
+                    Button {
+                        model.refreshAIModel()
+                        if model.aiModel.installed {
+                            description = ""
+                            describing = true
+                        } else {
+                            model.showAIModels = true
+                        }
+                    } label: { Label("Describe (AI)\u{2026}", systemImage: "text.magnifyingglass") }
+                    Button { model.refreshAIModel(); model.showAIModels = true } label: { Label("AI models\u{2026}", systemImage: "cpu") }
                 } label: {
                     Label("Add", systemImage: "plus").font(.system(size: 14, weight: .medium))
                         .padding(.horizontal, 12)
@@ -585,6 +600,15 @@ struct EditorView: View {
                     ScrollView {
                         LazyVStack(spacing: 0) {
                             if m.kind == "brush" { brushControls }
+                            if m.kind == "object" {
+                                Picker("Taps", selection: $model.objectExclude) {
+                                    Text("Add").tag(false)
+                                    Text("Leave out").tag(true)
+                                }
+                                .pickerStyle(.segmented)
+                                .padding(.horizontal, 20)
+                                .padding(.vertical, 6)
+                            }
                             if m.kind == "radial" {
                                 maskShapeSlider("Feather", key: "feather", m: m, min: 0, max: 100)
                             }
@@ -615,6 +639,14 @@ struct EditorView: View {
             }
         }
         .padding(.bottom, 4)
+        .alert("Describe what to select", isPresented: $describing) {
+            TextField("For example: the car", text: $description)
+            Button("Cancel", role: .cancel) {}
+            Button("Select") { model.addAIMask("prompt", text: description) }
+        } message: {
+            Text("The AI model finds every match in the photo.")
+        }
+        .sheet(isPresented: $model.showAIModels) { AIModelsSheet(model: model) }
         .alert("Rename mask", isPresented: $renamingMask) {
             TextField("Name", text: $maskName)
             Button("Cancel", role: .cancel) {}
@@ -636,6 +668,10 @@ struct EditorView: View {
         case "brush": model.brushErase ? "Erasing: drag over the photo to take the mask away." : "Painting: drag over the photo to add to the mask."
         case "linear": "Drag across the photo: full effect where you start, none where you stop."
         case "radial": "Drag out from a centre to draw it; drag inside it to move it."
+        case "object": model.objectExclude ? "Tap parts to leave out of the selection." : "Tap what to select; tap again to add more of it."
+        case "sky": "Bright, smooth sky reaching the top of the photo, found without AI."
+        case "subject": "The photo's main subject, found without AI."
+        case "background": "Everything but the main subject, found without AI."
         default: m.kindLabel
         }
     }
@@ -1438,6 +1474,8 @@ struct MaskCanvas: View {
                 .onChanged { g in
                     guard let m = model.currentMask else { return }
                     switch m.kind {
+                    case "object":
+                        break
                     case "brush":
                         if stroke.isEmpty { model.beginMask("Brush") }
                         stroke.append(g.location)
@@ -1479,7 +1517,10 @@ struct MaskCanvas: View {
                         break
                     }
                 }
-                .onEnded { _ in
+                .onEnded { g in
+                    if model.currentMask?.kind == "object", hypot(g.translation.width, g.translation.height) < 10 {
+                        model.objectPoint(toMask(g.location))
+                    }
                     if !stroke.isEmpty {
                         model.brushStroke(stroke.map(toMask))
                         stroke = []
@@ -1524,6 +1565,20 @@ struct MaskCanvas: View {
                 .clipShape(Rectangle().path(in: fitted))
                 .shadow(color: .black.opacity(0.5), radius: 1.5)
             }
+        case "object":
+            let pts = (m.shape["hint"] as? [[String: Any]] ?? []).map { ($0, false) } + (m.shape["exclude"] as? [[String: Any]] ?? []).map { ($0, true) }
+            ZStack {
+                ForEach(Array(pts.enumerated()), id: \.offset) { _, e in
+                    let x = (e.0["x"] as? NSNumber)?.doubleValue ?? 0
+                    let y = (e.0["y"] as? NSNumber)?.doubleValue ?? 0
+                    Circle()
+                        .fill(e.1 ? Color.red : Color.green)
+                        .overlay(Circle().strokeBorder(Color.white, lineWidth: 2))
+                        .frame(width: 14, height: 14)
+                        .position(toView(CGPoint(x: x, y: y)))
+                }
+            }
+            .shadow(color: .black.opacity(0.5), radius: 1.5)
         case "radial":
             if let c = m.point("center") {
                 let vc = toView(c)
@@ -1541,6 +1596,62 @@ struct MaskCanvas: View {
             }
         default:
             EmptyView()
+        }
+    }
+}
+
+/// How to add the SAM 3 model for AI masks (Select object, Describe), and whether it is in place.
+struct AIModelsSheet: View {
+    @ObservedObject var model: EditorModel
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section {
+                    HStack {
+                        Image(systemName: model.aiModel.installed ? "checkmark.circle.fill" : "exclamationmark.circle")
+                            .foregroundStyle(model.aiModel.installed ? .green : .orange)
+                        Text(model.aiModel.installed ? "SAM 3 is installed" : "SAM 3 is not installed")
+                        Spacer()
+                        if model.aiModel.loaded { Text("Loaded").foregroundStyle(.secondary) }
+                    }
+                    Button("Check again") { model.refreshAIModel() }
+                } footer: {
+                    Text("Sky, Subject and Background work without it. Select object and Describe use it.")
+                }
+                Section("Add the model") {
+                    step(1, "On huggingface.co, open facebook/sam3 and accept Meta's licence (\(model.aiModel.license)).")
+                    step(2, "Download three files from it: model.safetensors (3.4 GB), vocab.json and merges.txt.")
+                    step(3, "In the Files app, open On My iPhone \u{203A} Latent \u{203A} Models \u{203A} SAM3, and move the three files there.")
+                    step(4, "Come back here and tap Check again.")
+                    if let url = URL(string: "shareddocuments://" + Engine.aiModelFolder.path) {
+                        Link(destination: url) { Label("Open the SAM3 folder in Files", systemImage: "folder") }
+                    }
+                    if let url = URL(string: "https://huggingface.co/facebook/sam3") {
+                        Link(destination: url) { Label("facebook/sam3 on Hugging Face", systemImage: "safari") }
+                    }
+                }
+                Section {
+                    Text("The model is Meta's, under its own licence, not Latent's; Latent only reads it from your phone. It needs about 3.5 GB of memory while it runs, so it suits phones with 8 GB (iPhone 15 Pro and later). The first selection after opening a photo takes longest.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                    if let url = model.aiModel.licenseURL {
+                        Link("Read the licence", destination: url).font(.footnote)
+                    }
+                }
+            }
+            .navigationTitle("AI models")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
+        }
+        .onAppear { model.refreshAIModel() }
+    }
+
+    private func step(_ n: Int, _ text: String) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            Text("\(n)").font(.system(size: 13, weight: .bold)).frame(width: 22, height: 22).background(Circle().fill(Color.white.opacity(0.15)))
+            Text(text).font(.system(size: 15))
         }
     }
 }

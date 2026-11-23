@@ -44,6 +44,13 @@ final class EditorModel: ObservableObject {
     @Published var brushSize = 0.04
     @Published var brushFeather = 50.0
     @Published var brushFlow = 100.0
+    /// Object masks: taps leave a part out instead of adding it.
+    @Published var objectExclude = false
+    /// AI work (an object or a description being found) is running.
+    @Published private(set) var aiBusy = false
+    @Published var aiModel = AIModelStatus()
+    @Published var showAIModels = false
+    private var poller: Task<Void, Never>?
     @Published var mixerBand = 0
     @Published var gradingRange = 0
     @Published private(set) var presets: [Preset] = []
@@ -144,6 +151,71 @@ final class EditorModel: ObservableObject {
             render()
         } catch {
             toast = error.localizedDescription
+        }
+    }
+
+    func refreshAIModel() {
+        aiModel = AIModelStatus((try? Engine.shared.run("segment.model.status")) ?? [:])
+    }
+
+    /// Masks that need the SAM 3 model: an object picked by tapping, or one described in words.
+    /// Without the model, the AI models screen explains how to add it.
+    func addAIMask(_ kind: String, text: String? = nil) {
+        refreshAIModel()
+        guard aiModel.installed else {
+            showAIModels = true
+            return
+        }
+        var p: [String: Any] = ["kind": kind]
+        if let text { p["text"] = text }
+        do {
+            let r = try Engine.shared.run("mask.add", p) as? [String: Any]
+            refresh()
+            if let id = (r?["activeMask"] as? NSNumber)?.uint32Value { selectedMask = id }
+            if kind == "object" { toast = "Tap what to select. The first selection loads the AI model, which takes a moment." }
+            if r?["pending"] as? Bool == true { toast = "Looking for \u{201C}\(text ?? "")\u{201D}\u{2026}" }
+            watchAI()
+        } catch {
+            toast = error.localizedDescription
+        }
+    }
+
+    /// A tap on the photo for the selected Object mask (mask coordinates).
+    func objectPoint(_ p: CGPoint) {
+        guard let id = selectedMask else { return }
+        do {
+            try Engine.shared.run("mask.objectPoint", ["id": id, "x": p.x, "y": p.y, "exclude": objectExclude])
+            refreshMasksOnly()
+            refreshHistory()
+            watchAI()
+        } catch {
+            toast = error.localizedDescription
+        }
+    }
+
+    /// Poll the engine while AI work runs, then show the result (or what went wrong).
+    func watchAI() {
+        aiBusy = true
+        poller?.cancel()
+        poller = Task { [weak self] in
+            var idle = 0
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 300_000_000)
+                guard let self else { return }
+                let r = await Task.detached { Engine.shared.poll() }.value
+                if r.changed {
+                    self.refreshMasksOnly()
+                    self.refreshHistory()
+                    self.render()
+                }
+                if let m = r.messages.last { self.toast = m }
+                idle = r.busy ? 0 : idle + 1
+                if idle >= 2 {
+                    self.aiBusy = false
+                    self.render()
+                    return
+                }
+            }
         }
     }
 

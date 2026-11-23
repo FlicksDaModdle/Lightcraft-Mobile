@@ -254,3 +254,29 @@ pub unsafe extern "C" fn latent_hdr_image_free(img: *mut LatentHdrImage) {
         drop(Box::from_raw(std::ptr::slice_from_raw_parts_mut(img.hist, img.hist_len)));
     }
 }
+
+/// Look for the SAM 3 model (AI masks) in `dir`.
+///
+/// # Safety
+/// `core` from [`latent_open`]; `dir` a NUL-terminated string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn latent_set_ai_model_dir(core: *const Core, dir: *const c_char) {
+    // SAFETY: as documented above
+    if let (Some(c), Some(d)) = (unsafe { self::core(core) }, unsafe { text(dir) }) {
+        c.set_ai_model_dir(Path::new(d));
+    }
+}
+
+/// Take in finished background work; returns `{"changed", "messages", "busy"}` (give it back
+/// with [`latent_string_free`]).
+///
+/// # Safety
+/// `core` from [`latent_open`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn latent_poll(core: *const Core) -> *mut c_char {
+    // SAFETY: as documented above
+    match unsafe { self::core(core) } {
+        Some(c) => give_string(c.poll()),
+        None => give_string(r#"{"changed":false,"messages":[],"busy":false}"#.to_string()),
+    }
+}

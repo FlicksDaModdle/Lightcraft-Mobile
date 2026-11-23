@@ -53,5 +53,10 @@ typedef struct LatentHdrImage {
 LatentHdrImage *latent_render_hdr(const LatentCore *core, uint64_t id, uint32_t max_w, uint32_t max_h);
 void latent_hdr_image_free(LatentHdrImage *img);
 
+// AI masks: where the SAM 3 model files are (model.safetensors, vocab.json, merges.txt).
+void latent_set_ai_model_dir(const LatentCore *core, const char *dir);
+// Take in finished background work: {"changed": bool, "messages": [...], "busy": bool}.
+char *latent_poll(const LatentCore *core);
+
 void latent_image_free(LatentImage *img);
 void latent_string_free(char *s);

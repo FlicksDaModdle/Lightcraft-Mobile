@@ -33,6 +33,25 @@ final class Engine: @unchecked Sendable {
         } else {
             problem = nil
         }
+        latent_set_ai_model_dir(core, Self.aiModelFolder.path)
+    }
+
+    /// Where the SAM 3 model files go: Documents/Models/SAM3, which the Files app shows as
+    /// On My iPhone › Latent › Models › SAM3.
+    static var aiModelFolder: URL {
+        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        let dir = docs.appendingPathComponent("Models/SAM3", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }
+
+    /// Take in finished background work: whether a mask changed, messages for the user, and
+    /// whether more is coming.
+    func poll() -> (changed: Bool, messages: [String], busy: Bool) {
+        guard let out = latent_poll(core) else { return (false, [], false) }
+        defer { latent_string_free(out) }
+        let d = (try? JSONSerialization.jsonObject(with: Data(String(cString: out).utf8))) as? [String: Any] ?? [:]
+        return (d["changed"] as? Bool ?? false, d["messages"] as? [String] ?? [], d["busy"] as? Bool ?? false)
     }
 
     /// Run an engine command and return its result (a JSON value as Foundation objects).

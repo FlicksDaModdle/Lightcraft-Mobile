@@ -364,6 +364,8 @@ struct MaskItem: Identifiable {
         case "sky": "Sky"
         case "subject": "Subject"
         case "background": "Background"
+        case "object": "Object"
+        case "prompt": "Described"
         case "luminanceRange": "Luminance range"
         case "colorRange": "Color range"
         default: kind.capitalized
@@ -391,4 +393,28 @@ struct MaskItem: Identifiable {
     }
 
     func number(_ key: String, _ fallback: Double) -> Double { (shape[key] as? NSNumber)?.doubleValue ?? fallback }
+}
+
+/// The AI mask model's state (`segment.model.status`).
+struct AIModelStatus {
+    var available = false
+    var installed = false
+    var loaded = false
+    var busy = false
+    var license = "SAM License"
+    var licenseURL: URL?
+    var folder = ""
+
+    init() {}
+
+    init(_ json: Any) {
+        let d = json as? [String: Any] ?? [:]
+        available = d["available"] as? Bool ?? false
+        installed = d["installed"] as? Bool ?? false
+        loaded = d["loaded"] as? Bool ?? false
+        busy = (d["busy"] as? Bool ?? false) || (d["analyzing"] as? Bool ?? false)
+        license = d["license"] as? String ?? license
+        licenseURL = (d["licenseUrl"] as? String).flatMap(URL.init(string:))
+        folder = d["dir"] as? String ?? ""
+    }
 }

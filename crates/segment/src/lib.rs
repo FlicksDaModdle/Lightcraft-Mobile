@@ -8,7 +8,7 @@
 //! The expensive part, the 32-layer ViT over the 1008 × 1008 input, runs once per image
 //! ([`Sam3::encode`]); each click or prompt then reuses the [`Encoded`] features.
 //!
-//! On macOS the model runs on the GPU through Metal; elsewhere (for now) on the CPU. The
+//! On macOS and iOS the model runs on the GPU through Metal; elsewhere (for now) on the CPU. The
 //! weights are not part of LightCraft: they are the `facebook/sam3` checkpoint (SAM License),
 //! read from a directory the user downloads them to ([`Sam3::load`]).
 //!
@@ -94,14 +94,14 @@ pub fn is_model_dir(dir: &Path) -> bool {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-/// Whether [`best_device`] can be a GPU in this build (Metal on macOS). Where it can, a caller that
+/// Whether [`best_device`] can be a GPU in this build (Metal on macOS and iOS). Where it can, a caller that
 /// sees the model fail there can load it again with [`Sam3::load_cpu`].
-pub const GPU_BUILD: bool = cfg!(target_os = "macos");
+pub const GPU_BUILD: bool = cfg!(any(target_os = "macos", target_os = "ios"));
 
 #[cfg(not(target_arch = "wasm32"))]
-/// The best device here: Metal on macOS (when a GPU is available), else the CPU.
+/// The best device here: Metal on macOS and iOS (when a GPU is available), else the CPU.
 pub fn best_device() -> Device {
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
     if let Ok(d) = Device::new_metal(0) {
         return d;
     }

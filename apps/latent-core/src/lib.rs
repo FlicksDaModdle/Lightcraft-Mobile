@@ -68,7 +68,25 @@ impl Core {
                 }
             }
         };
+        let mut session = session;
+        // AI mask work runs on the engine's own thread; `poll` takes the results in
+        session.segmenter.background = true;
         (Core { session: Mutex::new(session) }, problem)
+    }
+
+    /// Where the SAM 3 model (AI masks) is looked for: a folder holding `model.safetensors`,
+    /// `vocab.json` and `merges.txt`.
+    pub fn set_ai_model_dir(&self, dir: &Path) {
+        self.lock().segmenter.dir = Some(dir.to_path_buf());
+    }
+
+    /// Take in finished background work (AI mask selections) and say what happened:
+    /// `{"changed": bool, "messages": [...], "busy": bool}`. Cheap when nothing is pending.
+    pub fn poll(&self) -> String {
+        let mut s = self.lock();
+        let polled = s.segment_poll();
+        let busy = s.segmenter.busy() || s.segmenter.pending_clicks().is_some();
+        json!({"changed": polled.changed, "messages": polled.messages, "busy": busy}).to_string()
     }
 
     /// An in-memory session with the demo photos (tests, previews).
@@ -344,6 +362,25 @@ mod tests {
         let mid = m["activeMask"].as_u64().unwrap_or(0) as u32;
         let tinted = core.render_mask(id, 96, 96, mid).map(|i| i.rgba).unwrap_or_default();
         assert!(!tinted.is_empty() && tinted != plain, "the mask overlay should tint the photo");
+    }
+
+    #[test]
+    fn ai_masks_say_the_model_is_missing_until_it_is_installed() {
+        // Sky, Subject and Background need no model; picking an object or describing one does
+        let core = Core::demo();
+        let dir = std::env::temp_dir().join(format!("latent-no-sam3-{}", std::process::id()));
+        core.set_ai_model_dir(&dir);
+        let status = ok(&core.execute("segment.model.status", ""));
+        assert_eq!(status["available"], json!(true), "this build has AI masks: {status}");
+        assert_eq!(status["installed"], json!(false), "{status}");
+        let photos = ok(&core.execute("catalog.query", ""));
+        let id = photos["photos"][0]["id"].as_u64().unwrap_or(0);
+        ok(&core.execute("library.select", &json!({"ids": [id], "active": id}).to_string()));
+        ok(&core.execute("mask.add", r#"{"kind":"sky"}"#));
+        let object: Value = serde_json::from_str(&core.execute("mask.add", r#"{"kind":"object"}"#)).unwrap_or_default();
+        assert!(object["error"].is_string(), "an object mask needs the model: {object}");
+        let polled: Value = serde_json::from_str(&core.poll()).unwrap_or_default();
+        assert_eq!(polled["busy"], json!(false), "{polled}");
     }
 
     #[test]
