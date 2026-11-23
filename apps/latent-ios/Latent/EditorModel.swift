@@ -549,7 +549,6 @@ final class EditorModel: ObservableObject {
         render()
     }
 
-    @discardableResult
     // MARK: export and settings between photos
 
     /// Edits were copied in this session (the engine keeps them until the app quits).
@@ -607,6 +606,7 @@ final class EditorModel: ObservableObject {
         (try? Engine.shared.run("photo.inspect", ["id": photo.id])) as? [String: Any]
     }
 
+    @discardableResult
     private func attempt(_ name: String, _ params: [String: Any] = [:]) -> Bool {
         do {
             try Engine.shared.run(name, params)
