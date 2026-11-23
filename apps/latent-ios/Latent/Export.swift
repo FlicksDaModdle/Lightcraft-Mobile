@@ -172,20 +172,36 @@ struct ShareView: View {
     private var allChosen: Bool { !photos.isEmpty && chosen.count == photos.count }
 
     var body: some View {
-        VStack(spacing: 0) {
-            header
-            strip
-            Divider().overlay(Theme.separator).padding(.horizontal, 16)
-            actions
-            Divider().overlay(Theme.separator).padding(.horizontal, 16)
-            rows
-            Spacer(minLength: 0)
+        NavigationStack {
+            ScrollView {
+                VStack(spacing: 0) {
+                    strip
+                    actions
+                    rows
+                }
+                .padding(.bottom, 24)
+            }
+            .navigationTitle(chosen.count <= 1 ? "Share photo" : "Share \(chosen.count) photos")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button { dismiss() } label: { Image(systemName: "xmark") }
+                        .accessibilityLabel(Text("Close"))
+                }
+                if photos.count > 1 {
+                    ToolbarItem(placement: .primaryAction) {
+                        Button(allChosen ? "Just this" : "Select all") {
+                            UISelectionFeedbackGenerator().selectionChanged()
+                            withAnimation(.glass) { chosen = allChosen ? [current] : Set(photos.map(\.id)) }
+                        }
+                    }
+                }
+            }
         }
-        .background(Theme.surface.ignoresSafeArea())
         .overlay { if let working { progress(working) } }
         .overlay(alignment: .bottom) {
             if let notice {
-                Text(notice)
+                Label(notice, systemImage: notice.hasPrefix("Saved") || notice.hasPrefix("Copied") ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
                     .font(.system(size: 15, weight: .semibold))
                     .multilineTextAlignment(.center)
                     .padding(.horizontal, 18)
@@ -193,12 +209,11 @@ struct ShareView: View {
                     .latentGlass(in: Capsule())
                     .padding(.bottom, 24)
                     .padding(.horizontal, 24)
-                    .transition(.move(edge: .bottom).combined(with: .opacity))
-                    .accessibilityAddTraits(.updatesFrequently)
+                    .transition(.scale(scale: 0.7, anchor: .bottom).combined(with: .opacity))
             }
         }
-        .animation(.easeInOut(duration: 0.2), value: notice)
-        .animation(.easeInOut(duration: 0.2), value: working)
+        .animation(.glass, value: notice)
+        .animation(.glass, value: working)
         .sheet(item: $sharing) { f in ActivityView(items: f.urls).ignoresSafeArea() }
         .sheet(item: $filing) { f in FilesExporter(urls: f.urls).ignoresSafeArea() }
         .sheet(isPresented: Binding(get: { options != nil }, set: { if !$0 { options = nil } })) {
@@ -215,37 +230,6 @@ struct ShareView: View {
         .preferredColorScheme(.dark)
     }
 
-    private var header: some View {
-        HStack {
-            Button { dismiss() } label: {
-                Image(systemName: "xmark")
-                    .font(.system(size: 17, weight: .semibold))
-                    .frame(width: 44, height: 44)
-                    .latentGlass(in: Circle(), interactive: true)
-            }
-            .accessibilityLabel(Text("Close"))
-            Spacer()
-            Text(chosen.count <= 1 ? "Share photo" : "Share \(chosen.count) photos")
-                .font(.system(size: 18, weight: .semibold))
-                .contentTransition(.numericText())
-            Spacer()
-            Button {
-                withAnimation(.snappy) { chosen = allChosen ? [current] : Set(photos.map(\.id)) }
-            } label: {
-                Text(allChosen ? "Just this" : "Select all")
-                    .font(.system(size: 15, weight: .medium))
-                    .padding(.horizontal, 14)
-                    .frame(height: 36)
-                    .overlay(Capsule().strokeBorder(Color.white.opacity(0.22)))
-            }
-            .disabled(photos.count < 2)
-            .opacity(photos.count < 2 ? 0 : 1)
-        }
-        .foregroundStyle(.white)
-        .padding(.horizontal, 16)
-        .padding(.top, 14)
-    }
-
     private var strip: some View {
         ScrollViewReader { proxy in
             ScrollView(.horizontal, showsIndicators: false) {
@@ -255,12 +239,11 @@ struct ShareView: View {
                     }
                 }
                 .padding(.horizontal, 40)
-                .frame(maxHeight: .infinity)
             }
             .onAppear { proxy.scrollTo(current, anchor: .center) }
         }
-        .frame(maxHeight: 400)
-        .padding(.vertical, 12)
+        .frame(height: 380)
+        .padding(.top, 8)
     }
 
     private func cell(_ photo: Photo) -> some View {
@@ -281,13 +264,15 @@ struct ShareView: View {
                 }
                 .frame(maxWidth: 260, maxHeight: 300)
                 .padding(4)
-                .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous).strokeBorder(on ? Theme.accent : .clear, lineWidth: 3))
+                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(on ? Theme.accent : .clear, lineWidth: 3).padding(-2))
                 .scaleEffect(on ? 1 : 0.94)
                 .shadow(color: .black.opacity(0.4), radius: 12, y: 6)
-                Image(systemName: on ? "checkmark.square.fill" : "square")
+                Image(systemName: on ? "checkmark.circle.fill" : "circle")
                     .font(.system(size: 26, weight: .regular))
                     .symbolRenderingMode(.palette)
                     .foregroundStyle(on ? Color.white : Theme.secondaryText, on ? Theme.accent : .clear)
+                    .contentTransition(.symbolEffect(.replace))
             }
         }
         .buttonStyle(.plain)
@@ -303,57 +288,72 @@ struct ShareView: View {
 
     private var actions: some View {
         HStack(alignment: .top, spacing: 0) {
-            circle("Share", "square.and.arrow.up", tint: Theme.accent) { send(to: .share) }
+            circle("Share", "square.and.arrow.up", prominent: true) { send(to: .share) }
             circle("Export as\u{2026}", "ellipsis") { options = .share }
             circle("Copy", "doc.on.doc") { send(to: .copy) }
         }
-        .padding(.vertical, 16)
+        .latentGlassGroup(spacing: 20)
+        .padding(.vertical, 18)
         .disabled(chosen.isEmpty || working != nil)
     }
 
-    private func circle(_ title: String, _ icon: String, tint: Color = .white, action: @escaping () -> Void) -> some View {
+    private func circle(_ title: String, _ icon: String, prominent: Bool = false, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             VStack(spacing: 10) {
                 Image(systemName: icon)
                     .font(.system(size: 22, weight: .medium))
-                    .foregroundStyle(tint)
+                    .foregroundStyle(.white)
                     .frame(width: 64, height: 64)
-                    .background(Circle().fill(Color.black.opacity(0.55)))
-                    .overlay(Circle().strokeBorder(Color.white.opacity(0.1)))
-                Text(title).font(.system(size: 14)).foregroundStyle(.white)
+                    .latentGlass(in: Circle(), tint: prominent ? Theme.accent.opacity(0.85) : nil, interactive: true)
+                Text(title).font(.system(size: 13, weight: .medium)).foregroundStyle(.white)
             }
             .frame(maxWidth: .infinity)
         }
         .buttonStyle(.plain)
     }
 
+    /// The ways out, as one rounded glass group like a Settings section.
     private var rows: some View {
         VStack(spacing: 0) {
             HStack(spacing: 0) {
                 row("Save to Photos", prefs.settings.summary, "square.and.arrow.down") { send(to: .photos) }
                 Button { options = .photos } label: {
-                    Image(systemName: "gearshape.fill").font(.system(size: 20)).frame(width: 52, height: 52)
+                    Image(systemName: "gearshape.fill")
+                        .font(.system(size: 17))
+                        .frame(width: 40, height: 40)
+                        .latentGlass(in: Circle(), interactive: true)
                 }
                 .foregroundStyle(.white)
+                .padding(.trailing, 12)
                 .accessibilityLabel(Text("Export settings"))
             }
+            divider
             row("Save to Files", "On this iPhone, iCloud Drive or another app", "folder") { send(to: .files) }
+            divider
             row("Add watermark and share\u{2026}", prefs.settings.watermark ? "\u{201C}\(prefs.settings.watermarkText)\u{201D}" : nil, "signature") {
                 prefs.settings.watermark = true
                 options = .share
             }
         }
-        .padding(.horizontal, 8)
-        .padding(.top, 8)
+        .latentGlass(in: RoundedRectangle(cornerRadius: 26, style: .continuous))
+        .padding(.horizontal, 16)
         .disabled(chosen.isEmpty || working != nil)
+    }
+
+    private var divider: some View {
+        Rectangle().fill(Theme.separator).frame(height: 1).padding(.leading, 62)
     }
 
     private func row(_ title: String, _ detail: String?, _ icon: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            HStack(spacing: 18) {
-                Image(systemName: icon).font(.system(size: 21)).frame(width: 30)
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(title).font(.system(size: 18))
+            HStack(spacing: 14) {
+                Image(systemName: icon)
+                    .font(.system(size: 17, weight: .medium))
+                    .foregroundStyle(.white)
+                    .frame(width: 32, height: 32)
+                    .background(Theme.accent.opacity(0.9), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title).font(.system(size: 17))
                     if let detail, !detail.isEmpty {
                         Text(detail).font(.system(size: 13)).foregroundStyle(Theme.secondaryText).lineLimit(1)
                     }
@@ -361,8 +361,8 @@ struct ShareView: View {
                 Spacer(minLength: 0)
             }
             .foregroundStyle(.white)
-            .padding(.horizontal, 12)
-            .frame(minHeight: 64)
+            .padding(.horizontal, 16)
+            .frame(minHeight: 60)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -439,57 +439,41 @@ struct ExportOptionsView: View {
 
     var body: some View {
         NavigationStack {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 22) {
-                    field("File type", value: settings.formatLabel) {
-                        Picker("File type", selection: $settings.format) {
-                            ForEach(ExportSettings.formats, id: \.id) { Text($0.label).tag($0.id) }
-                        }
+            Form {
+                Section {
+                    Picker("File type", selection: $settings.format) {
+                        ForEach(ExportSettings.formats, id: \.id) { Text($0.label).tag($0.id) }
                     }
-                    field("Dimensions", value: ExportSettings.sizeLabel(settings.longEdge)) {
-                        Picker("Dimensions", selection: $settings.longEdge) {
-                            ForEach(ExportSettings.sizes, id: \.self) { Text(ExportSettings.sizeLabel($0)).tag($0) }
-                        }
+                    Picker("Dimensions", selection: $settings.longEdge) {
+                        ForEach(ExportSettings.sizes, id: \.self) { Text(ExportSettings.sizeLabel($0)).tag($0) }
                     }
                     if settings.lossy {
-                        field("Quality", value: "\(settings.quality)%") {
-                            Picker("Quality", selection: $settings.quality) {
-                                ForEach(ExportSettings.qualities, id: \.self) { Text("\($0)%").tag($0) }
-                            }
+                        Picker("Quality", selection: $settings.quality) {
+                            ForEach(ExportSettings.qualities, id: \.self) { Text("\($0)%").tag($0) }
                         }
-                        .transition(.opacity.combined(with: .move(edge: .top)))
                     }
-                    separator
-                    toggle("HDR", isOn: $settings.hdr, note: hdrNote)
-                    separator
-                    toggle("Watermark", isOn: $settings.watermark, note: settings.watermark ? nil : "Your name or a short line in the corner of each photo.")
-                    if settings.watermark {
-                        TextField("Watermark text", text: $settings.watermarkText, prompt: Text("\u{00A9} Your name").foregroundColor(Theme.secondaryText))
-                            .textInputAutocapitalization(.words)
-                            .padding(.horizontal, 16)
-                            .frame(height: 50)
-                            .background(fieldBackground)
-                            .transition(.opacity)
-                    }
-                    separator
-                    NavigationLink {
-                        MoreExportOptions(settings: $settings)
-                    } label: {
-                        HStack {
-                            Text("More options").font(.system(size: 18))
-                            Spacer()
-                            Image(systemName: "chevron.right").foregroundStyle(Theme.secondaryText)
-                        }
-                        .foregroundStyle(.white)
-                        .frame(height: 44)
-                        .contentShape(Rectangle())
-                    }
-                    separator
                 }
-                .padding(20)
-                .animation(.easeInOut(duration: 0.2), value: settings)
+                Section {
+                    Toggle("HDR", isOn: $settings.hdr)
+                } footer: {
+                    Text(hdrNote)
+                }
+                Section {
+                    Toggle("Watermark", isOn: $settings.watermark)
+                    if settings.watermark {
+                        TextField("Watermark text", text: $settings.watermarkText, prompt: Text("\u{00A9} Your name"))
+                            .textInputAutocapitalization(.words)
+                    }
+                } footer: {
+                    Text("Your name or a short line in the bottom corner of each photo.")
+                }
+                Section {
+                    NavigationLink("More options") { MoreExportOptions(settings: $settings) }
+                }
             }
-            .background(Theme.surface.ignoresSafeArea())
+            .pickerStyle(.menu)
+            .tint(Theme.accent)
+            .animation(.glass, value: settings)
             .navigationTitle(count == 1 ? "Export as\u{2026}" : "Export as\u{2026} (\(count))")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -498,11 +482,9 @@ struct ExportOptionsView: View {
                         .accessibilityLabel(Text("Cancel"))
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button(action: confirm) {
-                        Image(systemName: "checkmark").fontWeight(.semibold)
-                    }
-                    .tint(Theme.accent)
-                    .accessibilityLabel(Text("Export"))
+                    Button(action: confirm) { Image(systemName: "checkmark") }
+                        .latentProminentGlass()
+                        .accessibilityLabel(Text("Export"))
                 }
             }
         }
@@ -517,44 +499,6 @@ struct ExportOptionsView: View {
         }
     }
 
-    private var separator: some View { Rectangle().fill(Theme.separator).frame(height: 1) }
-
-    private var fieldBackground: some View {
-        RoundedRectangle(cornerRadius: 12, style: .continuous)
-            .fill(Color.white.opacity(0.05))
-            .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(Color.white.opacity(0.14)))
-    }
-
-    private func field<Content: View>(_ title: String, value: String, @ViewBuilder menu: () -> Content) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(title).font(.system(size: 15)).foregroundStyle(Theme.secondaryText)
-            Menu {
-                menu()
-            } label: {
-                HStack {
-                    Text(value).foregroundStyle(.white)
-                    Spacer()
-                    Image(systemName: "chevron.down").font(.system(size: 14, weight: .semibold)).foregroundStyle(Theme.secondaryText)
-                }
-                .font(.system(size: 17))
-                .padding(.horizontal, 16)
-                .frame(height: 52)
-                .background(fieldBackground)
-                .contentShape(Rectangle())
-            }
-            .accessibilityLabel(Text("\(title): \(value)"))
-        }
-    }
-
-    private func toggle(_ title: String, isOn: Binding<Bool>, note: String?) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Toggle(isOn: isOn) { Text(title).font(.system(size: 18)) }
-                .tint(Theme.accent)
-            if let note {
-                Text(note).font(.system(size: 14)).foregroundStyle(Theme.secondaryText).fixedSize(horizontal: false, vertical: true)
-            }
-        }
-    }
 }
 
 /// Metadata, location and colour space.
@@ -583,8 +527,7 @@ private struct MoreExportOptions: View {
                 Text("sRGB looks right everywhere. Display P3 keeps the wider colours iPhone screens show.")
             }
         }
-        .scrollContentBackground(.hidden)
-        .background(Theme.surface.ignoresSafeArea())
+        .tint(Theme.accent)
         .navigationTitle("More options")
         .navigationBarTitleDisplayMode(.inline)
     }
@@ -636,8 +579,6 @@ struct PhotoInfoView: View {
                     Section("Location") { line("Place", place) }
                 }
             }
-            .scrollContentBackground(.hidden)
-            .background(Theme.surface.ignoresSafeArea())
             .navigationTitle("Info")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {

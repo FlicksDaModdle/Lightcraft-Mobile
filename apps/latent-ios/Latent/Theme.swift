@@ -83,6 +83,22 @@ extension View {
     }
 }
 
+extension View {
+    /// The filled, tinted glass button for a sheet's confirm action on iOS 26.
+    @ViewBuilder
+    func latentProminentGlass() -> some View {
+        #if compiler(>=6.2)
+        if #available(iOS 26.0, *) {
+            self.buttonStyle(.glassProminent).tint(Theme.accent)
+        } else {
+            self.fontWeight(.semibold).tint(Theme.accent)
+        }
+        #else
+        self.fontWeight(.semibold).tint(Theme.accent)
+        #endif
+    }
+}
+
 extension Animation {
     /// The springy motion glass moves with.
     static let glass = Animation.spring(response: 0.38, dampingFraction: 0.78)
