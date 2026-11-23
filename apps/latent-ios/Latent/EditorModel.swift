@@ -776,6 +776,53 @@ final class EditorModel: ObservableObject {
         render()
     }
 
+    // MARK: blur
+
+    /// Lens blur is on, and what stays sharp: a mask, or (none) the subject or a fixed shape.
+    @Published private(set) var blurOn = false
+    @Published private(set) var focusMask: UInt32?
+    @Published private(set) var focusShape = "auto"
+
+    private func mergeBlur(_ patch: [String: Any], _ label: String) {
+        if attempt("develop.merge", ["settings": ["lens_blur": patch], "label": label]) {
+            refresh()
+            render()
+        }
+    }
+
+    func setBlur(_ on: Bool) {
+        var patch: [String: Any] = ["enabled": on]
+        // switched on with nothing set yet: a blur you can see
+        if on, (controls["lensBlur.amount"]?.value ?? 0) == 0 { patch["amount"] = 50.0 }
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        mergeBlur(patch, "Lens Blur")
+    }
+
+    /// Keep the subject (shape "auto"), a fixed shape ("round", "wide", "tall") or a mask sharp.
+    func setFocus(shape: String? = nil, mask: UInt32? = nil) {
+        var patch: [String: Any] = ["focus_mask": mask.map { NSNumber(value: $0) } ?? NSNull()]
+        if let shape { patch["shape"] = shape }
+        mergeBlur(patch, "Lens Blur Focus")
+    }
+
+    /// Select the subject with the AI model, where the camera focused if the file says, and keep it sharp.
+    func findBlurSubject() {
+        refreshAIModel()
+        guard aiModel.installed else {
+            showAIModels = true
+            return
+        }
+        do {
+            try Engine.shared.run("lensBlur.findSubject")
+            toast = "Finding the subject\u{2026}"
+            refresh()
+            watchAI()
+            render()
+        } catch {
+            toast = error.localizedDescription
+        }
+    }
+
     // MARK: zoom
 
     /// Two fingers are on the photo: drawing tools stop so the pinch doesn't paint.
@@ -1001,6 +1048,10 @@ final class EditorModel: ObservableObject {
             readCrop(s)
             masks = (s["masks"] as? [Any] ?? []).compactMap(MaskItem.init)
             spots = (s["spots"] as? [Any] ?? []).compactMap(SpotItem.init)
+            let lb = s["lens_blur"] as? [String: Any] ?? [:]
+            blurOn = lb["enabled"] as? Bool ?? false
+            focusMask = (lb["focus_mask"] as? NSNumber)?.uint32Value
+            focusShape = lb["shape"] as? String ?? "auto"
             if let i = selectedSpot, !spots.indices.contains(i) { selectedSpot = nil }
             if let sel = selectedMask, !masks.contains(where: { $0.id == sel }) { selectedMask = nil }
             let h = s["hdr"] as? [String: Any]

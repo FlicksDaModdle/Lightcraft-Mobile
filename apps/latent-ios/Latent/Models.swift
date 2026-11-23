@@ -139,12 +139,12 @@ struct Control: Identifiable, Equatable {
 
 /// The editing tools along the bottom of the editor.
 enum Tool: String, CaseIterable, Identifiable {
-    case light, color, effects, detail, optics, geometry
+    case light, color, blur, effects, detail, optics, geometry
     /// Steps inside Color, not in the strip.
     case mixer, grading, curve
 
     /// The tools along the strip.
-    static let strip: [Tool] = [.light, .color, .effects, .detail, .optics, .geometry]
+    static let strip: [Tool] = [.light, .color, .blur, .effects, .detail, .optics, .geometry]
 
     var id: String { rawValue }
 
@@ -152,6 +152,7 @@ enum Tool: String, CaseIterable, Identifiable {
         switch self {
         case .light: "Light"
         case .color: "Color"
+        case .blur: "Blur"
         case .effects: "Effects"
         case .detail: "Detail"
         case .optics: "Optics"
@@ -166,6 +167,7 @@ enum Tool: String, CaseIterable, Identifiable {
         switch self {
         case .light: "sun.max"
         case .color: "thermometer.medium"
+        case .blur: "drop"
         case .effects: "camera.filters"
         case .detail: "triangle"
         case .optics: "camera.aperture"
@@ -181,6 +183,7 @@ enum Tool: String, CaseIterable, Identifiable {
         switch self {
         case .light: ["light"]
         case .color: ["color"]
+        case .blur: ["lensBlur"]
         case .effects: ["effects", "vignette", "grain"]
         case .detail: ["detail"]
         case .optics: ["optics"]

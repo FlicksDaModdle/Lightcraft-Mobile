@@ -23,6 +23,8 @@ struct EditorView: View {
     @State private var pan: CGSize = .zero
     @State private var pinchStart: (zoom: CGFloat, pan: CGSize)?
     @State private var panStart: CGSize?
+    /// While zoomed in Masks or Remove: one finger moves the photo instead of drawing.
+    @State private var moving = false
     @AppStorage("editorBackground") private var background = EditorBackground.photo.rawValue
     /// The colour taken from the photo, for the "From photo" background.
     @State private var ambient: Color?
@@ -378,9 +380,11 @@ struct EditorView: View {
                             .frame(width: geo.size.width, height: geo.size.height)
                         if model.mode == .masks && chrome, model.currentMask != nil {
                             MaskCanvas(model: model, imageSize: CGSize(width: img.width, height: img.height), size: geo.size, zoom: zoom)
+                                .allowsHitTesting(!moving)
                         }
                         if model.mode == .remove && chrome {
                             SpotCanvas(model: model, imageSize: CGSize(width: img.width, height: img.height), size: geo.size, zoom: zoom)
+                                .allowsHitTesting(!moving)
                         }
                     }
                     .scaleEffect(zoom)
@@ -400,20 +404,32 @@ struct EditorView: View {
                     .transition(.opacity)
                 }
                 if zoom > 1.01 {
-                    Button { resetZoom() } label: {
-                        Text("\(Int((zoom * 100).rounded()))%")
-                            .font(.system(size: 13, weight: .semibold))
-                            .monospacedDigit()
-                            .contentTransition(.numericText())
-                            .padding(.horizontal, 12)
-                            .frame(height: 30)
-                            .latentGlass(in: Capsule(), interactive: true)
+                    HStack(spacing: 6) {
+                        if drawsOnPhoto {
+                            Button { withAnimation(.glass) { moving.toggle() } } label: {
+                                Image(systemName: moving ? "hand.raised.fill" : "hand.raised")
+                                    .font(.system(size: 13, weight: .semibold))
+                                    .frame(width: 34, height: 30)
+                                    .latentGlass(in: Capsule(), tint: moving ? Theme.accent : nil, interactive: true)
+                            }
+                            .accessibilityLabel(Text(moving ? "Stop moving the photo, draw again" : "Move the photo with one finger"))
+                        }
+                        Button { resetZoom() } label: {
+                            Text("\(Int((zoom * 100).rounded()))%")
+                                .font(.system(size: 13, weight: .semibold))
+                                .monospacedDigit()
+                                .contentTransition(.numericText())
+                                .padding(.horizontal, 12)
+                                .frame(height: 30)
+                                .latentGlass(in: Capsule(), interactive: true)
+                        }
+                        .accessibilityLabel(Text("Zoom \(Int((zoom * 100).rounded())) percent. Fit the photo"))
                     }
                     .foregroundStyle(.white)
+                    .latentGlassGroup()
                     .frame(maxWidth: .infinity, alignment: .trailing)
                     .padding(.trailing, 12)
                     .padding(.top, 8)
-                    .accessibilityLabel(Text("Zoom \(Int((zoom * 100).rounded())) percent. Fit the photo"))
                     .transition(.opacity.combined(with: .scale(scale: 0.8)))
                 }
                 if showHistogram && chrome && model.tool != .curve && model.mode != .crop && model.mode != .masks && model.mode != .remove && !focused && zoom <= 1.01 {
@@ -452,17 +468,22 @@ struct EditorView: View {
             .contentShape(Rectangle())
             .clipped()
             .simultaneousGesture(pinch(geo.size), including: model.mode == .crop ? .subviews : .all)
-            .simultaneousGesture(panWhenZoomed(geo.size), including: zoom > 1.01 && !drawsOnPhoto ? .all : .subviews)
-            .onTapGesture(count: 2) {
+            .simultaneousGesture(panWhenZoomed(geo.size), including: zoom > 1.01 && (!drawsOnPhoto || moving) ? .all : .subviews)
+            .onTapGesture(count: 2) { at in
                 guard model.mode != .crop else { return }
                 withAnimation(.glass) {
                     if zoom > 1.01 {
                         zoom = 1
                         pan = .zero
                     } else {
-                        zoom = 2.5
+                        // zoom in on the tapped point
+                        let z: CGFloat = 2.5
+                        let c = CGPoint(x: geo.size.width / 2, y: geo.size.height / 2)
+                        zoom = z
+                        pan = clampPan(CGSize(width: -(at.x - c.x) * (z - 1), height: -(at.y - c.y) * (z - 1)), geo.size, z)
                     }
                 }
+                if zoom <= 1.01 { moving = false }
                 model.zoomChanged(zoom)
             }
             .onTapGesture { if !drawsOnPhoto && model.mode != .crop { chromeHidden.toggle() } }
@@ -500,6 +521,7 @@ struct EditorView: View {
         withAnimation(.glass) {
             zoom = 1
             pan = .zero
+            moving = false
         }
         model.zoomChanged(1)
     }
@@ -526,7 +548,7 @@ struct EditorView: View {
                 let px = (v.startLocation.x - c.x - s.pan.width) / s.zoom
                 let py = (v.startLocation.y - c.y - s.pan.height) / s.zoom
                 zoom = z
-                pan = clampPan(CGSize(width: v.location.x - c.x - px * z, height: v.location.y - c.y - py * z), size, z)
+                pan = clampPan(CGSize(width: v.startLocation.x - c.x - px * z, height: v.startLocation.y - c.y - py * z), size, z)
             }
             .onEnded { _ in
                 pinchStart = nil
@@ -543,7 +565,7 @@ struct EditorView: View {
     private func panWhenZoomed(_ size: CGSize) -> some Gesture {
         DragGesture(minimumDistance: 8)
             .onChanged { v in
-                guard zoom > 1.01, pinchStart == nil, !drawsOnPhoto else { return }
+                guard zoom > 1.01, pinchStart == nil, !drawsOnPhoto || moving else { return }
                 if panStart == nil { panStart = pan }
                 let s = panStart ?? .zero
                 pan = clampPan(CGSize(width: s.width + v.translation.width, height: s.height + v.translation.height), size, zoom)
@@ -587,7 +609,8 @@ struct EditorView: View {
             onChange: { model.set(c, $0) },
             onEnd: { model.end() },
             onReset: { model.reset(c) })
-            .opacity(focused && model.active != c.id ? 0 : 1)
+            .opacity(focused && model.active != c.id ? 0 : (c.section == "lensBlur" && !model.blurOn ? 0.35 : 1))
+            .disabled(c.section == "lensBlur" && !model.blurOn)
     }
 
     private var editPanel: some View {
@@ -598,6 +621,7 @@ struct EditorView: View {
                 case .mixer: stepHeader("Color mix")
                 case .grading: stepHeader("Color grading")
                 case .light: lightHeader
+                case .blur: blurHeader
                 case .curve: curveHeader
                 default: EmptyView()
                 }
@@ -607,15 +631,43 @@ struct EditorView: View {
             }
             .opacity(focused ? 0 : 1)
             if model.tool == .grading {
-                // the wheel scrolls away with the sliders under it; swipe beside it to scroll
+                // the wheel scrolls away with the sliders under it; swipe beside it, left or right, for
+                // the next range
                 GeometryReader { g in
                     ScrollView {
                         VStack(spacing: 0) {
-                            let side = Swift.min(g.size.width - 120, 270)
-                            GradingWheel(model: model)
-                                .frame(width: side, height: side)
-                                .padding(.vertical, 14)
-                                .opacity(focused && model.active != "wheel" ? 0 : 1)
+                            let side = Swift.min(g.size.width - 170, 190)
+                            TabView(selection: Binding(get: { model.gradingRange }, set: { r in
+                                UISelectionFeedbackGenerator().selectionChanged()
+                                withAnimation(.glass) { model.gradingRange = r }
+                            })) {
+                                ForEach(gradingRanges.indices, id: \.self) { i in
+                                    VStack(spacing: 6) {
+                                        GradingWheel(model: model, rangeIndex: i)
+                                            .frame(width: side, height: side)
+                                        Text(gradingRanges[i].label)
+                                            .font(.system(size: 12, weight: .semibold))
+                                            .foregroundStyle(Theme.secondaryText)
+                                    }
+                                    .frame(maxWidth: .infinity)
+                                    .contentShape(Rectangle())
+                                    .tag(i)
+                                }
+                            }
+                            .tabViewStyle(.page(indexDisplayMode: .never))
+                            .frame(height: side + 30)
+                            .padding(.top, 10)
+                            .opacity(focused && model.active != "wheel" ? 0 : 1)
+                            HStack(spacing: 6) {
+                                ForEach(gradingRanges.indices, id: \.self) { i in
+                                    Capsule()
+                                        .fill(i == model.gradingRange ? Color.white : Color.white.opacity(0.3))
+                                        .frame(width: i == model.gradingRange ? 16 : 6, height: 6)
+                                }
+                            }
+                            .padding(.bottom, 8)
+                            .animation(.glass, value: model.gradingRange)
+                            .accessibilityHidden(true)
                             ForEach(model.visible) { slider($0) }
                         }
                         .frame(maxWidth: .infinity)
@@ -647,6 +699,61 @@ struct EditorView: View {
         .padding(.horizontal, 20)
         .padding(.top, 12)
         .padding(.bottom, 2)
+    }
+
+    /// Blur: apply it, and choose what stays sharp.
+    private var blurHeader: some View {
+        HStack(spacing: 10) {
+            Toggle(isOn: Binding(get: { model.blurOn }, set: { model.setBlur($0) })) {
+                Text("Lens blur").font(.system(size: 15, weight: .semibold))
+            }
+            .toggleStyle(.switch)
+            .tint(Theme.accent)
+            .fixedSize()
+            Spacer()
+            Menu {
+                Section("Keep sharp") {
+                    Button { model.setFocus(shape: "auto") } label: { focusLabel("The subject", "person.crop.rectangle", on: model.focusMask == nil && model.focusShape == "auto") }
+                    Button { model.setFocus(shape: "round") } label: { focusLabel("A circle in the middle", "circle", on: model.focusMask == nil && model.focusShape == "round") }
+                    Button { model.setFocus(shape: "wide") } label: { focusLabel("A wide oval", "capsule", on: model.focusMask == nil && model.focusShape == "wide") }
+                    Button { model.setFocus(shape: "tall") } label: { focusLabel("A tall oval", "capsule.portrait", on: model.focusMask == nil && model.focusShape == "tall") }
+                }
+                if !model.masks.isEmpty {
+                    Section("Or a mask") {
+                        ForEach(model.masks) { m in
+                            Button { model.setFocus(mask: m.id) } label: { focusLabel(m.name, maskSymbol(m.kind), on: model.focusMask == m.id) }
+                        }
+                    }
+                }
+                Section {
+                    Button { model.findBlurSubject() } label: { Label("Find the subject with AI", systemImage: "sparkles") }
+                }
+            } label: {
+                Label(focusTitle, systemImage: "scope").font(.system(size: 13, weight: .medium)).lineLimit(1)
+                    .padding(.horizontal, 12).frame(height: 32)
+                    .latentGlass(in: Capsule(), interactive: true)
+            }
+            .disabled(!model.blurOn)
+        }
+        .foregroundStyle(.white)
+        .padding(.horizontal, 16)
+        .padding(.top, 12)
+        .padding(.bottom, 4)
+    }
+
+    private var focusTitle: String {
+        if let id = model.focusMask, let m = model.masks.first(where: { $0.id == id }) { return m.name }
+        switch model.focusShape {
+        case "round": return "Circle"
+        case "wide": return "Wide oval"
+        case "tall": return "Tall oval"
+        default: return "Subject"
+        }
+    }
+
+    @ViewBuilder
+    private func focusLabel(_ text: String, _ symbol: String, on: Bool) -> some View {
+        if on { Label(text, systemImage: "checkmark") } else { Label(text, systemImage: symbol) }
     }
 
     private var colorHeader: some View {
@@ -1693,9 +1800,12 @@ struct EditorView: View {
 /// much from the middle outward. Drag the dot; double-tap to clear.
 struct GradingWheel: View {
     @ObservedObject var model: EditorModel
+    /// Which range this wheel shows (index into `gradingRanges`).
+    var rangeIndex: Int? = nil
 
     var body: some View {
-        let range = gradingRanges[model.gradingRange].id
+        let i = rangeIndex ?? model.gradingRange
+        let range = gradingRanges[i].id
         let hue = model.controls["grading.\(range).hue"]?.value ?? 0
         let sat = model.controls["grading.\(range).sat"]?.value ?? 0
         GeometryReader { geo in
@@ -1740,7 +1850,7 @@ struct GradingWheel: View {
                 model.render()
                 model.end()
             }
-            .accessibilityLabel(Text("\(gradingRanges[model.gradingRange].label) wheel"))
+            .accessibilityLabel(Text("\(gradingRanges[i].label) wheel"))
             .accessibilityValue(Text("Hue \(Int(hue)), saturation \(Int(sat))"))
         }
     }
