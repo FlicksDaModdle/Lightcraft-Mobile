@@ -31,7 +31,6 @@ struct EditorView: View {
                 VStack(spacing: 0) {
                     panel
                     ToolStrip(model: model)
-                    Rectangle().fill(Theme.separator).frame(height: 0.5)
                     ModeBar { model.toast = "\($0) is not in Latent yet. It's coming in a later build." }
                 }
                 .background(Theme.surface)
@@ -50,28 +49,39 @@ struct EditorView: View {
     // MARK: parts
 
     private var topBar: some View {
-        HStack(spacing: 22) {
-            Button { dismiss() } label: { Image(systemName: "chevron.left").font(.system(size: 19, weight: .semibold)) }
+        HStack(spacing: 10) {
+            Button { dismiss() } label: { glassIcon("chevron.left", weight: .semibold) }
                 .accessibilityLabel(Text("Back"))
             Spacer()
-            Button { model.undo() } label: { Image(systemName: "arrow.uturn.backward") }
-                .disabled(!model.canUndo)
-                .accessibilityLabel(Text("Undo"))
-            Button { model.redo() } label: { Image(systemName: "arrow.uturn.forward") }
-                .disabled(!model.canRedo)
-                .accessibilityLabel(Text("Redo"))
+            HStack(spacing: 0) {
+                Button { model.undo() } label: { Image(systemName: "arrow.uturn.backward").frame(width: 44, height: 44) }
+                    .disabled(!model.canUndo)
+                    .accessibilityLabel(Text("Undo"))
+                Button { model.redo() } label: { Image(systemName: "arrow.uturn.forward").frame(width: 44, height: 44) }
+                    .disabled(!model.canRedo)
+                    .accessibilityLabel(Text("Redo"))
+            }
+            .padding(.horizontal, 4)
+            .latentGlass(in: Capsule(), interactive: true)
             Menu {
                 Button { model.auto() } label: { Label("Auto settings", systemImage: "wand.and.stars") }
                 Button(role: .destructive) { model.resetAll() } label: { Label("Reset all edits", systemImage: "arrow.counterclockwise") }
             } label: {
-                Image(systemName: "ellipsis.circle")
+                glassIcon("ellipsis")
             }
             .accessibilityLabel(Text("More"))
         }
-        .font(.system(size: 19))
+        .font(.system(size: 17, weight: .medium))
         .foregroundStyle(.white)
-        .padding(.horizontal, 20)
-        .frame(height: 44)
+        .padding(.horizontal, 16)
+        .frame(height: 52)
+    }
+
+    private func glassIcon(_ name: String, weight: Font.Weight = .medium) -> some View {
+        Image(systemName: name)
+            .font(.system(size: 17, weight: weight))
+            .frame(width: 44, height: 44)
+            .latentGlass(in: Circle(), interactive: true)
     }
 
     private var photoArea: some View {
@@ -193,7 +203,7 @@ struct EditorView: View {
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 16)
                 .padding(.vertical, 10)
-                .background(.regularMaterial, in: Capsule())
+                .latentGlass(in: Capsule())
                 .padding(.top, 54)
                 .padding(.horizontal, 24)
                 .transition(.move(edge: .top).combined(with: .opacity))
@@ -250,22 +260,27 @@ struct ModeBar: View {
     ]
 
     var body: some View {
-        HStack {
+        HStack(spacing: 0) {
             ForEach(modes, id: \.name) { m in
                 Button {
                     if m.name != "Edit" { unavailable(m.name) }
                 } label: {
                     Image(systemName: m.symbol)
-                        .font(.system(size: 20))
-                        .foregroundStyle(m.name == "Edit" ? Color.white : Theme.secondaryText)
-                        .frame(width: 50, height: 40)
-                        .background(m.name == "Edit" ? Theme.accent : .clear, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+                        .font(.system(size: 19))
+                        .foregroundStyle(m.name == "Edit" ? Color.white : Color(white: 0.78))
+                        .frame(width: 52, height: 40)
+                        .background(m.name == "Edit" ? Theme.accent : .clear, in: Capsule())
                 }
                 .frame(maxWidth: .infinity)
                 .accessibilityLabel(Text(m.name))
+                .accessibilityAddTraits(m.name == "Edit" ? .isSelected : [])
             }
         }
-        .padding(.horizontal, 8)
-        .frame(height: 58)
+        .padding(.horizontal, 6)
+        .padding(.vertical, 6)
+        .latentGlass(in: Capsule(), interactive: true)
+        .padding(.horizontal, 14)
+        .padding(.top, 2)
+        .padding(.bottom, 6)
     }
 }

@@ -11,7 +11,6 @@ struct LatentSlider: View {
     let onReset: () -> Void
 
     @State private var start: Double?
-    @State private var ignoring = false
     private let haptics = UISelectionFeedbackGenerator()
 
     var body: some View {
@@ -27,8 +26,18 @@ struct LatentSlider: View {
             .font(.system(size: 15))
             GeometryReader { geo in
                 track(width: geo.size.width)
-                    .contentShape(Rectangle())
-                    .gesture(drag(width: geo.size.width))
+                    .overlay {
+                        // a UIKit pan that only starts on a sideways move, so a vertical swipe
+                        // scrolls the panel instead of being caught by the slider
+                        SidewaysPan(
+                            began: { beginDrag() },
+                            moved: { dx in moveDrag(dx, width: geo.size.width) },
+                            ended: { endDrag() },
+                            doubleTapped: {
+                                haptics.selectionChanged()
+                                onReset()
+                            })
+                    }
             }
             .frame(height: 30)
         }
@@ -71,32 +80,24 @@ struct LatentSlider: View {
         .frame(height: 30)
     }
 
-    private func drag(width: CGFloat) -> some Gesture {
-        DragGesture(minimumDistance: 4)
-            .onChanged { g in
-                if start == nil && !ignoring {
-                    // a mostly vertical drag is the panel scrolling, not the slider
-                    if abs(g.translation.height) > abs(g.translation.width) {
-                        ignoring = true
-                        return
-                    }
-                    start = control.position(control.value)
-                    haptics.prepare()
-                    onBegin()
-                }
-                guard let s = start, width > 0 else { return }
-                let v = control.value(at: s + Double(g.translation.width / width))
-                if v != control.value {
-                    let crossed = (control.value - control.defaultValue) * (v - control.defaultValue) <= 0 && control.changed
-                    if crossed || v == control.defaultValue { haptics.selectionChanged() }
-                    onChange(v)
-                }
-            }
-            .onEnded { _ in
-                if start != nil { onEnd() }
-                start = nil
-                ignoring = false
-            }
+    private func beginDrag() {
+        start = control.position(control.value)
+        haptics.prepare()
+        onBegin()
+    }
+
+    private func moveDrag(_ dx: CGFloat, width: CGFloat) {
+        guard let s = start, width > 0 else { return }
+        let v = control.value(at: s + Double(dx / width))
+        guard v != control.value else { return }
+        let crossed = (control.value - control.defaultValue) * (v - control.defaultValue) <= 0 && control.changed
+        if crossed || v == control.defaultValue { haptics.selectionChanged() }
+        onChange(v)
+    }
+
+    private func endDrag() {
+        if start != nil { onEnd() }
+        start = nil
     }
 }
 
@@ -132,5 +133,55 @@ struct HistogramView: View {
             ctx.stroke(Path { $0.move(to: CGPoint(x: 0, y: size.height)); $0.addLine(to: CGPoint(x: size.width, y: size.height)) }, with: .color(Color(white: 0.4)), lineWidth: 1)
         }
         .accessibilityHidden(true)
+    }
+}
+
+/// A transparent UIKit view that reports sideways drags (and double taps). A drag that starts
+/// mostly vertical never begins here, so the scroll view around it gets it.
+struct SidewaysPan: UIViewRepresentable {
+    let began: () -> Void
+    let moved: (CGFloat) -> Void
+    let ended: () -> Void
+    let doubleTapped: () -> Void
+
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
+
+    func makeUIView(context: Context) -> UIView {
+        let view = UIView()
+        view.backgroundColor = .clear
+        let pan = UIPanGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.pan(_:)))
+        pan.delegate = context.coordinator
+        view.addGestureRecognizer(pan)
+        let tap = UITapGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.tap))
+        tap.numberOfTapsRequired = 2
+        view.addGestureRecognizer(tap)
+        return view
+    }
+
+    func updateUIView(_ uiView: UIView, context: Context) {
+        context.coordinator.parent = self
+    }
+
+    final class Coordinator: NSObject, UIGestureRecognizerDelegate {
+        var parent: SidewaysPan
+
+        init(_ parent: SidewaysPan) { self.parent = parent }
+
+        func gestureRecognizerShouldBegin(_ g: UIGestureRecognizer) -> Bool {
+            guard let pan = g as? UIPanGestureRecognizer else { return true }
+            let v = pan.velocity(in: pan.view)
+            return abs(v.x) > abs(v.y)
+        }
+
+        @objc func pan(_ g: UIPanGestureRecognizer) {
+            switch g.state {
+            case .began: parent.began()
+            case .changed: parent.moved(g.translation(in: g.view).x)
+            case .ended, .cancelled, .failed: parent.ended()
+            default: break
+            }
+        }
+
+        @objc func tap() { parent.doubleTapped() }
     }
 }

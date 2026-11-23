@@ -53,6 +53,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: latent-ios
+      - name: Use Xcode 26 (the iOS 26 SDK, for Liquid Glass) when the runner has it
+        run: |
+          x=$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1 || true)
+          if [ -n "$x" ]; then sudo xcode-select -s "$x"; fi
+          xcodebuild -version
       - name: Install XcodeGen
         run: brew install xcodegen
       - name: Build Latent
