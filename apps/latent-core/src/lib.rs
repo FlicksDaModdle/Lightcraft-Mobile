@@ -141,7 +141,8 @@ impl Core {
         }
         let mut out = Vec::with_capacity(n * 4);
         let mut hist = vec![0u32; HIST_BINS * 3];
-        for px in rgb.chunks_exact(3).take(n) {
+        let (pixels, _) = rgb.as_chunks::<3>();
+        for px in pixels.iter().take(n) {
             for (c, &v) in px.iter().enumerate() {
                 let v = if v.is_finite() { v.clamp(0.0, peak) } else { 0.0 };
                 out.push(f16_bits(v));
@@ -273,7 +274,7 @@ mod tests {
         let Ok(img) = img else { panic!("{:?}", img.err()) };
         assert_eq!(img.rgba16f.len(), img.width * img.height * 4);
         let one = f16_bits(1.0);
-        assert!(img.rgba16f.chunks_exact(4).any(|p| p[..3].iter().any(|&h| h > one)), "nothing above SDR white");
+        assert!(img.rgba16f.as_chunks::<4>().0.iter().any(|p| p[..3].iter().any(|&h| h > one)), "nothing above SDR white");
         assert!(img.peak > 1.0);
     }
 
