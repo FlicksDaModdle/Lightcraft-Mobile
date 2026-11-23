@@ -1,10 +1,12 @@
 import SwiftUI
 
-/// The editor: histogram, the photo, the tool's sliders, the tools, and the editing modes.
+/// The editor: the photo as large as the screen allows, and below it one glass card with the
+/// current mode's controls (sliders and tools, presets, or crop), then the modes.
 struct EditorView: View {
     @StateObject private var model: EditorModel
     @Environment(\.dismiss) private var dismiss
     @Environment(\.verticalSizeClass) private var verticalSize
+    @AppStorage("showHistogram") private var showHistogram = false
     @State private var chromeHidden = false
     @State private var showingOriginal = false
     @State private var hold: Task<Void, Never>?
@@ -15,61 +17,49 @@ struct EditorView: View {
 
     /// Sideways, or after a tap on the photo, the photo is shown alone.
     private var chrome: Bool { !chromeHidden && verticalSize != .compact }
+    /// A slider is being dragged: only it stays, so the whole photo can be judged.
+    private var focused: Bool { model.active != nil }
 
     var body: some View {
         VStack(spacing: 0) {
             if chrome {
-                topBar
-                HistogramView(bins: model.histogram)
-                    .frame(height: 64)
-                    .padding(.horizontal, 24)
-                    .padding(.top, 2)
-                    .padding(.bottom, 8)
+                topBar.opacity(focused ? 0 : 1)
+                if showHistogram {
+                    HistogramView(bins: model.histogram)
+                        .frame(height: 56)
+                        .padding(.horizontal, 24)
+                        .padding(.bottom, 6)
+                        .opacity(focused ? 0 : 1)
+                }
             }
             photoArea
             if chrome {
-                VStack(spacing: 0) {
-                    panel
-                    ToolStrip(model: model)
+                card
+                    .padding(.horizontal, 8)
+                    .padding(.top, 6)
+                ModeBar(mode: model.mode) { m in
+                    if m.available {
+                        withAnimation(.easeInOut(duration: 0.2)) { model.mode = m }
+                        if m == .presets { model.loadPresets() }
+                    } else {
+                        model.toast = "\(m.label) is not in Latent yet. It's coming in a later build."
+                    }
                 }
-                .latentGlass(in: RoundedRectangle(cornerRadius: 30, style: .continuous), tint: Color.black.opacity(0.28))
-                .padding(.horizontal, 8)
-                .padding(.top, 8)
-                ModeBar { model.toast = "\($0) is not in Latent yet. It's coming in a later build." }
-                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                .opacity(focused ? 0 : 1)
+                .transition(.move(edge: .bottom).combined(with: .opacity))
             }
         }
-        .background { backdrop }
+        .background(Color.black.ignoresSafeArea())
         .overlay(alignment: .top) { toast }
         .statusBarHidden(!chrome)
         .animation(.easeInOut(duration: 0.22), value: chrome)
+        .animation(.easeInOut(duration: 0.18), value: focused)
         .preferredColorScheme(.dark)
         .onAppear { model.open() }
         .onDisappear { Thumbnails.shared.forget(model.photo.id) }
     }
 
-    /// Behind the controls: the photo again, blurred and dimmed, so the glass takes on its colours.
-    private var backdrop: some View {
-        GeometryReader { geo in
-            ZStack {
-                Color.black
-                if chrome, let img = model.image {
-                    Image(decorative: img, scale: 1)
-                        .resizable()
-                        .scaledToFill()
-                        .frame(width: geo.size.width, height: geo.size.height)
-                        .blur(radius: 60, opaque: true)
-                        .opacity(0.5)
-                        .clipped()
-                        .transition(.opacity)
-                }
-            }
-        }
-        .ignoresSafeArea()
-        .accessibilityHidden(true)
-    }
-
-    // MARK: parts
+    // MARK: top
 
     private var topBar: some View {
         HStack(spacing: 10) {
@@ -88,6 +78,7 @@ struct EditorView: View {
             .latentGlass(in: Capsule(), interactive: true)
             Menu {
                 Button { model.auto() } label: { Label("Auto settings", systemImage: "wand.and.stars") }
+                Toggle(isOn: $showHistogram) { Label("Show histogram", systemImage: "chart.bar.xaxis") }
                 Button(role: .destructive) { model.resetAll() } label: { Label("Reset all edits", systemImage: "arrow.counterclockwise") }
             } label: {
                 glassIcon("ellipsis")
@@ -124,7 +115,7 @@ struct EditorView: View {
                         .font(.system(size: 12, weight: .semibold))
                         .padding(.horizontal, 10)
                         .padding(.vertical, 5)
-                        .background(.ultraThinMaterial, in: Capsule())
+                        .latentGlass(in: Capsule())
                         .padding(.top, 10)
                 }
             }
@@ -149,26 +140,65 @@ struct EditorView: View {
         }
     }
 
-    private var panel: some View {
+    // MARK: the card
+
+    private var card: some View {
         VStack(spacing: 0) {
-            if model.tool == .color { colorHeader }
-            if !model.tool.tabs.isEmpty { tabs }
+            switch model.mode {
+            case .presets: presetsPanel
+            case .crop: cropPanel
+            default:
+                editPanel
+                ToolStrip(model: model).opacity(focused ? 0 : 1)
+            }
+        }
+        .background {
+            RoundedRectangle(cornerRadius: 28, style: .continuous)
+                .fill(Color.black.opacity(0.2))
+                .latentGlass(in: RoundedRectangle(cornerRadius: 28, style: .continuous), tint: Color.black.opacity(0.3))
+                .opacity(focused ? 0 : 1)
+        }
+    }
+
+    private func slider(_ c: Control) -> some View {
+        LatentSlider(
+            control: c,
+            onBegin: { model.begin(c) },
+            onChange: { model.set(c, $0) },
+            onEnd: { model.end() },
+            onReset: { model.reset(c) })
+            .opacity(focused && model.active != c.id ? 0 : 1)
+    }
+
+    private var editPanel: some View {
+        VStack(spacing: 0) {
+            Group {
+                switch model.tool {
+                case .color: colorHeader
+                case .mixer: stepHeader("Color mix")
+                case .grading: stepHeader("Color grading")
+                default: EmptyView()
+                }
+                if !model.tool.tabs.isEmpty { tabs }
+                if model.tool == .mixer { bandChips }
+                if model.tool == .grading { rangeChips }
+            }
+            .opacity(focused ? 0 : 1)
+            if model.tool == .grading {
+                GradingWheel(model: model)
+                    .frame(height: 132)
+                    .padding(.vertical, 6)
+                    .opacity(focused && model.active != "wheel" ? 0 : 1)
+            }
             ScrollView {
                 LazyVStack(spacing: 0) {
-                    ForEach(model.visible) { c in
-                        LatentSlider(
-                            control: c,
-                            onBegin: { model.begin(c) },
-                            onChange: { model.set(c, $0) },
-                            onEnd: { model.end() },
-                            onReset: { model.reset(c) })
-                    }
+                    ForEach(model.visible) { slider($0) }
                 }
-                .padding(.vertical, 6)
+                .padding(.vertical, 4)
             }
             .scrollIndicators(.visible)
+            .frame(height: model.tool == .grading ? 150 : 168)
         }
-        .frame(height: 268)
     }
 
     private var tabs: some View {
@@ -179,37 +209,212 @@ struct EditorView: View {
         }
         .pickerStyle(.segmented)
         .padding(.horizontal, 20)
-        .padding(.top, 14)
-        .padding(.bottom, 4)
+        .padding(.top, 12)
+        .padding(.bottom, 2)
     }
 
     private var colorHeader: some View {
-        HStack(spacing: 12) {
-            Toggle(isOn: Binding(get: { model.bw }, set: { model.setBW($0) })) {
-                Text("B&W").font(.system(size: 15))
+        VStack(spacing: 10) {
+            HStack(spacing: 10) {
+                Toggle(isOn: Binding(get: { model.bw }, set: { model.setBW($0) })) {
+                    Text("B&W").font(.system(size: 15))
+                }
+                .toggleStyle(.switch)
+                .tint(Theme.accent)
+                .fixedSize()
+                Spacer()
+                stepButton("Grading", symbol: "circle.lefthalf.filled") { model.tool = .grading }
+                stepButton("Color mix", symbol: "paintpalette") { model.tool = .mixer }
             }
-            .toggleStyle(.switch)
-            .tint(Theme.accent)
-            .fixedSize()
-            Spacer()
-            Text("White balance").font(.system(size: 14)).foregroundStyle(Theme.secondaryText)
-            Menu {
-                ForEach(whiteBalanceModes, id: \.mode) { wb in
-                    Button { model.setWhiteBalance(wb.mode) } label: {
-                        if wb.mode == model.wbMode { Label(wb.label, systemImage: "checkmark") } else { Text(wb.label) }
+            HStack(spacing: 8) {
+                Text("White balance").font(.system(size: 14)).foregroundStyle(Theme.secondaryText)
+                Menu {
+                    ForEach(whiteBalanceModes, id: \.mode) { wb in
+                        Button { model.setWhiteBalance(wb.mode) } label: {
+                            if wb.mode == model.wbMode { Label(wb.label, systemImage: "checkmark") } else { Text(wb.label) }
+                        }
                     }
+                } label: {
+                    HStack(spacing: 4) {
+                        Text(whiteBalanceModes.first { $0.mode == model.wbMode }?.label ?? "Custom")
+                        Image(systemName: "chevron.down").font(.system(size: 11, weight: .semibold))
+                    }
+                    .font(.system(size: 15))
+                    .foregroundStyle(.white)
                 }
-            } label: {
-                HStack(spacing: 4) {
-                    Text(whiteBalanceModes.first { $0.mode == model.wbMode }?.label ?? "Custom")
-                    Image(systemName: "chevron.down").font(.system(size: 11, weight: .semibold))
-                }
-                .font(.system(size: 15))
-                .foregroundStyle(.white)
+                Spacer()
             }
         }
         .padding(.horizontal, 20)
-        .padding(.top, 12)
+        .padding(.top, 14)
+    }
+
+    private func stepButton(_ title: String, symbol: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Label(title, systemImage: symbol)
+                .font(.system(size: 13, weight: .medium))
+                .padding(.horizontal, 12)
+                .frame(height: 32)
+                .latentGlass(in: Capsule(), interactive: true)
+        }
+        .foregroundStyle(.white)
+    }
+
+    private func stepHeader(_ title: String) -> some View {
+        HStack {
+            Button { model.tool = .color } label: {
+                Label(title, systemImage: "chevron.left")
+                    .font(.system(size: 15, weight: .semibold))
+            }
+            .foregroundStyle(.white)
+            Spacer()
+        }
+        .padding(.horizontal, 20)
+        .padding(.top, 14)
+    }
+
+    private var bandChips: some View {
+        HStack(spacing: 0) {
+            ForEach(mixerBands.indices, id: \.self) { i in
+                Button { model.mixerBand = i } label: {
+                    Circle()
+                        .fill(Theme.band(i))
+                        .frame(width: 24, height: 24)
+                        .overlay(Circle().strokeBorder(Color.white, lineWidth: model.mixerBand == i ? 2.5 : 0).padding(-4))
+                        .frame(maxWidth: .infinity, minHeight: 40)
+                }
+                .accessibilityLabel(Text(mixerBands[i].capitalized))
+                .accessibilityAddTraits(model.mixerBand == i ? .isSelected : [])
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.top, 8)
+    }
+
+    private var rangeChips: some View {
+        Picker("Range", selection: $model.gradingRange) {
+            ForEach(gradingRanges.indices, id: \.self) { i in Text(gradingRanges[i].label).tag(i) }
+        }
+        .pickerStyle(.segmented)
+        .padding(.horizontal, 20)
+        .padding(.top, 10)
+    }
+
+    // MARK: presets
+
+    private var presetsPanel: some View {
+        VStack(spacing: 0) {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    ForEach(model.presetGroups, id: \.self) { g in
+                        Button { model.presetGroup = g } label: {
+                            Text(g)
+                                .font(.system(size: 14, weight: model.presetGroup == g ? .semibold : .regular))
+                                .foregroundStyle(model.presetGroup == g ? Color.black : Color.white)
+                                .padding(.horizontal, 14)
+                                .frame(height: 32)
+                                .background(model.presetGroup == g ? Color.white : Color.white.opacity(0.1), in: Capsule())
+                        }
+                    }
+                }
+                .padding(.horizontal, 16)
+            }
+            .padding(.top, 14)
+            .opacity(focused ? 0 : 1)
+            ScrollView {
+                LazyVGrid(columns: [GridItem(.flexible(), spacing: 8), GridItem(.flexible(), spacing: 8)], spacing: 8) {
+                    ForEach(model.presets.filter { $0.group == model.presetGroup }) { p in
+                        Button { model.apply(p) } label: {
+                            HStack {
+                                Text(p.name).font(.system(size: 14)).lineLimit(1)
+                                Spacer(minLength: 4)
+                                if model.appliedPreset == p.id { Image(systemName: "checkmark").font(.system(size: 12, weight: .bold)) }
+                            }
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 12)
+                            .frame(height: 40)
+                            .background(Color.white.opacity(model.appliedPreset == p.id ? 0.18 : 0.07), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                        }
+                    }
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 10)
+            }
+            .frame(height: 150)
+            .opacity(focused ? 0 : 1)
+            if model.appliedPreset != nil {
+                LatentSlider(
+                    control: model.amountControl,
+                    onBegin: { model.beginAmount() },
+                    onChange: { model.setAmount($0) },
+                    onEnd: { model.end() },
+                    onReset: {
+                        model.beginAmount()
+                        model.setAmount(100)
+                        model.end()
+                    })
+            }
+        }
+        .padding(.bottom, 6)
+    }
+
+    // MARK: crop
+
+    private var cropPanel: some View {
+        VStack(spacing: 0) {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    ForEach(cropAspects, id: \.value) { a in
+                        let on = model.aspectChoice == a.value
+                        Button { model.setAspect(a.value) } label: {
+                            Text(a.label)
+                                .font(.system(size: 14, weight: on ? .semibold : .regular))
+                                .foregroundStyle(on ? Color.black : Color.white)
+                                .padding(.horizontal, 14)
+                                .frame(height: 32)
+                                .background(on ? Color.white : Color.white.opacity(0.1), in: Capsule())
+                        }
+                    }
+                }
+                .padding(.horizontal, 16)
+            }
+            .padding(.top, 14)
+            .opacity(focused ? 0 : 1)
+            HStack(spacing: 0) {
+                cropTool("rotate.left", "Rotate") { model.cropCommand("photo.rotateLeft") }
+                cropTool("arrow.left.and.right.righttriangle.left.righttriangle.right", "Flip") { model.cropCommand("photo.flipHorizontal") }
+                cropTool("rectangle.portrait.rotate", "Swap") { model.cropCommand("crop.rotateAspect") }
+                cropTool("level", "Auto") { model.cropCommand("crop.autoStraighten") }
+                cropTool("arrow.counterclockwise", "Reset") { model.cropCommand("crop.reset") }
+            }
+            .padding(.horizontal, 8)
+            .padding(.top, 10)
+            .opacity(focused ? 0 : 1)
+            LatentSlider(
+                control: model.angleControl,
+                onBegin: { model.beginAngle() },
+                onChange: { model.setAngle($0) },
+                onEnd: { model.end() },
+                onReset: {
+                    model.beginAngle()
+                    model.setAngle(0)
+                    model.end()
+                })
+                .padding(.vertical, 6)
+        }
+        .padding(.bottom, 8)
+    }
+
+    private func cropTool(_ symbol: String, _ label: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            VStack(spacing: 5) {
+                Image(systemName: symbol).font(.system(size: 19)).frame(height: 24)
+                Text(label).font(.system(size: 11))
+            }
+            .foregroundStyle(.white)
+            .frame(maxWidth: .infinity, minHeight: 54)
+        }
+        .accessibilityLabel(Text(label))
     }
 
     @ViewBuilder private var toast: some View {
@@ -231,6 +436,63 @@ struct EditorView: View {
     }
 }
 
+/// The colour grading wheel for the chosen range: hue round the circle (red on the right), how
+/// much from the middle outward. Drag the dot; double-tap to clear.
+struct GradingWheel: View {
+    @ObservedObject var model: EditorModel
+
+    var body: some View {
+        let range = gradingRanges[model.gradingRange].id
+        let hue = model.controls["grading.\(range).hue"]?.value ?? 0
+        let sat = model.controls["grading.\(range).sat"]?.value ?? 0
+        GeometryReader { geo in
+            let size = Swift.min(geo.size.width, geo.size.height)
+            let r = size / 2
+            let center = CGPoint(x: geo.size.width / 2, y: geo.size.height / 2)
+            let a = hue * .pi / 180
+            let knob = CGPoint(x: center.x + cos(a) * r * sat / 100, y: center.y - sin(a) * r * sat / 100)
+            ZStack {
+                Circle()
+                    .fill(AngularGradient(colors: (0...12).map { Color(hue: 1 - Double($0) / 12, saturation: 0.9, brightness: 1) }, center: .center))
+                    .overlay(Circle().fill(RadialGradient(colors: [.white, .white.opacity(0)], center: .center, startRadius: 0, endRadius: r)))
+                    .frame(width: size, height: size)
+                    .position(center)
+                Circle()
+                    .strokeBorder(Color.white, lineWidth: 2.5)
+                    .background(Circle().fill(Color.black.opacity(0.25)))
+                    .frame(width: 22, height: 22)
+                    .shadow(color: .black.opacity(0.4), radius: 2)
+                    .position(knob)
+            }
+            .contentShape(Circle())
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { g in
+                        if model.active != "wheel" { model.beginWheel() }
+                        let dx = g.location.x - center.x
+                        let dy = center.y - g.location.y
+                        var deg = atan2(dy, dx) * 180 / .pi
+                        if deg < 0 { deg += 360 }
+                        let s = Swift.min(hypot(dx, dy) / r * 100, 100)
+                        model.setQuietly("grading.\(range).hue", deg.rounded())
+                        model.setQuietly("grading.\(range).sat", s.rounded())
+                        model.render()
+                    }
+                    .onEnded { _ in model.end() }
+            )
+            .onTapGesture(count: 2) {
+                model.beginWheel()
+                model.setQuietly("grading.\(range).hue", 0)
+                model.setQuietly("grading.\(range).sat", 0)
+                model.render()
+                model.end()
+            }
+            .accessibilityLabel(Text("\(gradingRanges[model.gradingRange].label) wheel"))
+            .accessibilityValue(Text("Hue \(Int(hue)), saturation \(Int(sat))"))
+        }
+    }
+}
+
 /// The tools: Auto first, then the adjustment groups; the open one is highlighted and a dot marks
 /// the ones that have changed the photo.
 struct ToolStrip: View {
@@ -241,8 +503,9 @@ struct ToolStrip: View {
             HStack(spacing: 2) {
                 item("Auto", symbol: "wand.and.stars", selected: false, edited: false) { model.auto() }
                 Rectangle().fill(Theme.separator).frame(width: 1, height: 32).padding(.horizontal, 4)
-                ForEach(Tool.allCases) { t in
-                    item(t.label, symbol: t.symbol, selected: model.tool == t, edited: model.edited(t)) { model.tool = t }
+                ForEach(Tool.strip) { t in
+                    let on = model.tool == t || (t == .color && (model.tool == .mixer || model.tool == .grading))
+                    item(t.label, symbol: t.symbol, selected: on, edited: model.edited(t)) { model.tool = t }
                 }
             }
             .padding(.horizontal, 10)
@@ -273,36 +536,30 @@ struct ToolStrip: View {
     }
 }
 
-/// The editing modes. Only adjusting is in this build; the others say so.
+/// The editing modes, in a floating glass bar.
 struct ModeBar: View {
-    let unavailable: (String) -> Void
-    private let modes: [(name: String, symbol: String)] = [
-        ("Quick actions", "sparkles"), ("Presets", "circle.hexagongrid"), ("Crop", "crop.rotate"),
-        ("Edit", "slider.horizontal.3"), ("Masks", "circle.dashed.inset.filled"), ("Remove", "bandage"),
-    ]
+    let mode: Mode
+    let choose: (Mode) -> Void
 
     var body: some View {
         HStack(spacing: 0) {
-            ForEach(modes, id: \.name) { m in
-                Button {
-                    if m.name != "Edit" { unavailable(m.name) }
-                } label: {
+            ForEach(Mode.allCases, id: \.self) { m in
+                Button { choose(m) } label: {
                     Image(systemName: m.symbol)
                         .font(.system(size: 19))
-                        .foregroundStyle(m.name == "Edit" ? Color.white : Color(white: 0.78))
+                        .foregroundStyle(m == mode ? Color.white : Color(white: m.available ? 0.8 : 0.5))
                         .frame(width: 52, height: 40)
-                        .background(m.name == "Edit" ? Theme.accent : .clear, in: Capsule())
+                        .background(m == mode ? Theme.accent : .clear, in: Capsule())
                 }
                 .frame(maxWidth: .infinity)
-                .accessibilityLabel(Text(m.name))
-                .accessibilityAddTraits(m.name == "Edit" ? .isSelected : [])
+                .accessibilityLabel(Text(m.label))
+                .accessibilityAddTraits(m == mode ? .isSelected : [])
             }
         }
-        .padding(.horizontal, 6)
-        .padding(.vertical, 6)
+        .padding(6)
         .latentGlass(in: Capsule(), interactive: true)
         .padding(.horizontal, 14)
-        .padding(.top, 2)
-        .padding(.bottom, 6)
+        .padding(.top, 8)
+        .padding(.bottom, 4)
     }
 }

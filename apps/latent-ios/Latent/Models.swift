@@ -64,6 +64,20 @@ struct Control: Identifiable, Equatable {
         value = (d["value"] as? NSNumber)?.doubleValue ?? defaultValue
     }
 
+    /// A slider the app makes itself (the crop's straighten angle, a preset's amount).
+    init(id: String, label: String, min: Double, max: Double, defaultValue: Double, step: Double, decimals: Int, value: Double) {
+        self.id = id
+        self.label = label
+        section = ""
+        self.min = min
+        self.max = max
+        self.defaultValue = defaultValue
+        self.step = step
+        self.decimals = decimals
+        track = .centered
+        self.value = value
+    }
+
     var changed: Bool { abs(value - defaultValue) > 1e-9 }
 
     /// The value as the panel shows it: its decimals, a plus sign on two-sided sliders, no "-0".
@@ -115,6 +129,11 @@ struct Control: Identifiable, Equatable {
 /// The editing tools along the bottom of the editor.
 enum Tool: String, CaseIterable, Identifiable {
     case light, color, effects, detail, optics, geometry
+    /// Steps inside Color, not in the strip.
+    case mixer, grading
+
+    /// The tools along the strip.
+    static let strip: [Tool] = [.light, .color, .effects, .detail, .optics, .geometry]
 
     var id: String { rawValue }
 
@@ -126,6 +145,8 @@ enum Tool: String, CaseIterable, Identifiable {
         case .detail: "Detail"
         case .optics: "Optics"
         case .geometry: "Geometry"
+        case .mixer: "Color mix"
+        case .grading: "Color grading"
         }
     }
 
@@ -137,6 +158,8 @@ enum Tool: String, CaseIterable, Identifiable {
         case .detail: "triangle"
         case .optics: "camera.aperture"
         case .geometry: "perspective"
+        case .mixer: "paintpalette"
+        case .grading: "circle.lefthalf.filled"
         }
     }
 
@@ -149,6 +172,8 @@ enum Tool: String, CaseIterable, Identifiable {
         case .detail: ["detail"]
         case .optics: ["optics"]
         case .geometry: ["geometry"]
+        case .mixer: ["mixer"]
+        case .grading: ["grading"]
         }
     }
 
@@ -168,3 +193,59 @@ let whiteBalanceModes: [(mode: String, label: String)] = [
     ("asShot", "As shot"), ("auto", "Auto"), ("daylight", "Daylight"), ("cloudy", "Cloudy"),
     ("shade", "Shade"), ("tungsten", "Tungsten"), ("fluorescent", "Fluorescent"), ("flash", "Flash"),
 ]
+
+/// The colour mixer's bands, in the engine's order (control ids are `mixer.<band>.hue` and so on).
+let mixerBands = ["red", "orange", "yellow", "green", "aqua", "blue", "purple", "magenta"]
+
+/// The colour grading ranges (control ids `grading.<range>.hue`/`.sat`/`.lum`).
+let gradingRanges: [(id: String, label: String)] = [("shadows", "Shadows"), ("midtones", "Midtones"), ("highlights", "Highlights"), ("global", "Global")]
+
+/// Crop aspect choices: the engine's `crop.aspect` value and what the chip says.
+let cropAspects: [(value: String, label: String)] = [
+    ("original", "Original"), ("free", "Free"), ("1x1", "1:1"), ("4x5", "4:5"), ("5x7", "5:7"),
+    ("2x3", "2:3"), ("3x4", "3:4"), ("9x16", "9:16"), ("16x9", "16:9"),
+]
+
+/// A preset from the engine (`presets.list`).
+struct Preset: Identifiable, Hashable {
+    let id: String
+    let name: String
+    let group: String
+
+    init?(_ json: Any) {
+        guard let d = json as? [String: Any], let id = d["id"] as? String else { return nil }
+        self.id = id
+        name = d["name"] as? String ?? id
+        group = d["group"] as? String ?? ""
+    }
+}
+
+/// The editing modes along the bottom.
+enum Mode: String, CaseIterable {
+    case quick, presets, crop, edit, masks, remove
+
+    var label: String {
+        switch self {
+        case .quick: "Quick actions"
+        case .presets: "Presets"
+        case .crop: "Crop"
+        case .edit: "Edit"
+        case .masks: "Masks"
+        case .remove: "Remove"
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .quick: "sparkles"
+        case .presets: "circle.hexagongrid"
+        case .crop: "crop.rotate"
+        case .edit: "slider.horizontal.3"
+        case .masks: "circle.dashed.inset.filled"
+        case .remove: "bandage"
+        }
+    }
+
+    /// Whether this build has the mode.
+    var available: Bool { [.presets, .crop, .edit].contains(self) }
+}

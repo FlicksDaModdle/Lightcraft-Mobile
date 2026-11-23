@@ -19,6 +19,17 @@ final class EditorModel: ObservableObject {
     @Published var tool: Tool = .light { didSet { if tool != oldValue { tab = 0 } } }
     @Published var tab = 0
     @Published var toast: String?
+    /// The slider being dragged: everything else fades so the photo can be seen.
+    @Published private(set) var active: String?
+    @Published var mode: Mode = .edit
+    @Published var mixerBand = 0
+    @Published var gradingRange = 0
+    @Published private(set) var presets: [Preset] = []
+    @Published var presetGroup = ""
+    @Published private(set) var appliedPreset: String?
+    @Published private(set) var presetAmount = 100.0
+    @Published private(set) var cropAngle = 0.0
+    @Published private(set) var cropAspect: [Int]?
 
     private var rendering = false
     private var dirty = false
@@ -40,7 +51,12 @@ final class EditorModel: ObservableObject {
     /// The sliders the current tool (and tab) shows, in the engine's order.
     var visible: [Control] {
         let sections = Set(tool.sections)
-        let prefixes = tool.tabs.indices.contains(tab) ? tool.tabs[tab].prefixes : nil
+        var prefixes = tool.tabs.indices.contains(tab) ? tool.tabs[tab].prefixes : nil
+        if tool == .mixer { prefixes = ["mixer.\(mixerBands[mixerBand])."] }
+        if tool == .grading {
+            let r = gradingRanges[gradingRange].id
+            prefixes = ["grading.\(r)."] + (r == "global" ? [] : ["grading.blending", "grading.balance"])
+        }
         return order.compactMap { controls[$0] }.filter { c in
             sections.contains(c.section) && (prefixes?.contains(where: { c.id.hasPrefix($0) }) ?? true)
         }
@@ -48,13 +64,17 @@ final class EditorModel: ObservableObject {
 
     /// Whether the tool has changed the photo (for the dot under it).
     func edited(_ t: Tool) -> Bool {
-        let sections = Set(t.sections)
+        var sections = Set(t.sections)
+        if t == .color { sections.formUnion(["mixer", "grading"]) }
         return controls.values.contains { sections.contains($0.section) && $0.changed } || (t == .color && bw)
     }
 
     // MARK: editing
 
-    func begin(_ c: Control) { attempt("develop.beginInteraction", ["label": c.label]) }
+    func begin(_ c: Control) {
+        active = c.id
+        attempt("develop.beginInteraction", ["label": c.label])
+    }
 
     func set(_ c: Control, _ value: Double) {
         controls[c.id]?.value = value
@@ -63,9 +83,93 @@ final class EditorModel: ObservableObject {
     }
 
     func end() {
+        active = nil
         attempt("develop.endInteraction")
         refreshHistory()
     }
+
+    /// Set a control without a drag (the grading wheel sets two at once).
+    func setQuietly(_ id: String, _ value: Double) {
+        controls[id]?.value = value
+        attempt("develop.set", ["control": id, "value": value])
+    }
+
+    func beginWheel() {
+        active = "wheel"
+        attempt("develop.beginInteraction", ["label": "Color Grading"])
+    }
+
+    // MARK: presets
+
+    var presetGroups: [String] {
+        var seen: [String] = []
+        for p in presets where !seen.contains(p.group) { seen.append(p.group) }
+        return seen
+    }
+
+    func loadPresets() {
+        guard presets.isEmpty else { return }
+        let list = (try? Engine.shared.run("presets.list")) as? [Any] ?? []
+        presets = list.compactMap(Preset.init)
+        if presetGroup.isEmpty { presetGroup = presetGroups.first ?? "" }
+    }
+
+    func apply(_ p: Preset) {
+        appliedPreset = p.id
+        presetAmount = 100
+        command("preset.apply", ["id": p.id, "amount": 100])
+    }
+
+    var amountControl: Control {
+        Control(id: "preset.amount", label: "Amount", min: 0, max: 200, defaultValue: 100, step: 1, decimals: 0, value: presetAmount)
+    }
+
+    func beginAmount() {
+        active = "preset.amount"
+        attempt("develop.beginInteraction", ["label": "Preset Amount"])
+    }
+
+    func setAmount(_ v: Double) {
+        guard let id = appliedPreset else { return }
+        presetAmount = v
+        attempt("preset.apply", ["id": id, "amount": v])
+        render()
+    }
+
+    // MARK: crop
+
+    var angleControl: Control {
+        Control(id: "crop.angle", label: "Straighten", min: -45, max: 45, defaultValue: 0, step: 0.1, decimals: 1, value: cropAngle)
+    }
+
+    func beginAngle() {
+        active = "crop.angle"
+        attempt("develop.beginInteraction", ["label": "Straighten"])
+    }
+
+    func setAngle(_ v: Double) {
+        cropAngle = v
+        attempt("crop.set", ["angle": v])
+        render()
+    }
+
+    @Published private var chosenAspect: String?
+
+    func setAspect(_ value: String) {
+        chosenAspect = value
+        command("crop.aspect", ["aspect": value])
+    }
+    func cropCommand(_ name: String) { command(name) }
+
+    /// Which aspect chip is on.
+    var aspectChoice: String {
+        if let c = chosenAspect { return c }
+        guard let a = cropAspect, a.count == 2, a[0] > 0, a[1] > 0 else { return "original" }
+        let g = gcd(a[0], a[1])
+        return "\(a[0] / g)x\(a[1] / g)"
+    }
+
+    private func gcd(_ a: Int, _ b: Int) -> Int { b == 0 ? Swift.max(a, 1) : gcd(b, a % b) }
 
     func reset(_ c: Control) {
         begin(c)
@@ -80,7 +184,7 @@ final class EditorModel: ObservableObject {
     func setBW(_ on: Bool) { command("develop.treatment", ["bw": on]) }
     func setWhiteBalance(_ mode: String) { command("develop.wb", ["mode": mode]) }
 
-    private func command(_ name: String, _ params: [String: Any] = [:], toast message: String? = nil) {
+    func command(_ name: String, _ params: [String: Any] = [:], toast message: String? = nil) {
         if attempt(name, params), let message { toast = message }
         refresh()
         render()
@@ -112,6 +216,9 @@ final class EditorModel: ObservableObject {
         if let s = (try? Engine.shared.run("develop.get", ["id": photo.id])) as? [String: Any] {
             bw = (s["treatment"] as? String) == "bw"
             wbMode = ((s["wb"] as? [String: Any])?["mode"] as? String) ?? "asShot"
+            let crop = s["crop"] as? [String: Any]
+            cropAngle = ((crop?["geometry"] as? [String: Any])?["angle"] as? NSNumber)?.doubleValue ?? 0
+            cropAspect = (crop?["aspect"] as? [NSNumber])?.map(\.intValue)
         }
         refreshHistory()
     }
