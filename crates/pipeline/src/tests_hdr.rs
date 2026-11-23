@@ -170,3 +170,48 @@ fn hdr_histogram_shows_the_range_above_sdr_white_on_a_fixed_scale() {
     // the SDR rendition's own histogram has nothing above white
     assert!(render(&src, &raw(), &hdr_on(3.0), &req).histogram.hdr.is_none());
 }
+
+/// A master point curve that leaves SDR alone and pulls the HDR highlights down: a point at the
+/// display-encoded value of 4 (two stops above white) brought down to that of 2.
+fn hdr_points() -> Vec<lightcraft_geom::Point> {
+    use lightcraft_color::transfer::linear_to_srgb;
+    use lightcraft_geom::Point;
+    vec![Point::new(0.0, 0.0), Point::new(1.0, 1.0), Point::new(f64::from(linear_to_srgb(4.0)), f64::from(linear_to_srgb(2.0)))]
+}
+
+#[test]
+fn hdr_curve_points_shape_only_the_hdr_highlights() {
+    let src = sunset();
+    let plain = hdr_on(3.0);
+    let mut curved = hdr_on(3.0);
+    curved.curve.master = hdr_points();
+    let a = deep(&src, &plain, OutputDepth::F32Hdr);
+    let b = deep(&src, &curved, OutputDepth::F32Hdr);
+    let mut lowered = 0;
+    for (p, q) in a.as_chunks::<3>().0.iter().zip(b.as_chunks::<3>().0) {
+        for (x, y) in p.iter().zip(q) {
+            if *x < 0.9 {
+                // below SDR white nothing changes
+                assert!((x - y).abs() < 2e-3, "{p:?} vs {q:?}");
+            }
+            if *x > 2.5 {
+                assert!(y < x, "the HDR curve should bring {x} down, got {y}");
+                lowered += 1;
+            }
+        }
+    }
+    assert!(lowered > 0, "the sunset should have highlights two stops above white");
+}
+
+#[test]
+fn hdr_curve_points_leave_every_sdr_render_alone() {
+    let src = sunset();
+    let mut curved = DevelopSettings::default();
+    curved.curve.master = hdr_points();
+    let sdr = |s: &DevelopSettings| render(&src, &raw(), s, &RenderRequest::fit(240, 240)).image.data;
+    assert_eq!(sdr(&curved), sdr(&DevelopSettings::default()), "an SDR render must leave HDR curve points out");
+    // and the SDR rendition of an HDR edit: the same as without the HDR points
+    let mut hdr_curved = hdr_on(3.0);
+    hdr_curved.curve.master = hdr_points();
+    assert_eq!(sdr(&hdr_curved), sdr(&hdr_on(3.0)));
+}

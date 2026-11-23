@@ -23,6 +23,9 @@ const FIELDS: &[(&str, usize)] = &[
     ("SRGB_OFF", 1),
     ("CURVE_OFF", 1),
     ("CURVES", 1),
+    ("CURVE_HDR_OFF", 1),
+    ("CURVES_HDR", 1),
+    ("CURVE_HDR_TOP", 1),
     ("GAIN", 1),
     ("EV", 1),
     ("AIR", 1),
@@ -213,6 +216,17 @@ pub fn finish_block(fp: &FinishParams, masks: &[[f32; MASK_TERMS]], present: &Pr
             aux.extend_from_slice(&l.v);
         }
     }
+    // an HDR render's curves above SDR white (`FinishParams::curves_hdr`), after the 0..1 tables
+    let curve_hdr_off = aux.len();
+    if let Some(h) = &fp.curves_hdr {
+        for l in &h.v {
+            if l.v.len() != CURVE_N as usize {
+                fail(FailKind::Fatal, format!("HDR curve table has {} entries, expected {}", l.v.len(), CURVE_N));
+                return (Vec::new(), aux);
+            }
+            aux.extend_from_slice(&l.v);
+        }
+    }
     let mask_off = aux.len();
     for m in masks {
         aux.extend_from_slice(m);
@@ -258,6 +272,9 @@ pub fn finish_block(fp: &FinishParams, masks: &[[f32; MASK_TERMS]], present: &Pr
     p.u("SRGB_OFF", srgb_off as u32);
     p.u("CURVE_OFF", curve_off as u32);
     p.b("CURVES", fp.curves.is_some());
+    p.u("CURVE_HDR_OFF", curve_hdr_off as u32);
+    p.b("CURVES_HDR", fp.curves_hdr.is_some());
+    p.f("CURVE_HDR_TOP", fp.curves_hdr.as_ref().map_or(1.0, |h| h.top));
     p.f("REFINE_SAT", fp.refine_sat);
     p.f("GAIN", fp.gain);
     p.f("EV", fp.ev);

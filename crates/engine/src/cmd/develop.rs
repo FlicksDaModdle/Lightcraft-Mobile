@@ -816,28 +816,40 @@ pub fn specs() -> Vec<CommandSpec> {
             }
             Ok(json!({"favorite": want}))
         }),
-        cmd!("develop.curve", "Set Point Curve", [], None, "{channel: master|red|green|blue, points: [[x,y],...] in 0..1}", has_active, |s, p| {
-            let ch = str_param(p, "channel").unwrap_or("master").to_string();
-            let mut pts: Vec<Point> = p
-                .get("points")
-                .and_then(Value::as_array)
-                .ok_or_else(|| bad("develop.curve", "missing points"))?
-                .iter()
-                .filter_map(|q| Some(Point::new(q.get(0)?.as_f64()?.clamp(0.0, 1.0), q.get(1)?.as_f64()?.clamp(0.0, 1.0))))
-                .collect();
-            // stored in the order the curve runs, as the editor draws and drags them
-            pts.sort_by(|a, b| a.x.total_cmp(&b.x));
-            edit(s, "develop.curve", "Tone Curve", |d| {
-                match ch.as_str() {
-                    "master" | "rgb" => d.curve.master = pts,
-                    "red" => d.curve.red = pts,
-                    "green" => d.curve.green = pts,
-                    "blue" => d.curve.blue = pts,
-                    other => return Err(bad("develop.curve", format!("unknown channel `{other}`"))),
-                }
-                Ok(())
-            })
-        }),
+        cmd!(
+            "develop.curve",
+            "Set Point Curve",
+            [],
+            None,
+            "{channel: master|red|green|blue, points: [[x,y],...] in 0..1; above 1 (display-encoded, up to the brightest HDR render) for HDR renders only}",
+            has_active,
+            |s, p| {
+                let ch = str_param(p, "channel").unwrap_or("master").to_string();
+                // points above 1 are an HDR curve: they shape HDR renders, and SDR renders leave them out
+                let max = lightcraft_develop::ToneCurve::hdr_point_max();
+                let mut pts: Vec<Point> = p
+                    .get("points")
+                    .and_then(Value::as_array)
+                    .ok_or_else(|| bad("develop.curve", "missing points"))?
+                    .iter()
+                    .filter_map(|q| Some(Point::new(q.get(0)?.as_f64()?, q.get(1)?.as_f64()?)))
+                    .filter(|q| q.x.is_finite() && q.y.is_finite())
+                    .map(|q| Point::new(q.x.clamp(0.0, max), q.y.clamp(0.0, max)))
+                    .collect();
+                // stored in the order the curve runs, as the editor draws and drags them
+                pts.sort_by(|a, b| a.x.total_cmp(&b.x));
+                edit(s, "develop.curve", "Tone Curve", |d| {
+                    match ch.as_str() {
+                        "master" | "rgb" => d.curve.master = pts,
+                        "red" => d.curve.red = pts,
+                        "green" => d.curve.green = pts,
+                        "blue" => d.curve.blue = pts,
+                        other => return Err(bad("develop.curve", format!("unknown channel `{other}`"))),
+                    }
+                    Ok(())
+                })
+            }
+        ),
         // ---- crop & rotate
         cmd!("crop.set", "Set Crop", [], None, "{rect?: [x0,y0,x1,y1] normalized in the straightened frame, angle?: degrees}", has_active, |s, p| {
             let id = active(s, "crop.set")?;

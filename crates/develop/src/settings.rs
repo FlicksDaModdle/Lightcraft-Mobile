@@ -402,6 +402,19 @@ impl ToneCurve {
     pub fn point_curve_is_identity(pts: &[Point]) -> bool {
         pts.is_empty() || pts.iter().all(|p| (p.x - p.y).abs() < 1e-9)
     }
+
+    /// The largest point-curve coordinate: the display-encoded (sRGB) value of the brightest HDR
+    /// render ([`Hdr::MAX_EV_LIMIT`] stops above SDR white). Points above 1 shape only HDR renders;
+    /// every SDR render (and the SDR rendition) leaves them out.
+    pub fn hdr_point_max() -> f64 {
+        let peak = Hdr::MAX_EV_LIMIT.exp2();
+        1.055 * peak.powf(1.0 / 2.4) - 0.055
+    }
+
+    /// Whether any point curve has points above SDR white (an HDR curve).
+    pub fn has_hdr_points(&self) -> bool {
+        [&self.master, &self.red, &self.green, &self.blue].iter().any(|c| c.iter().any(|p| p.x > 1.0 + 1e-9))
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]

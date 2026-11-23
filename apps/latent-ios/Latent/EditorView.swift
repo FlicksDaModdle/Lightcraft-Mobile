@@ -721,11 +721,33 @@ struct ModeBar: View {
 }
 
 /// The point curve for the open channel: drag a point, touch empty space to add one (and drag it),
-/// double-tap a point to take it away. The two ends stay.
+/// double-tap a point to take it away; the curve's two ends stay. With HDR on, the left and lower
+/// half of the graph is SDR (up to white) and the rest the range above white, up to the headroom:
+/// points there shape only the HDR highlights, and past the last point the curve goes on at slope 1.
 struct CurveEditor: View {
     @ObservedObject var model: EditorModel
     @State private var dragging: Int?
     @State private var working: [CGPoint] = []
+
+    /// The share of the graph SDR takes (all of it without HDR).
+    private var share: CGFloat { model.hdr ? 0.5 : 1 }
+    /// The display-encoded value of the HDR peak, where the graph ends.
+    private var top: CGFloat {
+        guard model.hdr else { return 1 }
+        let peak = pow(2, Swift.min(Swift.max(model.headroom, 0.1), 5))
+        return CGFloat(1.055 * pow(peak, 1 / 2.4) - 0.055)
+    }
+
+    /// Encoded curve value → 0…1 along an axis.
+    private func axis(_ v: CGFloat) -> CGFloat {
+        v <= 1 ? v * share : share + (v - 1) / Swift.max(top - 1, 1e-3) * (1 - share)
+    }
+
+    /// 0…1 along an axis → encoded value.
+    private func value(_ a: CGFloat) -> CGFloat {
+        let a = Swift.min(Swift.max(a, 0), 1)
+        return a <= share ? a / share : 1 + (a - share) / Swift.max(1 - share, 1e-3) * (top - 1)
+    }
 
     var body: some View {
         let ch = curveChannels[model.curveChannel]
@@ -733,10 +755,7 @@ struct CurveEditor: View {
         GeometryReader { geo in
             let size = geo.size
             let pts = dragging == nil ? model.curvePoints : working
-            // in HDR the curve's range (up to SDR white) is the lower-left half; above it the
-            // engine carries the curve on with slope 1, drawn but not editable
-            let k: CGFloat = model.hdr ? 0.5 : 1
-            let toView = { (p: CGPoint) in CGPoint(x: p.x * k * size.width, y: size.height - p.y * k * size.height) }
+            let toView = { (p: CGPoint) in CGPoint(x: axis(p.x) * size.width, y: (1 - axis(p.y)) * size.height) }
             ZStack {
                 Rectangle().strokeBorder(Color.white.opacity(0.3), lineWidth: 1)
                 Path { path in
@@ -755,27 +774,23 @@ struct CurveEditor: View {
                 }
                 .stroke(Color.white.opacity(0.18), style: StrokeStyle(lineWidth: 1, dash: [4, 4]))
                 Path { path in
-                    let curve = MonotoneCurve(pts)
-                    for i in 0...120 {
-                        let x = Double(i) / 120
-                        let p = toView(CGPoint(x: x, y: Swift.min(Swift.max(curve(x), 0), 1)))
+                    let n = 160
+                    for i in 0...n {
+                        let x = value(CGFloat(i) / CGFloat(n))
+                        let p = toView(CGPoint(x: x, y: Swift.min(Swift.max(curveValue(pts, x), 0), top)))
                         if i == 0 { path.move(to: p) } else { path.addLine(to: p) }
                     }
                 }
                 .stroke(color, lineWidth: 2.5)
                 .shadow(color: .black.opacity(0.5), radius: 2)
                 if model.hdr {
-                    let end = toView(CGPoint(x: 1, y: MonotoneCurve(pts)(1)))
                     Path { path in
-                        path.move(to: end)
-                        path.addLine(to: CGPoint(x: size.width, y: end.y - (1 - k) * size.height))
+                        path.move(to: CGPoint(x: share * size.width, y: 0))
+                        path.addLine(to: CGPoint(x: share * size.width, y: size.height))
+                        path.move(to: CGPoint(x: 0, y: (1 - share) * size.height))
+                        path.addLine(to: CGPoint(x: size.width, y: (1 - share) * size.height))
                     }
-                    .stroke(color.opacity(0.75), lineWidth: 2.5)
-                    Path { path in
-                        path.move(to: CGPoint(x: k * size.width, y: 0))
-                        path.addLine(to: CGPoint(x: k * size.width, y: size.height))
-                    }
-                    .stroke(Color.white.opacity(0.55), lineWidth: 1)
+                    .stroke(Color.white.opacity(0.5), lineWidth: 1)
                     HStack(spacing: 0) {
                         Text("SDR").frame(maxWidth: .infinity)
                         Text("HDR").frame(maxWidth: .infinity)
@@ -796,37 +811,53 @@ struct CurveEditor: View {
                 }
             }
             .contentShape(Rectangle())
-            .gesture(drag(CGSize(width: size.width * k, height: size.height * k), origin: size.height))
-            .simultaneousGesture(SpatialTapGesture(count: 2).onEnded { e in removePoint(near: e.location, size: CGSize(width: size.width * k, height: size.height * k), origin: size.height) })
+            .gesture(drag(size))
+            .simultaneousGesture(SpatialTapGesture(count: 2).onEnded { e in removePoint(near: e.location, size: size) })
             .accessibilityLabel(Text("\(ch.label) curve"))
             .accessibilityValue(Text("\(model.curvePoints.count) points"))
         }
     }
 
-    /// `size` is the editable area, anchored at the graph's bottom-left; `origin` is the graph's
-    /// full height (the bottom edge's y).
-    private func nearest(_ q: CGPoint, in pts: [CGPoint], size: CGSize, origin: CGFloat) -> Int? {
+    /// The curve at encoded `x`, as the engine renders it: below white the SDR points' curve; above
+    /// it the whole curve, continuing from the SDR curve's value at white, at slope 1 past its end.
+    private func curveValue(_ pts: [CGPoint], _ x: CGFloat) -> CGFloat {
+        let sdr = pts.filter { $0.x <= 1 + 1e-6 }
+        let low = MonotoneCurve(sdr.count >= 2 ? sdr : [CGPoint(x: 0, y: 0), CGPoint(x: 1, y: 1)])
+        if x <= 1 || !model.hdr { return CGFloat(low(Double(Swift.min(x, 1)))) }
+        let all = pts.sorted { $0.x < $1.x }
+        let ext = { (v: CGFloat) -> CGFloat in
+            guard let last = all.last else { return v }
+            if v >= last.x { return last.y + (v - last.x) }
+            return CGFloat(MonotoneCurve(all)(Double(v)))
+        }
+        return CGFloat(low(1)) + ext(x) - ext(1)
+    }
+
+    private func nearest(_ q: CGPoint, in pts: [CGPoint], size: CGSize) -> Int? {
         var best: (Int, CGFloat)?
         for (i, p) in pts.enumerated() {
-            let d = hypot(p.x * size.width - q.x, origin - p.y * size.height - q.y)
+            let d = hypot(axis(p.x) * size.width - q.x, (1 - axis(p.y)) * size.height - q.y)
             if d < 28, d < (best?.1 ?? .infinity) { best = (i, d) }
         }
         return best?.0
     }
 
-    private func unit(_ q: CGPoint, _ size: CGSize, origin: CGFloat) -> CGPoint {
-        CGPoint(x: Swift.min(Swift.max(q.x / size.width, 0), 1), y: Swift.min(Swift.max((origin - q.y) / size.height, 0), 1))
+    private func unit(_ q: CGPoint, _ size: CGSize) -> CGPoint {
+        CGPoint(x: value(q.x / Swift.max(size.width, 1)), y: value(1 - q.y / Swift.max(size.height, 1)))
     }
 
-    private func drag(_ size: CGSize, origin: CGFloat) -> some Gesture {
+    /// The SDR end (white, x = 1) keeps its place across while there is an HDR range beyond it.
+    private func isWhiteEnd(_ p: CGPoint) -> Bool { model.hdr && abs(p.x - 1) < 1e-6 }
+
+    private func drag(_ size: CGSize) -> some Gesture {
         DragGesture(minimumDistance: 0)
             .onChanged { g in
                 if dragging == nil {
                     var pts = model.curvePoints
-                    if let i = nearest(g.startLocation, in: pts, size: size, origin: origin) {
+                    if let i = nearest(g.startLocation, in: pts, size: size) {
                         dragging = i
                     } else {
-                        let p = unit(g.startLocation, size, origin: origin)
+                        let p = unit(g.startLocation, size)
                         let i = pts.firstIndex { $0.x > p.x } ?? pts.count
                         pts.insert(p, at: i)
                         dragging = i
@@ -836,11 +867,15 @@ struct CurveEditor: View {
                     model.setCurve(working)
                 }
                 guard let i = dragging, working.indices.contains(i) else { return }
-                var p = unit(g.location, size, origin: origin)
-                // a point stays between its neighbours; the ends keep to the edges' order
-                let lo = i == 0 ? 0 : working[i - 1].x + 0.01
-                let hi = i == working.count - 1 ? 1 : working[i + 1].x - 0.01
-                p.x = lo <= hi ? Swift.min(Swift.max(p.x, lo), hi) : working[i].x
+                var p = unit(g.location, size)
+                if isWhiteEnd(working[i]) {
+                    p.x = 1
+                } else {
+                    // a point stays between its neighbours
+                    let lo = i == 0 ? 0 : working[i - 1].x + 0.01
+                    let hi = i == working.count - 1 ? top : working[i + 1].x - 0.01
+                    p.x = lo <= hi ? Swift.min(Swift.max(p.x, lo), hi) : working[i].x
+                }
                 working[i] = p
                 model.setCurve(working)
             }
@@ -850,9 +885,9 @@ struct CurveEditor: View {
             }
     }
 
-    private func removePoint(near q: CGPoint, size: CGSize, origin: CGFloat) {
+    private func removePoint(near q: CGPoint, size: CGSize) {
         var pts = model.curvePoints
-        guard let i = nearest(q, in: pts, size: size, origin: origin), i != 0, i != pts.count - 1 else { return }
+        guard let i = nearest(q, in: pts, size: size), i != 0, i != pts.count - 1, !isWhiteEnd(pts[i]) else { return }
         pts.remove(at: i)
         model.beginCurve()
         model.setCurve(pts)

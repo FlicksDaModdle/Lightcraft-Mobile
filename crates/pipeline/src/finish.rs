@@ -25,6 +25,100 @@ fn smooth(e0: f32, e1: f32, x: f32) -> f32 {
     t * t * (3.0 - 2.0 * t)
 }
 
+/// A point curve's points as an SDR render sees them: points above SDR white (an HDR curve) left
+/// out, values kept inside 0..1. A curve without HDR points comes back unchanged.
+fn sdr_points(p: &[Point]) -> Vec<Point> {
+    p.iter().filter(|q| q.x <= 1.0 + 1e-9).map(|q| Point::new(q.x.min(1.0), q.y.clamp(0.0, 1.0))).collect()
+}
+
+/// The point curve up to SDR white, which every render (HDR too) uses below white: the points
+/// above white (an HDR curve) only shape what an HDR render puts above it ([`hdr_curve_luts`]).
+fn sdr_curve(c: &ToneCurve) -> std::borrow::Cow<'_, ToneCurve> {
+    if !c.has_hdr_points() {
+        return std::borrow::Cow::Borrowed(c);
+    }
+    let mut s = c.clone();
+    for ch in [&mut s.master, &mut s.red, &mut s.green, &mut s.blue] {
+        *ch = sdr_points(ch);
+    }
+    std::borrow::Cow::Owned(s)
+}
+
+/// The tone curves above SDR white in an HDR render, from a point curve with points there:
+/// per channel, [`CURVE_HDR_N`] values over encoded `1..top`. Past `top`, and past a curve's last
+/// point, the curve goes on with slope 1 (as a curve without HDR points always has).
+#[derive(Clone, Debug, PartialEq)]
+pub struct HdrCurves {
+    pub v: [Lut1; 3],
+    /// The encoded value of the render's peak, where the tables end.
+    pub top: f32,
+}
+
+/// Entries per [`HdrCurves`] table.
+pub const CURVE_HDR_N: usize = 1024;
+
+impl HdrCurves {
+    /// Channel `ch`'s curve at encoded `e` (above 1).
+    #[inline]
+    pub fn eval(&self, ch: usize, e: f32) -> f32 {
+        let Some(l) = self.v.get(ch) else { return e };
+        let n = l.v.len();
+        let (Some(&first), Some(&last)) = (l.v.first(), l.v.last()) else { return e };
+        if self.top <= 1.0 || n < 2 {
+            return first + (e - 1.0);
+        }
+        if e >= self.top {
+            return last + (e - self.top);
+        }
+        let f = ((e - 1.0) / (self.top - 1.0)).max(0.0) * (n - 1) as f32;
+        let i = (f as usize).min(n - 2);
+        let t = f - i as f32;
+        let (a, b) = (l.v.get(i).copied().unwrap_or(first), l.v.get(i + 1).copied().unwrap_or(last));
+        a + (b - a) * t
+    }
+}
+
+/// A point curve at `x` with the curve going on at slope 1 past its last point (identity when it
+/// has no points).
+fn extended(pts: &[Point], x: f64) -> f64 {
+    if ToneCurve::point_curve_is_identity(pts) {
+        return x;
+    }
+    let mut p: Vec<(f64, f64)> = pts.iter().map(|q| (q.x, q.y)).filter(|(a, b)| a.is_finite() && b.is_finite()).collect();
+    p.sort_by(|a, b| a.0.total_cmp(&b.0));
+    match p.last() {
+        Some(&(lx, ly)) if x >= lx => ly + (x - lx),
+        _ => MonotoneCurve::new(&p).eval(x),
+    }
+}
+
+/// [`HdrCurves`] for an HDR render (`peak` > 1) of a curve with points above SDR white; `None`
+/// otherwise, and the render goes on above white with slope 1 as before. `low` is the render's
+/// 0..1 tables: above white each channel continues from its value at 1.
+fn hdr_curve_luts(c: &ToneCurve, peak: f32, low: Option<&[Lut1; 3]>) -> Option<HdrCurves> {
+    if peak <= 1.0 || !c.has_hdr_points() {
+        return None;
+    }
+    let top = lightcraft_color::transfer::linear_to_srgb(peak).max(1.0 + 1e-3);
+    let per = [&c.red, &c.green, &c.blue];
+    let g = |k: usize, e: f64| extended(per[k], extended(&c.master, e));
+    Some(HdrCurves {
+        v: std::array::from_fn(|k| {
+            let at1 = low.and_then(|l| l.get(k)).map_or(1.0, |l| l.eval(1.0));
+            let g1 = g(k, 1.0);
+            Lut1 {
+                v: (0..CURVE_HDR_N)
+                    .map(|i| {
+                        let e = 1.0 + (f64::from(top) - 1.0) * i as f64 / (CURVE_HDR_N - 1) as f64;
+                        (f64::from(at1) + g(k, e) - g1) as f32
+                    })
+                    .collect(),
+            }
+        }),
+        top,
+    })
+}
+
 /// Parametric region curve (encoded domain) composed with the master point curve.
 fn curve_luts(c: &ToneCurve) -> Option<[Lut1; 3]> {
     let parametric = c.highlights != 0.0 || c.lights != 0.0 || c.darks != 0.0 || c.shadows != 0.0;
@@ -181,6 +275,8 @@ pub struct FinishParams {
     pub shadow_tint: f32,
     /// Tone curves (parametric ∘ point, per channel) on encoded values, 1024 entries each.
     pub curves: Option<[Lut1; 3]>,
+    /// An HDR render's curves above SDR white, when the point curve has points there.
+    pub curves_hdr: Option<HdrCurves>,
     /// Refine Saturation as 0..1 (1 = the curves' own saturation).
     pub refine_sat: f32,
     pub vig: Option<Vig>,
@@ -260,6 +356,13 @@ impl FinishParams {
         let grain = if effects && finite_frame { GrainModel::new(s, px_per_long, draft) } else { None };
         let calibration = s.section_enabled("calibration");
         let peak = s.hdr.peak();
+        let mut curves = curve_luts(&sdr_curve(&s.curve));
+        let curves_hdr = hdr_curve_luts(&s.curve, peak, curves.as_ref());
+        if curves_hdr.is_some() && curves.is_none() {
+            // straight below white, shaped above it: the curve stage still has to run (on the GPU too)
+            let straight = Lut1 { v: (0..1024).map(|i| i as f32 / 1023.0).collect() };
+            curves = Some([straight.clone(), straight.clone(), straight]);
+        }
         FinishParams {
             peak,
             calib: if calibration { crate::colorops::calibration_matrix(&s.calibration) } else { None },
@@ -268,7 +371,8 @@ impl FinishParams {
             light: crate::light_v3::LightOps::new(s, info),
             lut: crate::lut::get(&s.profile.id).map(|l| (l, (s.profile.amount / 100.0).clamp(0.0, 2.0) as f32)),
             ops: ColorOps::new(s),
-            curves: curve_luts(&s.curve),
+            curves,
+            curves_hdr,
             refine_sat: (s.curve.refine_saturation / 100.0).clamp(0.0, 1.0) as f32,
             vig: if effects { vignette(s) } else { None },
             to_out: space.from_working(),
@@ -433,7 +537,7 @@ pub(crate) fn finish_with<T: Copy + Default + Send>(
 ) -> Vec<T> {
     let (w, h) = (p.img.width, p.img.height);
     let p_lut = fp.lut.clone();
-    let FinishParams { light, curves, vig, to_out, out_luma, grain, .. } = fp;
+    let FinishParams { light, curves, curves_hdr, vig, to_out, out_luma, grain, .. } = fp;
     let terms: Vec<[f32; MASK_TERMS]> = p.masks.iter().map(|m| mask_terms(&m.adjust)).collect();
     let out_to_norm = fp.out_to_norm;
     let long = fp.ow.max(fp.oh);
@@ -575,8 +679,13 @@ pub(crate) fn finish_with<T: Copy + Default + Send>(
             if let Some(l) = curves {
                 let e0 = e;
                 e = if hdr {
-                    // above SDR white the curves continue with slope 1 from their end point
-                    std::array::from_fn(|k| if e[k] > 1.0 { l[k].eval(1.0) + (e[k] - 1.0) } else { l[k].eval(e[k]) })
+                    // above SDR white: the HDR curve where it has points there; otherwise the curves
+                    // continue with slope 1 from their end point
+                    std::array::from_fn(|k| match curves_hdr {
+                        Some(h) if e[k] > 1.0 => h.eval(k, e[k]),
+                        _ if e[k] > 1.0 => l[k].eval(1.0) + (e[k] - 1.0),
+                        _ => l[k].eval(e[k]),
+                    })
                 } else {
                     [l[0].eval(e[0]), l[1].eval(e[1]), l[2].eval(e[2])]
                 };
@@ -868,6 +977,33 @@ fn enc(v: f32, dither: f32) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hdr_curves_continue_from_the_sdr_curve_and_go_on_with_slope_one() {
+        // no points above white: no HDR tables, the render keeps slope 1 as it always did
+        let sdr_only = ToneCurve { master: vec![Point::new(0.0, 0.0), Point::new(0.5, 0.6), Point::new(1.0, 1.0)], ..ToneCurve::default() };
+        assert!(hdr_curve_luts(&sdr_only, 8.0, curve_luts(&sdr_only).as_ref()).is_none());
+        let c = ToneCurve { master: vec![Point::new(0.0, 0.0), Point::new(1.0, 1.0), Point::new(2.0, 1.6)], ..ToneCurve::default() };
+        // an SDR render never builds them
+        assert!(hdr_curve_luts(&c, 1.0, None).is_none());
+        let low = curve_luts(&c);
+        let h = hdr_curve_luts(&c, 8.0, low.as_ref()).expect("HDR tables");
+        assert_eq!(h.v[0].v.len(), CURVE_HDR_N);
+        let at1 = low.as_ref().map_or(1.0, |l| l[0].eval(1.0));
+        assert!((h.eval(0, 1.0) - at1).abs() < 1e-4, "continuous at SDR white");
+        assert!((h.eval(0, 2.0) - 1.6).abs() < 0.02, "through the HDR point, got {}", h.eval(0, 2.0));
+        // past the last point: slope 1
+        let (e1, e2) = (h.top - 0.2, h.top - 0.1);
+        assert!(((h.eval(0, e2) - h.eval(0, e1)) - 0.1).abs() < 0.01);
+        assert!(((h.eval(0, h.top + 1.0) - h.eval(0, h.top)) - 1.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn below_white_a_curve_drops_its_hdr_points_and_keeps_the_rest() {
+        let c = ToneCurve { red: vec![Point::new(0.0, 0.1), Point::new(1.0, 0.9), Point::new(1.8, 1.2)], ..ToneCurve::default() };
+        let sdr = sdr_curve(&c);
+        assert_eq!(sdr.red, vec![Point::new(0.0, 0.1), Point::new(1.0, 0.9)]);
+    }
 
     #[test]
     fn curve_luts_keep_1024_entries_when_composing_master_and_channel_curves() {

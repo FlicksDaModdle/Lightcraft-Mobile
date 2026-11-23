@@ -56,7 +56,9 @@ fn srgb_linear(v: f32) -> f32 {
     return pow((v + 0.055) / 1.055, 2.4);
 }
 
-// Above SDR white (an HDR render) the curves continue with slope 1 from their end point.
+// Above SDR white (an HDR render): the HDR curve's tables where the point curve has points
+// there (`lightcraft_pipeline::finish::HdrCurves::eval`), otherwise the curves continue with
+// slope 1 from their end point.
 fn curve(ch: u32, x: f32) -> f32 {
     let o = pu(F_CURVE_OFF) + ch * CURVE_N;
     let f = clamp(x, 0.0, 1.0) * f32(CURVE_N - 1u);
@@ -64,6 +66,20 @@ fn curve(ch: u32, x: f32) -> f32 {
     let t = f - f32(i);
     let v = aux[o + i] + (aux[o + i + 1u] - aux[o + i]) * t;
     if (x > 1.0 && pf(F_PEAK) > 1.0) {
+        if (pu(F_CURVES_HDR) != 0u) {
+            let oh = pu(F_CURVE_HDR_OFF) + ch * CURVE_N;
+            let top = pf(F_CURVE_HDR_TOP);
+            if (top <= 1.0) {
+                return aux[oh] + (x - 1.0);
+            }
+            if (x >= top) {
+                return aux[oh + CURVE_N - 1u] + (x - top);
+            }
+            let fh = max((x - 1.0) / (top - 1.0), 0.0) * f32(CURVE_N - 1u);
+            let ih = min(u32(fh), CURVE_N - 2u);
+            let th = fh - f32(ih);
+            return aux[oh + ih] + (aux[oh + ih + 1u] - aux[oh + ih]) * th;
+        }
         return v + (x - 1.0);
     }
     return v;
