@@ -16,7 +16,10 @@ struct EditorView: View {
     @State private var chromeHidden = false
     @State private var showingOriginal = false
     @State private var hold: Task<Void, Never>?
-    @AppStorage("editorBackground") private var background = EditorBackground.charcoal.rawValue
+    @AppStorage("editorBackground") private var background = EditorBackground.photo.rawValue
+    /// The colour taken from the photo, for the "From photo" background.
+    @State private var ambient: Color?
+    @Namespace private var glass
     @State private var sharing = false
     @State private var info: InfoBox?
     @State private var savingPreset = false
@@ -42,9 +45,18 @@ struct EditorView: View {
                 editScreen
             }
         }
-        .background((EditorBackground(rawValue: background) ?? .charcoal).color.ignoresSafeArea())
+        .background(backdrop.ignoresSafeArea())
         .animation(.easeInOut(duration: 0.3), value: background)
+        .task(id: model.image.map(ObjectIdentifier.init)) {
+            guard background == EditorBackground.photo.rawValue, let img = model.image else { return }
+            // wait for the slider to settle, then take the colour off the main thread
+            try? await Task.sleep(nanoseconds: 250_000_000)
+            guard !Task.isCancelled else { return }
+            let c = await Task.detached(priority: .utility) { Ambient.color(of: img) }.value
+            withAnimation(.easeInOut(duration: 0.8)) { ambient = c }
+        }
         .overlay(alignment: .top) { toast }
+        .animation(.glass, value: model.toast)
         .sheet(isPresented: $sharing) {
             ShareView(photos: library, current: model.photo.id)
                 .presentationDragIndicator(.visible)
@@ -164,20 +176,39 @@ struct EditorView: View {
                     .padding(.top, 6)
                 Group {
                     if model.mode == .presets {
-                        PresetsBar(cancel: { withAnimation { model.cancelPresets() } }, done: { withAnimation { model.donePresets() } })
+                        PresetsBar(cancel: { withAnimation(.glass) { model.cancelPresets() } }, done: { withAnimation(.glass) { model.donePresets() } })
+                            .latentGlassID("bottomBar", in: glass)
                     } else {
-                        ModeBar(mode: model.mode) { m in
+                        ModeBar(mode: model.mode, glassID: "bottomBar", namespace: glass) { m in
                             if m.available {
-                                withAnimation(.easeInOut(duration: 0.2)) { model.mode = m }
+                                UISelectionFeedbackGenerator().selectionChanged()
+                                withAnimation(.glass) { model.mode = m }
                             } else {
                                 model.toast = "\(m.label) is not in Latent yet. It's coming in a later build."
                             }
                         }
                     }
                 }
+                .latentGlassGroup()
                 .opacity(focused ? 0 : 1)
                 .transition(.move(edge: .bottom).combined(with: .opacity))
             }
+        }
+    }
+
+    /// What's behind the photo: a chosen grey, or a dark colour taken from the photo with a
+    /// soft glow in the middle.
+    @ViewBuilder private var backdrop: some View {
+        let choice = EditorBackground(rawValue: background) ?? .photo
+        if choice == .photo {
+            let base = ambient ?? choice.color
+            ZStack {
+                base
+                RadialGradient(colors: [base.opacity(0), Color.black.opacity(0.45)], center: .center, startRadius: 80, endRadius: 620)
+                LinearGradient(colors: [Color.white.opacity(0.05), .clear], startPoint: .top, endPoint: .center)
+            }
+        } else {
+            choice.color
         }
     }
 
@@ -188,16 +219,28 @@ struct EditorView: View {
             Button { dismiss() } label: { glassIcon("chevron.left", weight: .semibold) }
                 .accessibilityLabel(Text("Back"))
             Spacer()
-            HStack(spacing: 0) {
-                Button { model.undo() } label: { Image(systemName: "arrow.uturn.backward").frame(width: 42, height: 44) }
-                    .disabled(!model.canUndo)
-                    .accessibilityLabel(Text("Undo"))
-                Button { model.redo() } label: { Image(systemName: "arrow.uturn.forward").frame(width: 42, height: 44) }
-                    .disabled(!model.canRedo)
+            HStack(spacing: 4) {
+                Button { model.undo() } label: {
+                    Image(systemName: "arrow.uturn.backward")
+                        .frame(width: 44, height: 44)
+                        .latentGlass(in: Circle(), interactive: true)
+                        .latentGlassID("undo", in: glass)
+                }
+                .disabled(!model.canUndo)
+                .accessibilityLabel(Text("Undo"))
+                if model.canRedo {
+                    Button { model.redo() } label: {
+                        Image(systemName: "arrow.uturn.forward")
+                            .frame(width: 44, height: 44)
+                            .latentGlass(in: Circle(), interactive: true)
+                            .latentGlassID("redo", in: glass)
+                    }
                     .accessibilityLabel(Text("Redo"))
+                    .transition(.scale(scale: 0.4).combined(with: .opacity))
+                }
             }
-            .padding(.horizontal, 4)
-            .latentGlass(in: Capsule(), interactive: true)
+            .latentGlassGroup(spacing: 14)
+            .animation(.glass, value: model.canRedo)
             HStack(spacing: 0) {
                 Button { sharing = true } label: { Image(systemName: "square.and.arrow.up").frame(width: 42, height: 44) }
                     .accessibilityLabel(Text("Share"))
@@ -311,6 +354,7 @@ struct EditorView: View {
                 }
                 if let readout = model.readout {
                     Text(readout)
+                        .contentTransition(.numericText())
                         .font(.system(size: 14, weight: .semibold))
                         .monospacedDigit()
                         .padding(.horizontal, 14)
@@ -353,15 +397,22 @@ struct EditorView: View {
 
     private var card: some View {
         VStack(spacing: 0) {
-            switch model.mode {
-            case .presets: presetsPanel
-            case .crop: cropPanel
-            case .masks: masksPanel
-            default:
-                editPanel
-                ToolStrip(model: model).opacity(focused ? 0 : 1)
+            Group {
+                switch model.mode {
+                case .presets: presetsPanel
+                case .crop: cropPanel
+                case .masks: masksPanel
+                default:
+                    editPanel
+                    ToolStrip(model: model).opacity(focused ? 0 : 1)
+                }
             }
+            .id(model.mode)
+            .transition(.asymmetric(
+                insertion: .opacity.combined(with: .scale(scale: 0.97, anchor: .bottom)).combined(with: .offset(y: 8)),
+                removal: .opacity))
         }
+        .animation(.glass, value: model.mode)
         .background {
             RoundedRectangle(cornerRadius: 28, style: .continuous)
                 .fill(Color.black.opacity(0.2))
@@ -976,10 +1027,12 @@ struct EditorView: View {
                 .latentGlass(in: Capsule())
                 .padding(.top, 54)
                 .padding(.horizontal, 24)
-                .transition(.move(edge: .top).combined(with: .opacity))
+                .transition(.asymmetric(
+                    insertion: .scale(scale: 0.6, anchor: .top).combined(with: .opacity).combined(with: .offset(y: -20)),
+                    removal: .scale(scale: 0.9, anchor: .top).combined(with: .opacity)))
                 .task(id: text) {
                     try? await Task.sleep(nanoseconds: 2_400_000_000)
-                    withAnimation { model.toast = nil }
+                    withAnimation(.glass) { model.toast = nil }
                 }
         }
     }
@@ -1046,6 +1099,7 @@ struct GradingWheel: View {
 /// the ones that have changed the photo.
 struct ToolStrip: View {
     @ObservedObject var model: EditorModel
+    @Namespace private var slide
 
     var body: some View {
         ScrollView(.horizontal, showsIndicators: false) {
@@ -1054,7 +1108,10 @@ struct ToolStrip: View {
                 Rectangle().fill(Theme.separator).frame(width: 1, height: 32).padding(.horizontal, 4)
                 ForEach(Tool.strip) { t in
                     let on = model.tool == t || (t == .color && (model.tool == .mixer || model.tool == .grading)) || (t == .light && model.tool == .curve)
-                    item(t.label, symbol: t.symbol, selected: on, edited: model.edited(t)) { model.tool = t }
+                    item(t.label, symbol: t.symbol, selected: on, edited: model.edited(t)) {
+                        UISelectionFeedbackGenerator().selectionChanged()
+                        withAnimation(.glass) { model.tool = t }
+                    }
                 }
             }
             .padding(.horizontal, 10)
@@ -1067,6 +1124,7 @@ struct ToolStrip: View {
         Button(action: action) {
             VStack(spacing: 5) {
                 Image(systemName: symbol).font(.system(size: 20)).frame(height: 24)
+                    .symbolEffect(.bounce, value: selected)
                 Text(label).font(.system(size: 11))
                 Circle().fill(edited ? Theme.secondaryText : .clear).frame(width: 4, height: 4)
             }
@@ -1076,6 +1134,7 @@ struct ToolStrip: View {
                 if selected {
                     RoundedRectangle(cornerRadius: 16, style: .continuous).fill(Color.white.opacity(0.08))
                         .latentGlass(in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                        .matchedGeometryEffect(id: "selected", in: slide)
                 }
             }
         }
@@ -1085,10 +1144,20 @@ struct ToolStrip: View {
     }
 }
 
-/// The editing modes, in a floating glass bar.
+/// The editing modes, in a floating glass bar; the highlight slides to the chosen one.
 struct ModeBar: View {
     let mode: Mode
+    var glassID = "modeBar"
+    let namespace: Namespace.ID
     let choose: (Mode) -> Void
+    @Namespace private var slide
+
+    init(mode: Mode, glassID: String = "modeBar", namespace: Namespace.ID, choose: @escaping (Mode) -> Void) {
+        self.mode = mode
+        self.glassID = glassID
+        self.namespace = namespace
+        self.choose = choose
+    }
 
     var body: some View {
         HStack(spacing: 0) {
@@ -1097,8 +1166,16 @@ struct ModeBar: View {
                     Image(systemName: m.symbol)
                         .font(.system(size: 19))
                         .foregroundStyle(m == mode ? Color.white : Color(white: m.available ? 0.8 : 0.5))
+                        .symbolEffect(.bounce, value: m == mode)
                         .frame(width: 52, height: 40)
-                        .background(m == mode ? Theme.accent : .clear, in: Capsule())
+                        .background {
+                            if m == mode {
+                                Capsule()
+                                    .fill(Theme.accent)
+                                    .shadow(color: Theme.accent.opacity(0.45), radius: 8, y: 2)
+                                    .matchedGeometryEffect(id: "selected", in: slide)
+                            }
+                        }
                 }
                 .frame(maxWidth: .infinity)
                 .accessibilityLabel(Text(m.label))
@@ -1107,9 +1184,11 @@ struct ModeBar: View {
         }
         .padding(6)
         .latentGlass(in: Capsule(), interactive: true)
+        .latentGlassID(glassID, in: namespace)
         .padding(.horizontal, 14)
         .padding(.top, 8)
         .padding(.bottom, 4)
+        .animation(.glass, value: mode)
     }
 }
 
@@ -1741,10 +1820,11 @@ struct InfoBox: Identifiable {
 
 /// What surrounds the photo while editing.
 enum EditorBackground: String, CaseIterable, Identifiable {
-    case charcoal, gray, neutral, black, white
+    case photo, charcoal, gray, neutral, black, white
     var id: String { rawValue }
     var label: String {
         switch self {
+        case .photo: return "From photo"
         case .charcoal: return "Charcoal"
         case .gray: return "Dark gray"
         case .neutral: return "Neutral 18% gray"
@@ -1754,6 +1834,7 @@ enum EditorBackground: String, CaseIterable, Identifiable {
     }
     var color: Color {
         switch self {
+        case .photo: return Color(red: 0.075, green: 0.078, blue: 0.086)
         case .charcoal: return Color(red: 0.075, green: 0.078, blue: 0.086)
         case .gray: return Color(white: 0.17)
         // 18% reflectance is about 46% in sRGB: the grey a photo is judged against
