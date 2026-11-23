@@ -21,6 +21,109 @@ struct EditorView: View {
     private var focused: Bool { model.active != nil }
 
     var body: some View {
+        Group {
+            if model.tool == .curve && chrome {
+                curveScreen
+            } else {
+                editScreen
+            }
+        }
+        .background(Color.black.ignoresSafeArea())
+        .overlay(alignment: .top) { toast }
+        .statusBarHidden(!chrome)
+        .animation(.easeInOut(duration: 0.22), value: chrome)
+        .animation(.easeInOut(duration: 0.18), value: focused)
+        .animation(.easeInOut(duration: 0.25), value: model.tool == .curve)
+        .preferredColorScheme(.dark)
+        .onAppear { model.open() }
+        .onDisappear { Thumbnails.shared.forget(model.photo.id) }
+    }
+
+    /// The curve on its own screen: the photo with a large graph over it, and the channels below.
+    private var curveScreen: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 10) {
+                Button { model.tool = .light } label: { glassIcon("chevron.left", weight: .semibold) }
+                    .accessibilityLabel(Text("Back"))
+                Spacer()
+                HStack(spacing: 0) {
+                    Button { model.undo() } label: { Image(systemName: "arrow.uturn.backward").frame(width: 44, height: 44) }
+                        .disabled(!model.canUndo)
+                        .accessibilityLabel(Text("Undo"))
+                    Button { model.redo() } label: { Image(systemName: "arrow.uturn.forward").frame(width: 44, height: 44) }
+                        .disabled(!model.canRedo)
+                        .accessibilityLabel(Text("Redo"))
+                }
+                .padding(.horizontal, 4)
+                .latentGlass(in: Capsule(), interactive: true)
+            }
+            .font(.system(size: 17, weight: .medium))
+            .foregroundStyle(.white)
+            .padding(.horizontal, 16)
+            .frame(height: 52)
+            HistogramView(bins: model.histogram)
+                .frame(height: 64)
+                .padding(.horizontal, 24)
+                .padding(.bottom, 8)
+            GeometryReader { geo in
+                let side = Swift.min(geo.size.width - 40, geo.size.height - 8)
+                ZStack(alignment: .bottom) {
+                    photoArea
+                    CurveEditor(model: model)
+                        .frame(width: side, height: side)
+                        .padding(.bottom, 4)
+                }
+                .frame(width: geo.size.width, height: geo.size.height)
+            }
+            VStack(spacing: 14) {
+                HStack {
+                    Text("Curve").font(.system(size: 17, weight: .semibold)).foregroundStyle(Theme.secondaryText)
+                    Spacer()
+                    Button { model.tool = .light } label: {
+                        Text("Done")
+                            .font(.system(size: 16, weight: .semibold))
+                            .padding(.horizontal, 22)
+                            .frame(height: 38)
+                            .latentGlass(in: Capsule(), interactive: true)
+                    }
+                    .foregroundStyle(.white)
+                }
+                HStack(spacing: 0) {
+                    ForEach(curveChannels.indices, id: \.self) { i in
+                        let ch = curveChannels[i]
+                        let color = Color(red: ch.color.0, green: ch.color.1, blue: ch.color.2)
+                        Button { model.curveChannel = i } label: {
+                            Circle()
+                                .fill(model.curveChannel == i ? color : .clear)
+                                .overlay(Circle().strokeBorder(color, lineWidth: 3))
+                                .frame(width: 28, height: 28)
+                                .frame(width: 64, height: 44)
+                        }
+                        .accessibilityLabel(Text(ch.label))
+                        .accessibilityAddTraits(model.curveChannel == i ? .isSelected : [])
+                    }
+                    Spacer()
+                    Button { model.resetCurve() } label: {
+                        Image(systemName: "arrow.counterclockwise").font(.system(size: 18, weight: .semibold)).frame(width: 44, height: 44)
+                    }
+                    .foregroundStyle(.white)
+                    .accessibilityLabel(Text("Reset curve"))
+                }
+            }
+            .padding(.horizontal, 20)
+            .padding(.vertical, 16)
+            .background {
+                RoundedRectangle(cornerRadius: 28, style: .continuous)
+                    .fill(Color.black.opacity(0.2))
+                    .latentGlass(in: RoundedRectangle(cornerRadius: 28, style: .continuous), tint: Color.black.opacity(0.3))
+            }
+            .padding(.horizontal, 8)
+            .padding(.top, 8)
+            .padding(.bottom, 4)
+        }
+    }
+
+    private var editScreen: some View {
         VStack(spacing: 0) {
             if chrome {
                 topBar.opacity(focused ? 0 : 1)
@@ -49,14 +152,6 @@ struct EditorView: View {
                 .transition(.move(edge: .bottom).combined(with: .opacity))
             }
         }
-        .background(Color.black.ignoresSafeArea())
-        .overlay(alignment: .top) { toast }
-        .statusBarHidden(!chrome)
-        .animation(.easeInOut(duration: 0.22), value: chrome)
-        .animation(.easeInOut(duration: 0.18), value: focused)
-        .preferredColorScheme(.dark)
-        .onAppear { model.open() }
-        .onDisappear { Thumbnails.shared.forget(model.photo.id) }
     }
 
     // MARK: top
@@ -196,12 +291,7 @@ struct EditorView: View {
                 if model.tool == .grading { rangeChips }
             }
             .opacity(focused ? 0 : 1)
-            if model.tool == .curve {
-                CurveEditor(model: model)
-                    .frame(height: 196)
-                    .padding(.horizontal, 20)
-                    .padding(.vertical, 8)
-            } else if model.tool == .grading {
+            if model.tool == .grading {
                 GradingWheel(model: model)
                     .frame(height: 132)
                     .padding(.vertical, 6)
@@ -638,8 +728,7 @@ struct CurveEditor: View {
             let pts = dragging == nil ? model.curvePoints : working
             let toView = { (p: CGPoint) in CGPoint(x: p.x * size.width, y: (1 - p.y) * size.height) }
             ZStack {
-                RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Color.black.opacity(0.35))
-                HistogramView(bins: model.histogram).opacity(0.35).padding(.bottom, 1)
+                Rectangle().strokeBorder(Color.white.opacity(0.3), lineWidth: 1)
                 Path { path in
                     for i in 1..<4 {
                         let f = CGFloat(i) / 4
@@ -649,7 +738,7 @@ struct CurveEditor: View {
                         path.addLine(to: CGPoint(x: size.width, y: size.height * f))
                     }
                 }
-                .stroke(Color.white.opacity(0.12), lineWidth: 1)
+                .stroke(Color.white.opacity(0.25), lineWidth: 1)
                 Path { path in
                     path.move(to: CGPoint(x: 0, y: size.height))
                     path.addLine(to: CGPoint(x: size.width, y: 0))
@@ -664,6 +753,7 @@ struct CurveEditor: View {
                     }
                 }
                 .stroke(color, lineWidth: 2.5)
+                .shadow(color: .black.opacity(0.5), radius: 2)
                 ForEach(pts.indices, id: \.self) { i in
                     Circle()
                         .fill(Color.black.opacity(0.6))
