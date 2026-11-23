@@ -21,29 +21,52 @@ struct EditorView: View {
             if chrome {
                 topBar
                 HistogramView(bins: model.histogram)
-                    .frame(height: 70)
+                    .frame(height: 64)
                     .padding(.horizontal, 24)
-                    .padding(.top, 4)
-                    .padding(.bottom, 10)
+                    .padding(.top, 2)
+                    .padding(.bottom, 8)
             }
             photoArea
             if chrome {
                 VStack(spacing: 0) {
                     panel
                     ToolStrip(model: model)
-                    ModeBar { model.toast = "\($0) is not in Latent yet. It's coming in a later build." }
                 }
-                .background(Theme.surface)
-                .transition(.move(edge: .bottom).combined(with: .opacity))
+                .latentGlass(in: RoundedRectangle(cornerRadius: 30, style: .continuous), tint: Color.black.opacity(0.28))
+                .padding(.horizontal, 8)
+                .padding(.top, 8)
+                ModeBar { model.toast = "\($0) is not in Latent yet. It's coming in a later build." }
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
             }
         }
-        .background(Theme.photoBackground.ignoresSafeArea())
+        .background { backdrop }
         .overlay(alignment: .top) { toast }
         .statusBarHidden(!chrome)
         .animation(.easeInOut(duration: 0.22), value: chrome)
         .preferredColorScheme(.dark)
         .onAppear { model.open() }
         .onDisappear { Thumbnails.shared.forget(model.photo.id) }
+    }
+
+    /// Behind the controls: the photo again, blurred and dimmed, so the glass takes on its colours.
+    private var backdrop: some View {
+        GeometryReader { geo in
+            ZStack {
+                Color.black
+                if chrome, let img = model.image {
+                    Image(decorative: img, scale: 1)
+                        .resizable()
+                        .scaledToFill()
+                        .frame(width: geo.size.width, height: geo.size.height)
+                        .blur(radius: 60, opaque: true)
+                        .opacity(0.5)
+                        .clipped()
+                        .transition(.opacity)
+                }
+            }
+        }
+        .ignoresSafeArea()
+        .accessibilityHidden(true)
     }
 
     // MARK: parts
@@ -149,22 +172,15 @@ struct EditorView: View {
     }
 
     private var tabs: some View {
-        HStack(spacing: 28) {
+        Picker("Section", selection: $model.tab) {
             ForEach(Array(model.tool.tabs.enumerated()), id: \.offset) { i, tab in
-                Button { model.tab = i } label: {
-                    VStack(spacing: 6) {
-                        Text(tab.name)
-                            .font(.system(size: 15, weight: model.tab == i ? .medium : .regular))
-                            .foregroundStyle(model.tab == i ? Color.white : Theme.secondaryText)
-                        Capsule().fill(model.tab == i ? Color.white : .clear).frame(height: 2)
-                    }
-                    .fixedSize()
-                }
-                .accessibilityAddTraits(model.tab == i ? .isSelected : [])
+                Text(tab.name).tag(i)
             }
         }
-        .padding(.top, 12)
-        .padding(.bottom, 2)
+        .pickerStyle(.segmented)
+        .padding(.horizontal, 20)
+        .padding(.top, 14)
+        .padding(.bottom, 4)
     }
 
     private var colorHeader: some View {
@@ -231,7 +247,8 @@ struct ToolStrip: View {
             }
             .padding(.horizontal, 10)
         }
-        .frame(height: 70)
+        .frame(height: 74)
+        .padding(.bottom, 4)
     }
 
     private func item(_ label: String, symbol: String, selected: Bool, edited: Bool, action: @escaping () -> Void) -> some View {
@@ -243,7 +260,12 @@ struct ToolStrip: View {
             }
             .foregroundStyle(selected ? Color.white : Theme.secondaryText)
             .frame(width: 64, height: 62)
-            .background(selected ? Theme.selectedCell : .clear, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .background {
+                if selected {
+                    RoundedRectangle(cornerRadius: 16, style: .continuous).fill(Color.white.opacity(0.08))
+                        .latentGlass(in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                }
+            }
         }
         .buttonStyle(.plain)
         .accessibilityLabel(Text(label))

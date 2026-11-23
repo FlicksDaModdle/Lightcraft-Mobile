@@ -62,20 +62,30 @@ struct LatentSlider: View {
     private func track(width: CGFloat) -> some View {
         let x = CGFloat(control.position(control.value)) * width
         let x0 = CGFloat(control.position(control.defaultValue)) * width
+        let dragging = start != nil
         return ZStack(alignment: .leading) {
             if let stops = Theme.stops(control.track) {
-                Capsule().fill(LinearGradient(colors: stops, startPoint: .leading, endPoint: .trailing)).frame(height: 2)
+                Capsule().fill(LinearGradient(colors: stops, startPoint: .leading, endPoint: .trailing)).frame(height: 4)
             } else {
-                Capsule().fill(Theme.track).frame(height: 2)
+                Capsule().fill(Color.white.opacity(0.18)).frame(height: 4)
                 // the stretch moved from the default, so a changed slider reads at a glance
-                Rectangle().fill(Color.white.opacity(0.85)).frame(width: abs(x - x0), height: 2).offset(x: Swift.min(x, x0))
+                Capsule().fill(Color.white.opacity(0.9)).frame(width: abs(x - x0), height: 4).offset(x: Swift.min(x, x0))
             }
-            // the track breaks around the thumb
-            Circle().fill(Theme.surface).frame(width: 32, height: 32).offset(x: x - 16)
-            Circle()
-                .strokeBorder(start != nil ? Color.white : Theme.thumb, lineWidth: 2)
-                .frame(width: 24, height: 24)
-                .offset(x: x - 12)
+            // the thumb: a white pill at rest; a clear glass lozenge, larger, while it is dragged
+            Group {
+                if dragging {
+                    Capsule().fill(Color.white.opacity(0.06))
+                        .latentGlass(in: Capsule())
+                        .frame(width: 46, height: 30)
+                } else {
+                    Capsule().fill(Color.white)
+                        .frame(width: 34, height: 22)
+                        .shadow(color: .black.opacity(0.35), radius: 3, y: 1)
+                }
+            }
+            .frame(width: 46, height: 30)
+            .offset(x: x - 23)
+            .animation(.spring(response: 0.28, dampingFraction: 0.7), value: dragging)
         }
         .frame(height: 30)
     }
