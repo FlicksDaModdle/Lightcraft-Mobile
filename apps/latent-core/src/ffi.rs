@@ -123,6 +123,17 @@ pub unsafe extern "C" fn latent_render(core: *const Core, id: u64, max_w: u32, m
     give_image(if original { c.render_original(id, w, h) } else { c.render(id, w, h) })
 }
 
+/// Photo `id` with mask `mask` tinted red over it. Null on failure.
+///
+/// # Safety
+/// `core` from [`latent_open`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn latent_render_mask(core: *const Core, id: u64, max_w: u32, max_h: u32, mask: u32) -> *mut LatentImage {
+    // SAFETY: as documented above
+    let Some(c) = (unsafe { self::core(core) }) else { return std::ptr::null_mut() };
+    give_image(c.render_mask(id, max_w as usize, max_h as usize, mask))
+}
+
 /// Photo `id` uncropped and unstraightened (what the crop box is drawn over). Null on failure.
 ///
 /// # Safety

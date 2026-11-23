@@ -35,6 +35,15 @@ final class EditorModel: ObservableObject {
     @Published private(set) var cropRect = CGRect(x: 0, y: 0, width: 1, height: 1)
     @Published private(set) var flipH = false
     @Published private(set) var flipV = false
+    @Published private(set) var masks: [MaskItem] = []
+    @Published var selectedMask: UInt32? { didSet { if selectedMask != oldValue { render() } } }
+    /// The red overlay showing where the selected mask applies.
+    @Published var maskOverlay = true { didSet { render() } }
+    @Published var brushErase = false
+    /// Brush size (fraction of the long edge), feather and flow.
+    @Published var brushSize = 0.04
+    @Published var brushFeather = 50.0
+    @Published var brushFlow = 100.0
     @Published var mixerBand = 0
     @Published var gradingRange = 0
     @Published private(set) var presets: [Preset] = []
@@ -121,6 +130,114 @@ final class EditorModel: ObservableObject {
         attempt("develop.beginInteraction", ["label": "Color Grading"])
     }
 
+    // MARK: masks
+
+    var currentMask: MaskItem? { masks.first { $0.id == selectedMask } }
+
+    /// Add a mask of `kind` (brush, linear, radial) and select it.
+    func addMask(_ kind: String) {
+        do {
+            let r = try Engine.shared.run("mask.add", ["kind": kind]) as? [String: Any]
+            refresh()
+            selectedMask = (r?["activeMask"] as? NSNumber)?.uint32Value
+            mode = .masks
+            render()
+        } catch {
+            toast = error.localizedDescription
+        }
+    }
+
+    func selectMask(_ id: UInt32) {
+        attempt("mask.select", ["id": id])
+        selectedMask = id
+    }
+
+    func maskCommand(_ name: String, _ params: [String: Any] = [:]) {
+        guard let id = selectedMask else { return }
+        var p = params
+        p["id"] = id
+        command(name, p)
+    }
+
+    func maskControl(_ a: (key: String, label: String, min: Double, max: Double, step: Double, decimals: Int, track: Track)) -> Control {
+        Control(id: "mask.\(a.key)", label: a.label, min: a.min, max: a.max, defaultValue: 0, step: a.step, decimals: a.decimals,
+                value: currentMask?.adjust[a.key] ?? 0, track: a.track)
+    }
+
+    func beginMask(_ label: String) {
+        active = "mask.\(label)"
+        attempt("develop.beginInteraction", ["label": label])
+    }
+
+    /// Set one of the selected mask's adjustments (during a drag: between beginMask and end).
+    func adjustMask(_ key: String, _ value: Double) {
+        guard let id = selectedMask else { return }
+        attempt("mask.adjust", ["id": id, "values": [key: value]])
+        refreshMasksOnly()
+        render()
+    }
+
+    /// Paint (or erase) one brush stroke through `points` (mask coordinates).
+    func brushStroke(_ points: [CGPoint]) {
+        guard let id = selectedMask, !points.isEmpty else { return }
+        attempt("mask.brushStroke", [
+            "id": id, "points": points.map { [Double($0.x), Double($0.y)] }, "size": brushSize, "feather": brushFeather,
+            "flow": brushFlow, "erase": brushErase,
+        ])
+        refreshMasksOnly()
+        refreshHistory()
+        render()
+    }
+
+    /// Replace the selected mask's (first) shape: a gradient being drawn.
+    func updateMaskShape(_ shape: [String: Any]) {
+        guard let id = selectedMask else { return }
+        attempt("mask.update", ["id": id, "shape": shape])
+        refreshMasksOnly()
+        render()
+    }
+
+    private func refreshMasksOnly() {
+        guard let s = (try? Engine.shared.run("develop.get", ["id": photo.id])) as? [String: Any] else { return }
+        masks = (s["masks"] as? [Any] ?? []).compactMap(MaskItem.init)
+    }
+
+    // Mask coordinates are on the photo as oriented, normalized to its width and height; the
+    // editor shows it cropped, straightened and flipped. These go between the two (`u` is a point
+    // on the shown picture, 0…1 across and down).
+
+    /// Width over height of the whole oriented photo.
+    var photoAspect: CGFloat {
+        guard let img = image, cropRect.width > 0, cropRect.height > 0, img.height > 0 else { return 1 }
+        return (CGFloat(img.width) / cropRect.width) / (CGFloat(img.height) / cropRect.height)
+    }
+
+    func toMask(_ u: CGPoint) -> CGPoint {
+        let x = flipH ? 1 - u.x : u.x
+        let y = flipV ? 1 - u.y : u.y
+        let fx = cropRect.minX + x * cropRect.width
+        let fy = cropRect.minY + y * cropRect.height
+        let a = -cropAngle * .pi / 180
+        let (w, h) = (photoAspect, CGFloat(1))
+        let dx = (fx - 0.5) * w
+        let dy = (fy - 0.5) * h
+        return CGPoint(x: (dx * cos(a) - dy * sin(a)) / w + 0.5, y: (dx * sin(a) + dy * cos(a)) / h + 0.5)
+    }
+
+    func fromMask(_ m: CGPoint) -> CGPoint {
+        let a = cropAngle * .pi / 180
+        let (w, h) = (photoAspect, CGFloat(1))
+        let dx = (m.x - 0.5) * w
+        let dy = (m.y - 0.5) * h
+        let fx = (dx * cos(a) - dy * sin(a)) / w + 0.5
+        let fy = (dx * sin(a) + dy * cos(a)) / h + 0.5
+        var x = (fx - cropRect.minX) / Swift.max(cropRect.width, 1e-6)
+        var y = (fy - cropRect.minY) / Swift.max(cropRect.height, 1e-6)
+        if flipH { x = 1 - x }
+        if flipV { y = 1 - y }
+        return CGPoint(x: x, y: y)
+    }
+
     // MARK: curve
 
     /// The points of the open channel; the two ends when it has none yet.
@@ -161,6 +278,13 @@ final class EditorModel: ObservableObject {
             return "\(r.label)  \(h)°  \(s)"
         case "preset.amount": return "Amount  \(Int(presetAmount))"
         case "crop.angle": return "Straighten  \(angleControl.format(cropAngle))°"
+        case let m where m.hasPrefix("mask."):
+            let key = String(m.dropFirst(5))
+            if let a = maskAdjustments.first(where: { $0.key == key }) {
+                let c = maskControl(a)
+                return "\(c.label)  \(c.format(c.value))"
+            }
+            return nil
         default:
             guard let c = controls[a] else { return nil }
             return "\(c.label)  \(c.format(c.value))"
@@ -380,6 +504,8 @@ final class EditorModel: ObservableObject {
             bw = (s["treatment"] as? String) == "bw"
             wbMode = ((s["wb"] as? [String: Any])?["mode"] as? String) ?? "asShot"
             readCrop(s)
+            masks = (s["masks"] as? [Any] ?? []).compactMap(MaskItem.init)
+            if let sel = selectedMask, !masks.contains(where: { $0.id == sel }) { selectedMask = nil }
             let h = s["hdr"] as? [String: Any]
             hdr = h?["enabled"] as? Bool ?? false
             headroom = (h?["max_ev"] as? NSNumber)?.doubleValue ?? 3
@@ -416,10 +542,12 @@ final class EditorModel: ObservableObject {
         let id = photo.id
         let size = renderSize
         let cropping = mode == .crop
+        let overlay: UInt32? = (mode == .masks && maskOverlay) ? selectedMask : nil
         Task {
             let wantHDR = hdr
             let r = await Task.detached(priority: .userInitiated) {
                 if cropping { return Engine.shared.renderUncropped(id, fitting: size) }
+                if let m = overlay { return Engine.shared.renderMask(id, mask: m, fitting: size) }
                 return (wantHDR ? Engine.shared.renderHDR(id, fitting: size) : nil) ?? Engine.shared.render(id, fitting: size)
             }.value
             if cropping, let r {

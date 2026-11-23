@@ -66,7 +66,7 @@ struct Control: Identifiable, Equatable {
     }
 
     /// A slider the app makes itself (the crop's straighten angle, a preset's amount).
-    init(id: String, label: String, min: Double, max: Double, defaultValue: Double, step: Double, decimals: Int, value: Double) {
+    init(id: String, label: String, min: Double, max: Double, defaultValue: Double, step: Double, decimals: Int, value: Double, track: Track = .centered) {
         self.id = id
         self.label = label
         section = ""
@@ -75,7 +75,7 @@ struct Control: Identifiable, Equatable {
         self.defaultValue = defaultValue
         self.step = step
         self.decimals = decimals
-        track = .centered
+        self.track = track
         self.value = value
     }
 
@@ -259,7 +259,7 @@ enum Mode: String, CaseIterable {
     }
 
     /// Whether this build has the mode.
-    var available: Bool { [.presets, .crop, .edit].contains(self) }
+    var available: Bool { [.presets, .crop, .edit, .masks].contains(self) }
 }
 
 /// The point curve's channels: the engine's name, what it's called, and its colour.
@@ -321,4 +321,74 @@ struct MonotoneCurve {
         let t3 = t2 * t
         return (2 * t3 - 3 * t2 + 1) * ys[i] + (t3 - 2 * t2 + t) * h * ms[i] + (-2 * t3 + 3 * t2) * ys[i + 1] + (t3 - t2) * h * ms[i + 1]
     }
+}
+
+/// A mask's local adjustments: the `mask.adjust` key, its name, range, step, decimals and track.
+let maskAdjustments: [(key: String, label: String, min: Double, max: Double, step: Double, decimals: Int, track: Track)] = [
+    ("exposure", "Exposure", -4, 4, 0.01, 2, .centered),
+    ("contrast", "Contrast", -100, 100, 1, 0, .centered),
+    ("highlights", "Highlights", -100, 100, 1, 0, .centered),
+    ("shadows", "Shadows", -100, 100, 1, 0, .centered),
+    ("whites", "Whites", -100, 100, 1, 0, .centered),
+    ("blacks", "Blacks", -100, 100, 1, 0, .centered),
+    ("temp", "Temp", -100, 100, 1, 0, .temp),
+    ("tint", "Tint", -100, 100, 1, 0, .tint),
+    ("hue", "Hue", -100, 100, 1, 0, .rainbow),
+    ("saturation", "Saturation", -100, 100, 1, 0, .gradient("#7a7a7a", "#e04a3a")),
+    ("texture", "Texture", -100, 100, 1, 0, .centered),
+    ("clarity", "Clarity", -100, 100, 1, 0, .centered),
+    ("dehaze", "Dehaze", -100, 100, 1, 0, .centered),
+    ("sharpness", "Sharpness", -100, 100, 1, 0, .centered),
+    ("noise", "Noise", -100, 100, 1, 0, .centered),
+    ("moire", "Moir\u{E9}", -100, 100, 1, 0, .centered),
+    ("defringe", "Defringe", -100, 100, 1, 0, .centered),
+]
+
+/// A mask from the engine (`develop.get` → `masks`).
+struct MaskItem: Identifiable {
+    let id: UInt32
+    let name: String
+    let visible: Bool
+    let invert: Bool
+    /// The first component's shape (`kind` and its parameters).
+    let shape: [String: Any]
+    let adjust: [String: Double]
+
+    var kind: String { shape["kind"] as? String ?? "" }
+
+    var kindLabel: String {
+        switch kind {
+        case "brush": "Brush"
+        case "linear": "Linear gradient"
+        case "radial": "Radial gradient"
+        case "sky": "Sky"
+        case "subject": "Subject"
+        case "background": "Background"
+        case "luminanceRange": "Luminance range"
+        case "colorRange": "Color range"
+        default: kind.capitalized
+        }
+    }
+
+    init?(_ json: Any) {
+        guard let d = json as? [String: Any], let id = (d["id"] as? NSNumber)?.uint32Value else { return nil }
+        self.id = id
+        name = d["name"] as? String ?? "Mask \(id)"
+        visible = d["visible"] as? Bool ?? true
+        invert = d["invert"] as? Bool ?? false
+        let comps = d["components"] as? [[String: Any]] ?? []
+        shape = comps.first?["shape"] as? [String: Any] ?? [:]
+        var adj: [String: Double] = [:]
+        for (k, v) in d["adjust"] as? [String: Any] ?? [:] {
+            if let n = v as? NSNumber, !(v is Bool) { adj[k] = n.doubleValue }
+        }
+        adjust = adj
+    }
+
+    func point(_ key: String) -> CGPoint? {
+        guard let p = shape[key] as? [String: Any], let x = (p["x"] as? NSNumber)?.doubleValue, let y = (p["y"] as? NSNumber)?.doubleValue else { return nil }
+        return CGPoint(x: x, y: y)
+    }
+
+    func number(_ key: String, _ fallback: Double) -> Double { (shape[key] as? NSNumber)?.doubleValue ?? fallback }
 }

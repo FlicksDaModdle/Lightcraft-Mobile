@@ -112,6 +112,18 @@ impl Core {
         self.finish(job.run())
     }
 
+    /// The photo with mask `mask` shown as a red tint over it (where the mask applies), for
+    /// drawing masks.
+    pub fn render_mask(&self, id: u64, max_w: usize, max_h: usize, mask: u32) -> Result<Image, String> {
+        let mut job = self.lock().render_job(PhotoId(id), max_w.max(1), max_h.max(1), false, true).ok_or("no such photo")?;
+        let mask = u16::try_from(mask).map_err(|_| "no such mask")?;
+        job.request.overlay =
+            lightcraft_pipeline::Overlay::Mask { id: mask, view: lightcraft_pipeline::MaskView::Color, color: [235, 64, 64], opacity: 50 };
+        job.key ^= 0x4d41_534b_0000_0000 ^ u64::from(mask).rotate_left(23);
+        job.cache = None;
+        self.finish(job.run())
+    }
+
     /// The whole photo, not cropped or straightened (flips and the rest of the edit applied), to
     /// fit `max_w` × `max_h`: what the crop box is drawn over.
     pub fn render_uncropped(&self, id: u64, max_w: usize, max_h: usize) -> Result<Image, String> {
@@ -328,6 +340,10 @@ mod tests {
         let plain = core.render(id, 96, 96).map(|i| i.rgba).unwrap_or_default();
         assert_ne!(thumb.map(|i| i.rgba).unwrap_or_default(), plain, "the preview should show the preset");
         assert!(core.render_uncropped(id, 96, 96).is_ok());
+        let m = ok(&core.execute("mask.add", r#"{"kind":"radial"}"#));
+        let mid = m["activeMask"].as_u64().unwrap_or(0) as u32;
+        let tinted = core.render_mask(id, 96, 96, mid).map(|i| i.rgba).unwrap_or_default();
+        assert!(!tinted.is_empty() && tinted != plain, "the mask overlay should tint the photo");
     }
 
     #[test]

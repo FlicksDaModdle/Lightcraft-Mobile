@@ -29,6 +29,8 @@ void latent_close(LatentCore *core);
 char *latent_execute(const LatentCore *core, const char *cmd, const char *params);
 
 LatentImage *latent_render(const LatentCore *core, uint64_t id, uint32_t max_w, uint32_t max_h, bool original);
+// The photo with mask `mask` tinted red over it (drawing masks).
+LatentImage *latent_render_mask(const LatentCore *core, uint64_t id, uint32_t max_w, uint32_t max_h, uint32_t mask);
 // The photo uncropped and unstraightened (the crop box is drawn over it).
 LatentImage *latent_render_uncropped(const LatentCore *core, uint64_t id, uint32_t max_w, uint32_t max_h);
 // A preview of a preset (by id) on the photo, without editing it.

@@ -87,6 +87,15 @@ final class Engine: @unchecked Sendable {
         return Rendered(image: cg, histogram: hist, peak: i.peak)
     }
 
+    /// The photo with a mask tinted red over it, for drawing masks.
+    func renderMask(_ id: UInt64, mask: UInt32, fitting size: CGSize) -> Rendered? {
+        let w = UInt32(max(1, size.width.rounded()))
+        let h = UInt32(max(1, size.height.rounded()))
+        guard let img = latent_render_mask(core, id, w, h, mask) else { return nil }
+        defer { latent_image_free(img) }
+        return Self.convert(img.pointee)
+    }
+
     /// The whole photo, not cropped or straightened: what the crop box is drawn over.
     func renderUncropped(_ id: UInt64, fitting size: CGSize) -> Rendered? {
         let w = UInt32(max(1, size.width.rounded()))

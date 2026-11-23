@@ -9,6 +9,8 @@ struct EditorView: View {
     @AppStorage("histogramShown") private var showHistogram = true
     @State private var naming = false
     @State private var newPresetName = ""
+    @State private var renamingMask = false
+    @State private var maskName = ""
     @State private var chromeHidden = false
     @State private var showingOriginal = false
     @State private var hold: Task<Void, Never>?
@@ -212,7 +214,10 @@ struct EditorView: View {
                 } else {
                     ProgressView().tint(.white).frame(width: geo.size.width, height: geo.size.height)
                 }
-                if showHistogram && chrome && model.tool != .curve && model.mode != .crop && !focused {
+                if model.mode == .masks && chrome, let img = model.image, model.currentMask != nil {
+                    MaskCanvas(model: model, imageSize: CGSize(width: img.width, height: img.height), size: geo.size)
+                }
+                if showHistogram && chrome && model.tool != .curve && model.mode != .crop && model.mode != .masks && !focused {
                     HistogramView(bins: model.histogram, hdrStops: model.showingHDR ? model.headroom : nil)
                         .frame(height: model.showingHDR ? 62 : 50)
                         .padding(.horizontal, 10)
@@ -245,10 +250,10 @@ struct EditorView: View {
                 }
             }
             .contentShape(Rectangle())
-            .onTapGesture { if model.mode != .crop { chromeHidden.toggle() } }
+            .onTapGesture { if model.mode != .crop && model.mode != .masks { chromeHidden.toggle() } }
             .onLongPressGesture(minimumDuration: 0.3, maximumDistance: 24, perform: {}, onPressingChanged: { pressing in
                 hold?.cancel()
-                if pressing && model.mode != .crop {
+                if pressing && model.mode != .crop && model.mode != .masks {
                     // a hold, not a tap: show the photo as it was
                     hold = Task {
                         try? await Task.sleep(nanoseconds: 250_000_000)
@@ -272,6 +277,7 @@ struct EditorView: View {
             switch model.mode {
             case .presets: presetsPanel
             case .crop: cropPanel
+            case .masks: masksPanel
             default:
                 editPanel
                 ToolStrip(model: model).opacity(focused ? 0 : 1)
@@ -312,12 +318,24 @@ struct EditorView: View {
             }
             .opacity(focused ? 0 : 1)
             if model.tool == .grading {
-                GradingWheel(model: model)
-                    .frame(height: 132)
-                    .padding(.vertical, 6)
-                    .opacity(focused && model.active != "wheel" ? 0 : 1)
-            }
-            if model.tool != .curve {
+                // the wheel scrolls away with the sliders under it; swipe beside it to scroll
+                GeometryReader { g in
+                    ScrollView {
+                        VStack(spacing: 0) {
+                            let side = Swift.min(g.size.width - 120, 270)
+                            GradingWheel(model: model)
+                                .frame(width: side, height: side)
+                                .padding(.vertical, 14)
+                                .opacity(focused && model.active != "wheel" ? 0 : 1)
+                            ForEach(model.visible) { slider($0) }
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.bottom, 8)
+                    }
+                    .scrollIndicators(.visible)
+                }
+                .frame(height: 300)
+            } else if model.tool != .curve {
                 ScrollView {
                     LazyVStack(spacing: 0) {
                         ForEach(model.visible) { slider($0) }
@@ -325,7 +343,7 @@ struct EditorView: View {
                     .padding(.vertical, 4)
                 }
                 .scrollIndicators(.visible)
-                .frame(height: model.tool == .grading ? 150 : (model.tool == .light ? 150 : 168))
+                .frame(height: model.tool == .light ? 150 : 168)
             }
         }
     }
@@ -473,6 +491,190 @@ struct EditorView: View {
         .pickerStyle(.segmented)
         .padding(.horizontal, 20)
         .padding(.top, 10)
+    }
+
+    // MARK: masks
+
+    private var masksPanel: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 10) {
+                Text("Masks").font(.system(size: 17, weight: .semibold))
+                Spacer()
+                if model.currentMask != nil {
+                    Button { model.maskOverlay.toggle() } label: {
+                        Image(systemName: model.maskOverlay ? "eye" : "eye.slash").font(.system(size: 15, weight: .semibold)).frame(width: 36, height: 32)
+                    }
+                    .accessibilityLabel(Text(model.maskOverlay ? "Hide the overlay" : "Show the overlay"))
+                }
+                Menu {
+                    Button { model.addMask("brush") } label: { Label("Brush", systemImage: "paintbrush.pointed") }
+                    Button { model.addMask("linear") } label: { Label("Linear gradient", systemImage: "rectangle.split.1x2") }
+                    Button { model.addMask("radial") } label: { Label("Radial gradient", systemImage: "circle.dashed") }
+                    Divider()
+                    ForEach(["Subject", "Sky", "Background"], id: \.self) { k in
+                        Button {
+                            model.toast = "\(k) masks need the SAM 3 AI model (about 3.4 GB), which this build doesn't include."
+                        } label: { Label(k, systemImage: k == "Sky" ? "cloud.sun" : "person.crop.rectangle") }
+                    }
+                } label: {
+                    Label("Add", systemImage: "plus").font(.system(size: 14, weight: .medium))
+                        .padding(.horizontal, 12)
+                        .frame(height: 32)
+                        .latentGlass(in: Capsule(), interactive: true)
+                }
+            }
+            .foregroundStyle(.white)
+            .padding(.horizontal, 16)
+            .padding(.top, 12)
+            .opacity(focused ? 0 : 1)
+            if model.masks.isEmpty {
+                VStack(spacing: 8) {
+                    Image(systemName: "circle.dashed.inset.filled").font(.system(size: 30, weight: .light)).foregroundStyle(Theme.secondaryText)
+                    Text("Add a mask to change one part of the photo: paint it with a brush, or draw a linear or radial gradient.")
+                        .font(.system(size: 14))
+                        .foregroundStyle(Theme.secondaryText)
+                        .multilineTextAlignment(.center)
+                }
+                .padding(.horizontal, 30)
+                .frame(height: 200)
+            } else {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        ForEach(model.masks) { m in
+                            let on = m.id == model.selectedMask
+                            Button { model.selectMask(m.id) } label: {
+                                HStack(spacing: 6) {
+                                    Image(systemName: maskSymbol(m.kind)).font(.system(size: 12, weight: .semibold))
+                                    Text(m.name).font(.system(size: 14, weight: on ? .semibold : .regular))
+                                    if !m.visible { Image(systemName: "eye.slash").font(.system(size: 11)) }
+                                }
+                                .foregroundStyle(on ? Color.black : Color.white)
+                                .padding(.horizontal, 12)
+                                .frame(height: 32)
+                                .background(on ? Color.white : Color.white.opacity(0.1), in: Capsule())
+                            }
+                        }
+                    }
+                    .padding(.horizontal, 16)
+                }
+                .padding(.top, 10)
+                .opacity(focused ? 0 : 1)
+                if let m = model.currentMask {
+                    HStack {
+                        Text(maskHint(m)).font(.system(size: 13)).foregroundStyle(Theme.secondaryText).lineLimit(2)
+                        Spacer()
+                        Menu {
+                            Button { model.maskCommand("mask.visible", ["visible": !m.visible]) } label: {
+                                Label(m.visible ? "Hide" : "Show", systemImage: m.visible ? "eye.slash" : "eye")
+                            }
+                            Button { model.maskCommand("mask.invert") } label: { Label("Invert", systemImage: "circle.righthalf.filled") }
+                            Button {
+                                maskName = m.name
+                                renamingMask = true
+                            } label: { Label("Rename", systemImage: "pencil") }
+                            Button(role: .destructive) { model.maskCommand("mask.delete") } label: { Label("Delete", systemImage: "trash") }
+                        } label: {
+                            Image(systemName: "ellipsis").font(.system(size: 16, weight: .semibold)).frame(width: 40, height: 32)
+                        }
+                        .foregroundStyle(.white)
+                        .accessibilityLabel(Text("\(m.name) options"))
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.top, 6)
+                    .opacity(focused ? 0 : 1)
+                    ScrollView {
+                        LazyVStack(spacing: 0) {
+                            if m.kind == "brush" { brushControls }
+                            if m.kind == "radial" {
+                                maskShapeSlider("Feather", key: "feather", m: m, min: 0, max: 100)
+                            }
+                            ForEach(maskAdjustments, id: \.key) { a in
+                                let c = model.maskControl(a)
+                                LatentSlider(
+                                    control: c,
+                                    onBegin: { model.beginMask(a.key) },
+                                    onChange: { model.adjustMask(a.key, $0) },
+                                    onEnd: { model.end() },
+                                    onReset: {
+                                        model.beginMask(a.key)
+                                        model.adjustMask(a.key, 0)
+                                        model.end()
+                                    })
+                                    .opacity(focused && model.active != c.id ? 0 : 1)
+                            }
+                        }
+                        .padding(.vertical, 4)
+                    }
+                    .frame(height: 176)
+                } else {
+                    Text("Pick a mask above, or add one.")
+                        .font(.system(size: 14))
+                        .foregroundStyle(Theme.secondaryText)
+                        .frame(height: 120)
+                }
+            }
+        }
+        .padding(.bottom, 4)
+        .alert("Rename mask", isPresented: $renamingMask) {
+            TextField("Name", text: $maskName)
+            Button("Cancel", role: .cancel) {}
+            Button("Rename") { model.maskCommand("mask.rename", ["name": maskName]) }
+        }
+    }
+
+    private func maskSymbol(_ kind: String) -> String {
+        switch kind {
+        case "brush": "paintbrush.pointed"
+        case "linear": "rectangle.split.1x2"
+        case "radial": "circle.dashed"
+        default: "circle.dashed.inset.filled"
+        }
+    }
+
+    private func maskHint(_ m: MaskItem) -> String {
+        switch m.kind {
+        case "brush": model.brushErase ? "Erasing: drag over the photo to take the mask away." : "Painting: drag over the photo to add to the mask."
+        case "linear": "Drag across the photo: full effect where you start, none where you stop."
+        case "radial": "Drag out from a centre to draw it; drag inside it to move it."
+        default: m.kindLabel
+        }
+    }
+
+    private var brushControls: some View {
+        VStack(spacing: 0) {
+            Picker("Brush", selection: $model.brushErase) {
+                Text("Paint").tag(false)
+                Text("Erase").tag(true)
+            }
+            .pickerStyle(.segmented)
+            .padding(.horizontal, 20)
+            .padding(.vertical, 6)
+            settingSlider("Size", value: $model.brushSize, min: 0.005, max: 0.3, scale: 100, decimals: 1)
+            settingSlider("Feather", value: $model.brushFeather, min: 0, max: 100, scale: 1, decimals: 0)
+            settingSlider("Flow", value: $model.brushFlow, min: 1, max: 100, scale: 1, decimals: 0)
+        }
+    }
+
+    /// A slider for a tool setting (not an edit): no undo step, no render.
+    private func settingSlider(_ label: String, value: Binding<Double>, min: Double, max: Double, scale: Double, decimals: Int) -> some View {
+        let c = Control(id: "setting.\(label)", label: label, min: min * scale, max: max * scale, defaultValue: value.wrappedValue * scale,
+                        step: decimals == 0 ? 1 : 0.1, decimals: decimals, value: value.wrappedValue * scale, track: .plain)
+        return LatentSlider(control: c, onBegin: {}, onChange: { value.wrappedValue = $0 / scale }, onEnd: {}, onReset: {})
+    }
+
+    /// A slider for a number in the selected mask's shape (a radial's feather).
+    private func maskShapeSlider(_ label: String, key: String, m: MaskItem, min: Double, max: Double) -> some View {
+        let c = Control(id: "shape.\(key)", label: label, min: min, max: max, defaultValue: 50, step: 1, decimals: 0, value: m.number(key, 50), track: .plain)
+        return LatentSlider(
+            control: c,
+            onBegin: { model.beginMask(label) },
+            onChange: { v in
+                var shape = m.shape
+                shape[key] = v
+                model.updateMaskShape(shape)
+            },
+            onEnd: { model.end() },
+            onReset: {})
     }
 
     // MARK: presets
@@ -1176,5 +1378,169 @@ struct CropEditor: View {
         let len2 = Swift.max(dx * dx + dy * dy, 1e-6)
         let t = Swift.min(Swift.max(((p.x - a.x) * dx + (p.y - a.y) * dy) / len2, 0), 1)
         return hypot(p.x - (a.x + t * dx), p.y - (a.y + t * dy))
+    }
+}
+
+/// Drawing the selected mask on the photo: a brush paints (or erases) where you drag; a linear
+/// gradient runs from where you start to where you stop; a radial is drawn out from its centre,
+/// or moved by dragging inside it. Outlines show the gradients; the red overlay shows the result.
+struct MaskCanvas: View {
+    @ObservedObject var model: EditorModel
+    let imageSize: CGSize
+    let size: CGSize
+    @State private var stroke: [CGPoint] = []
+    @State private var start: (mask: MaskItem, at: CGPoint)?
+
+    /// Where the picture sits in the view, fitted.
+    private var fitted: CGRect {
+        guard imageSize.width > 0, imageSize.height > 0 else { return .zero }
+        let s = Swift.min(size.width / imageSize.width, size.height / imageSize.height)
+        let w = imageSize.width * s
+        let h = imageSize.height * s
+        return CGRect(x: (size.width - w) / 2, y: (size.height - h) / 2, width: w, height: h)
+    }
+
+    private func toMask(_ q: CGPoint) -> CGPoint {
+        let f = fitted
+        return model.toMask(CGPoint(x: (q.x - f.minX) / Swift.max(f.width, 1), y: (q.y - f.minY) / Swift.max(f.height, 1)))
+    }
+
+    private func toView(_ m: CGPoint) -> CGPoint {
+        let f = fitted
+        let u = model.fromMask(m)
+        return CGPoint(x: f.minX + u.x * f.width, y: f.minY + u.y * f.height)
+    }
+
+    /// View points per unit of the photo's long edge.
+    private var perLongEdge: CGFloat {
+        let f = fitted
+        let a = model.photoAspect
+        let perWidth = f.width / Swift.max(model.cropRect.width, 1e-6)
+        return a >= 1 ? perWidth : perWidth / Swift.max(a, 1e-6)
+    }
+
+    var body: some View {
+        let m = model.currentMask
+        ZStack {
+            if let m {
+                outline(m)
+            }
+            if !stroke.isEmpty {
+                Path { p in p.addLines(stroke) }
+                    .stroke(Color.white.opacity(0.7), style: StrokeStyle(lineWidth: Swift.max(2, model.brushSize * perLongEdge * 2), lineCap: .round, lineJoin: .round))
+                    .opacity(0.35)
+            }
+        }
+        .frame(width: size.width, height: size.height)
+        .contentShape(Rectangle())
+        .gesture(
+            DragGesture(minimumDistance: 0)
+                .onChanged { g in
+                    guard let m = model.currentMask else { return }
+                    switch m.kind {
+                    case "brush":
+                        if stroke.isEmpty { model.beginMask("Brush") }
+                        stroke.append(g.location)
+                    case "linear":
+                        if start == nil {
+                            start = (m, g.startLocation)
+                            model.beginMask("Linear Gradient")
+                        }
+                        let a = toMask(g.startLocation)
+                        let b = toMask(g.location)
+                        model.updateMaskShape(["kind": "linear", "start": ["x": a.x, "y": a.y], "end": ["x": b.x, "y": b.y]])
+                    case "radial":
+                        if start == nil {
+                            start = (m, g.startLocation)
+                            model.beginMask("Radial Gradient")
+                        }
+                        guard let s = start else { return }
+                        var shape = s.mask.shape
+                        let c0 = s.mask.point("center") ?? CGPoint(x: 0.5, y: 0.5)
+                        let cv = toView(c0)
+                        let rx = s.mask.number("rx", 0.2)
+                        let inside = hypot(s.at.x - cv.x, s.at.y - cv.y) < CGFloat(rx) * perLongEdge * 0.8
+                        if inside {
+                            // move it
+                            let d0 = toMask(s.at)
+                            let d1 = toMask(g.location)
+                            shape["center"] = ["x": c0.x + d1.x - d0.x, "y": c0.y + d1.y - d0.y]
+                        } else {
+                            // draw a new one out from where the drag began
+                            let c = toMask(s.at)
+                            let r = Swift.max(Double(hypot(g.location.x - s.at.x, g.location.y - s.at.y) / perLongEdge), 0.02)
+                            let ratio = s.mask.number("ry", 0.16) / Swift.max(rx, 1e-3)
+                            shape["center"] = ["x": c.x, "y": c.y]
+                            shape["rx"] = r
+                            shape["ry"] = r * ratio
+                        }
+                        model.updateMaskShape(shape)
+                    default:
+                        break
+                    }
+                }
+                .onEnded { _ in
+                    if !stroke.isEmpty {
+                        model.brushStroke(stroke.map(toMask))
+                        stroke = []
+                        model.end()
+                    }
+                    if start != nil {
+                        start = nil
+                        model.end()
+                    }
+                }
+        )
+        .accessibilityLabel(Text("Mask drawing area"))
+    }
+
+    @ViewBuilder
+    private func outline(_ m: MaskItem) -> some View {
+        switch m.kind {
+        case "linear":
+            if let a = m.point("start"), let b = m.point("end") {
+                let va = toView(a)
+                let vb = toView(b)
+                let dx = vb.x - va.x
+                let dy = vb.y - va.y
+                let len = Swift.max(hypot(dx, dy), 1)
+                let n = CGPoint(x: -dy / len * 2000, y: dx / len * 2000)
+                ZStack {
+                    Path { p in
+                        p.move(to: CGPoint(x: va.x - n.x, y: va.y - n.y))
+                        p.addLine(to: CGPoint(x: va.x + n.x, y: va.y + n.y))
+                        p.move(to: CGPoint(x: vb.x - n.x, y: vb.y - n.y))
+                        p.addLine(to: CGPoint(x: vb.x + n.x, y: vb.y + n.y))
+                    }
+                    .stroke(Color.white, lineWidth: 1.5)
+                    Path { p in
+                        p.move(to: va)
+                        p.addLine(to: vb)
+                    }
+                    .stroke(Color.white.opacity(0.8), style: StrokeStyle(lineWidth: 1, dash: [5, 4]))
+                    Circle().fill(Color.white).frame(width: 12, height: 12).position(va)
+                    Circle().strokeBorder(Color.white, lineWidth: 2).frame(width: 12, height: 12).position(vb)
+                }
+                .clipShape(Rectangle().path(in: fitted))
+                .shadow(color: .black.opacity(0.5), radius: 1.5)
+            }
+        case "radial":
+            if let c = m.point("center") {
+                let vc = toView(c)
+                let rx = CGFloat(m.number("rx", 0.2)) * perLongEdge
+                let ry = CGFloat(m.number("ry", 0.16)) * perLongEdge
+                ZStack {
+                    Ellipse()
+                        .stroke(Color.white, lineWidth: 1.5)
+                        .frame(width: rx * 2, height: ry * 2)
+                        .rotationEffect(.degrees(m.number("angle", 0)))
+                        .position(vc)
+                    Circle().fill(Color.white).frame(width: 10, height: 10).position(vc)
+                }
+                .shadow(color: .black.opacity(0.5), radius: 1.5)
+            }
+        default:
+            EmptyView()
+        }
     }
 }
