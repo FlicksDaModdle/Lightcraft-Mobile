@@ -33,6 +33,8 @@
 	<true/>
 	<key>LSSupportsOpeningDocumentsInPlace</key>
 	<true/>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>Latent shows the photos on this iPhone so you can pick ones to edit. Only the photos you open are copied into Latent.</string>
 	<key>NSPhotoLibraryAddUsageDescription</key>
 	<string>Latent saves your edited photos to your library when you ask it to.</string>
 	<key>UISupportedInterfaceOrientations</key>

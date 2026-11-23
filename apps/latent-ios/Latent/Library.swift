@@ -10,6 +10,19 @@ final class Library: ObservableObject {
     @Published private(set) var photos: [Photo] = []
     @Published private(set) var importing = false
     @Published var notice: String?
+    @Published var filter: LibraryFilter = .all
+    @Published var sort: LibrarySort = .newest
+
+    /// The photos the filter lets through, in the chosen order.
+    var shown: [Photo] {
+        let kept = photos.filter(filter.keeps)
+        switch sort {
+        case .newest: return kept.sorted { ($0.captured, $0.id) > ($1.captured, $1.id) }
+        case .oldest: return kept.sorted { ($0.captured, $0.id) < ($1.captured, $1.id) }
+        case .added: return kept.sorted { $0.id > $1.id }
+        case .name: return kept.sorted { $0.fileName.localizedStandardCompare($1.fileName) == .orderedAscending }
+        }
+    }
 
     init() {
         notice = Engine.shared.problem
@@ -28,17 +41,46 @@ final class Library: ObservableObject {
 
     /// Add files the picker copied into the Import folder.
     func add(_ urls: [URL]) {
-        guard !urls.isEmpty else { return }
+        Task { _ = await importFiles(urls) }
+    }
+
+    /// Add files and return the new photos' ids.
+    func importFiles(_ urls: [URL]) async -> [UInt64] {
+        guard !urls.isEmpty else { return [] }
         importing = true
         let paths = urls.map(\.path)
-        Task {
-            let result: Result<Any, Error> = await Task.detached(priority: .userInitiated) {
-                Result { try Engine.shared.run("library.import", ["paths": paths]) }
-            }.value
-            importing = false
-            if case .failure(let e) = result { notice = e.localizedDescription }
-            reload()
+        let result: Result<Any, Error> = await Task.detached(priority: .userInitiated) {
+            Result { try Engine.shared.run("library.import", ["paths": paths]) }
+        }.value
+        importing = false
+        reload()
+        switch result {
+        case .success(let v):
+            return ((v as? [String: Any])?["imported"] as? [NSNumber])?.map(\.uint64Value) ?? []
+        case .failure(let e):
+            notice = e.localizedDescription
+            return []
         }
+    }
+
+    func photo(_ id: UInt64) -> Photo? { photos.first { $0.id == id } }
+
+    func rate(_ p: Photo, _ stars: Int) { change("photo.rate", ["rating": stars, "ids": [p.id]]) }
+    func flag(_ p: Photo, _ flag: String) { change("photo.flag", ["flag": flag, "ids": [p.id]]) }
+
+    /// Take a photo out of the library (the engine keeps it in Recently Deleted).
+    func remove(_ p: Photo) {
+        change("photo.delete", ["ids": [p.id]])
+        Thumbnails.shared.forget(p.id)
+    }
+
+    private func change(_ command: String, _ params: [String: Any]) {
+        do {
+            try Engine.shared.run(command, params)
+        } catch {
+            notice = error.localizedDescription
+        }
+        reload()
     }
 
     /// Where picked photos are copied before they are added: Documents/Import (shown in Files).
@@ -122,4 +164,50 @@ final class Thumbnails: @unchecked Sendable {
 
     /// Forget a photo's thumbnail (after it was edited).
     func forget(_ id: UInt64) { cache.removeObject(forKey: NSNumber(value: id)) }
+}
+
+/// Which photos the library shows.
+enum LibraryFilter: String, CaseIterable, Identifiable {
+    case all, edited, unedited, picks, rated
+    var id: String { rawValue }
+    var label: String {
+        switch self {
+        case .all: return "All photos"
+        case .edited: return "Edited"
+        case .unedited: return "Not edited"
+        case .picks: return "Picks"
+        case .rated: return "Rated"
+        }
+    }
+    var symbol: String {
+        switch self {
+        case .all: return "photo.on.rectangle"
+        case .edited: return "slider.horizontal.3"
+        case .unedited: return "photo"
+        case .picks: return "flag.fill"
+        case .rated: return "star.fill"
+        }
+    }
+    func keeps(_ p: Photo) -> Bool {
+        switch self {
+        case .all: return true
+        case .edited: return p.edited
+        case .unedited: return !p.edited
+        case .picks: return p.flag == "pick"
+        case .rated: return p.rating > 0
+        }
+    }
+}
+
+enum LibrarySort: String, CaseIterable, Identifiable {
+    case newest, oldest, added, name
+    var id: String { rawValue }
+    var label: String {
+        switch self {
+        case .newest: return "Newest first"
+        case .oldest: return "Oldest first"
+        case .added: return "Recently added"
+        case .name: return "File name"
+        }
+    }
 }

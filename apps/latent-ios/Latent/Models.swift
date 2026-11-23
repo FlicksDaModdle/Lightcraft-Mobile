@@ -6,12 +6,22 @@ struct Photo: Identifiable, Hashable {
     let id: UInt64
     let fileName: String
     let edited: Bool
+    /// When it was taken, as the engine writes it (ISO 8601, so it sorts as text).
+    let captured: String
+    let rating: Int
+    /// "pick", "reject" or "none".
+    let flag: String
+    let format: String
 
     init?(_ json: Any) {
         guard let d = json as? [String: Any], let id = (d["id"] as? NSNumber)?.uint64Value else { return nil }
         self.id = id
         fileName = d["fileName"] as? String ?? ""
         edited = d["edited"] as? Bool ?? false
+        captured = d["captured"] as? String ?? ""
+        rating = (d["rating"] as? NSNumber)?.intValue ?? 0
+        flag = (d["flag"] as? String)?.lowercased() ?? "none"
+        format = (d["format"] as? String)?.lowercased() ?? ""
     }
 }
 
