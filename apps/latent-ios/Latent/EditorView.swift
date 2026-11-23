@@ -471,7 +471,7 @@ struct EditorView: View {
             }
             .contentShape(Rectangle())
             .clipped()
-            .simultaneousGesture(pinch(geo.size), including: model.mode == .crop ? .subviews : .all)
+            .gesture(pinch(geo.size))
             .simultaneousGesture(panWhenZoomed(geo.size), including: zoom > 1.01 && !drawsOnPhoto ? .all : .subviews)
             .onTapGesture(count: 2) { at in
                 guard model.mode != .crop else { return }
@@ -560,6 +560,8 @@ struct EditorView: View {
     private func pinch(_ size: CGSize) -> PinchPan {
         PinchPan(
             began: {
+                // the crop box has the photo to itself
+                guard model.mode != .crop else { return }
                 pinchStart = (zoom, pan)
                 model.pinching = true
             },
@@ -574,6 +576,7 @@ struct EditorView: View {
                 pan = clampPan(CGSize(width: now.x - c.x - px * z, height: now.y - c.y - py * z), size, z)
             },
             ended: {
+                guard pinchStart != nil else { return }
                 pinchStart = nil
                 model.pinching = false
                 if zoom < 1.05 {
@@ -3133,13 +3136,20 @@ struct PinchPan: UIGestureRecognizerRepresentable {
     let changed: (_ scale: CGFloat, _ now: CGPoint, _ start: CGPoint) -> Void
     let ended: () -> Void
 
-    final class Coordinator {
+    final class Coordinator: NSObject, UIGestureRecognizerDelegate {
         var start: CGPoint = .zero
+
+        // drawing, dragging sliders and the photo's own gestures carry on beside the pinch
+        func gestureRecognizer(_ g: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool { true }
     }
 
     func makeCoordinator(converter: CoordinateSpaceConverter) -> Coordinator { Coordinator() }
 
-    func makeUIGestureRecognizer(context: Context) -> UIPinchGestureRecognizer { UIPinchGestureRecognizer() }
+    func makeUIGestureRecognizer(context: Context) -> UIPinchGestureRecognizer {
+        let r = UIPinchGestureRecognizer()
+        r.delegate = context.coordinator
+        return r
+    }
 
     func handleUIGestureRecognizerAction(_ recognizer: UIPinchGestureRecognizer, context: Context) {
         let at = context.converter.localLocation
