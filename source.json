@@ -1,0 +1,44 @@
+{
+  "name": "Latent",
+  "identifier": "app.latent.source",
+  "subtitle": "Latent builds, straight from the repository.",
+  "website": "https://github.com/FlicksDaModdle/Lightcraft-Mobile",
+  "iconURL": "https://raw.githubusercontent.com/FlicksDaModdle/Lightcraft-Mobile/main/apps/latent-ios/Latent/Assets.xcassets/AppIcon.appiconset/AppIcon-1024.png",
+  "tintColor": "#2978F5",
+  "apps": [
+    {
+      "name": "Latent",
+      "bundleIdentifier": "app.latent.Latent",
+      "developerName": "Latent contributors",
+      "subtitle": "A raw photo editor, built on the LightCraft engine.",
+      "localizedDescription": "Latent edits photos on your iPhone and iPad: light, colour, curves, HDR, colour grading, effects, detail, crop and presets, all non-destructive. Built on the open-source LightCraft engine; every build of the main branch is published here.",
+      "iconURL": "https://raw.githubusercontent.com/FlicksDaModdle/Lightcraft-Mobile/main/apps/latent-ios/Latent/Assets.xcassets/AppIcon.appiconset/AppIcon-1024.png",
+      "tintColor": "#2978F5",
+      "category": "photo-video",
+      "screenshots": [],
+      "appPermissions": {
+        "entitlements": [],
+        "privacy": {
+          "NSPhotoLibraryAddUsageDescription": "Latent saves your edited photos to your library when you ask it to."
+        }
+      },
+      "versions": [
+        {
+          "version": "0.1.36",
+          "buildVersion": "36",
+          "date": "2026-11-23T14:27:30Z",
+          "localizedDescription": "Build 36 of the main branch.",
+          "downloadURL": "https://github.com/FlicksDaModdle/Lightcraft-Mobile/releases/download/latent-v0.1.36/Latent.ipa",
+          "size": 20331980,
+          "minOSVersion": "17.0"
+        }
+      ],
+      "version": "0.1.36",
+      "versionDate": "2026-11-23T14:27:30Z",
+      "versionDescription": "Build 36 of the main branch.",
+      "downloadURL": "https://github.com/FlicksDaModdle/Lightcraft-Mobile/releases/download/latent-v0.1.36/Latent.ipa",
+      "size": 20331980
+    }
+  ],
+  "news": []
+}
