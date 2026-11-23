@@ -42,7 +42,7 @@ final class Library: ObservableObject {
     }
 
     /// Where picked photos are copied before they are added: Documents/Import (shown in Files).
-    static var importFolder: URL {
+    nonisolated static var importFolder: URL {
         let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
         let dir = docs.appendingPathComponent("Import", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
