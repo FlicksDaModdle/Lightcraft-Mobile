@@ -1,0 +1,89 @@
+import CoreGraphics
+import Foundation
+
+/// An error the engine reported, in its own words.
+struct EngineError: LocalizedError {
+    let message: String
+    var errorDescription: String? { message }
+}
+
+/// A rendered photo and its red, green and blue histograms (256 bins each).
+struct Rendered: @unchecked Sendable {
+    let image: CGImage
+    let histogram: [UInt32]
+}
+
+/// The LightCraft engine, through the C bridge. Every edit is an engine command, the same commands
+/// the desktop app and the command line use. Safe to call from any thread (the engine locks).
+final class Engine: @unchecked Sendable {
+    static let shared = Engine()
+
+    private let core: OpaquePointer
+    /// Why the library couldn't be opened, if it couldn't (an empty one is used instead).
+    let problem: String?
+
+    private init() {
+        var problemText: UnsafeMutablePointer<CChar>? = nil
+        core = latent_open(nil, &problemText)
+        if let p = problemText {
+            problem = String(cString: p)
+            latent_string_free(p)
+        } else {
+            problem = nil
+        }
+    }
+
+    /// Run an engine command and return its result (a JSON value as Foundation objects).
+    @discardableResult
+    func run(_ command: String, _ params: [String: Any] = [:]) throws -> Any {
+        let data = try JSONSerialization.data(withJSONObject: params)
+        let json = String(data: data, encoding: .utf8) ?? "{}"
+        guard let out = latent_execute(core, command, json) else {
+            throw EngineError(message: "\(command): the engine gave no answer")
+        }
+        defer { latent_string_free(out) }
+        let answer = try JSONSerialization.jsonObject(with: Data(String(cString: out).utf8), options: [.fragmentsAllowed])
+        guard let dict = answer as? [String: Any] else {
+            throw EngineError(message: "\(command): the engine's answer could not be read")
+        }
+        if let error = dict["error"] as? String {
+            throw EngineError(message: error)
+        }
+        return dict["ok"] ?? NSNull()
+    }
+
+    /// The photo with its edits (or, with `original`, without them), fitted inside `size` pixels.
+    func render(_ id: UInt64, fitting size: CGSize, original: Bool = false) -> Rendered? {
+        let w = UInt32(max(1, size.width.rounded()))
+        let h = UInt32(max(1, size.height.rounded()))
+        guard let img = latent_render(core, id, w, h, original) else { return nil }
+        defer { latent_image_free(img) }
+        return Self.convert(img.pointee)
+    }
+
+    /// A thumbnail with the photo's edits.
+    func thumbnail(_ id: UInt64, longEdge: Int) -> CGImage? {
+        guard let img = latent_thumb(core, id, UInt32(max(16, longEdge))) else { return nil }
+        defer { latent_image_free(img) }
+        return Self.convert(img.pointee)?.image
+    }
+
+    private static func convert(_ img: LatentImage) -> Rendered? {
+        let w = Int(img.width)
+        let h = Int(img.height)
+        guard w > 0, h > 0, let pixels = img.rgba, img.rgba_len >= w * h * 4 else { return nil }
+        let data = Data(bytes: pixels, count: w * h * 4)
+        let space = CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
+        guard let provider = CGDataProvider(data: data as CFData),
+              let cg = CGImage(
+                  width: w, height: h, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: w * 4, space: space,
+                  bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.noneSkipLast.rawValue),
+                  provider: provider, decode: nil, shouldInterpolate: true, intent: .defaultIntent)
+        else { return nil }
+        var hist: [UInt32] = []
+        if let bins = img.hist, img.hist_len > 0 {
+            hist = Array(UnsafeBufferPointer(start: bins, count: img.hist_len))
+        }
+        return Rendered(image: cg, histogram: hist)
+    }
+}

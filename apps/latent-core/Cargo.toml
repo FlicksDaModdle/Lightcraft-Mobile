@@ -1,0 +1,33 @@
+[package]
+name = "lightcraft-latent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Latent's engine bridge: a C interface over the LightCraft engine for the SwiftUI iPhone app (apps/latent-ios). Allowed `unsafe` only in its `ffi` module, for the C calls."
+
+[lib]
+crate-type = ["staticlib", "rlib"]
+
+# Like crates/iospicker: opts out of the workspace lints only so `unsafe_code` can be allowed in the
+# one module that takes C pointers. The core API is safe.
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+cognitive_complexity = "deny"
+too_many_arguments = "deny"
+wildcard_imports = "deny"
+dbg_macro = "warn"
+todo = "warn"
+
+[features]
+default = ["heif"]
+# Open HEIC/HEIF photos (what an iPhone takes).
+heif = ["lightcraft-codecs/heif"]
+
+[dependencies]
+lightcraft-engine = { workspace = true }
+lightcraft-codecs = { workspace = true }
+serde_json = { workspace = true }
+log = { workspace = true }

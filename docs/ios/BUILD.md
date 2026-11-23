@@ -1,3 +1,24 @@
+# Latent: the SwiftUI iPhone and iPad app
+
+Latent is a SwiftUI app over the LightCraft engine:
+
+- `apps/latent-core` (crate `lightcraft-latent`) is the engine bridge: a static library with a small
+  C interface (`include/latent.h`): open the library, run any engine command (JSON in, JSON out),
+  render a photo or thumbnail to RGBA with its histogram. Every edit is an engine command, as in the
+  desktop app. Its `ffi` module is allowed `unsafe` for the C pointers (a departure from the
+  repository's Rust-only and no-`unsafe` rules, recorded here; it is registered in `xtask` like
+  `crates/iospicker`).
+- `apps/latent-ios` is the Swift app (XcodeGen spec `project.yml`). `build.sh` builds the bridge
+  for `aarch64-apple-ios`, generates the Xcode project and builds `Latent-unsigned.ipa`.
+- CI (`.github/workflows/ios.yml`) uploads that IPA as the `Latent-iOS` artifact. Install it with
+  Sideloadly or AltStore, which sign it with your Apple ID.
+
+Latent keeps its library in its own Documents folder (shown in the Files app); photos you add are
+copied into `Documents/Import` first.
+
+The sections below describe the earlier egui phone app (`apps/lightcraft-ios`), which is still in
+the repository and still checked on Linux, but no longer packaged by CI.
+
 # Building and installing on your iPhone
 
 The app is built by GitHub Actions on a macOS runner (`.github/workflows/ios.yml`). You don't need

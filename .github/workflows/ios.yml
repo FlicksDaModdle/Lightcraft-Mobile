@@ -1,7 +1,7 @@
-# Builds LightCraft for iPhone and iPad on a macOS runner and, when the signing secrets are set,
-# signs it into LightCraft.ipa; without them it makes LightCraft-unsigned.ipa, which Sideloadly or
-# AltStore signs with your Apple ID when installing.
-# Setup and secrets: docs/ios/BUILD.md
+# Builds Latent (the SwiftUI iPhone and iPad app over the LightCraft engine, apps/latent-ios) on a
+# macOS runner into Latent-unsigned.ipa, which Sideloadly or AltStore signs with your Apple ID when
+# installing. The earlier egui phone app (apps/lightcraft-ios) is still checked on Linux.
+# Setup: docs/ios/BUILD.md
 name: iOS
 
 on:
@@ -38,9 +38,9 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo fmt -p lightcraft-ios -- --check
-      - run: cargo clippy -p lightcraft-ios --all-targets -- -D warnings
-      - run: cargo test -p lightcraft-ios
+      - run: cargo fmt -p lightcraft-ios -p lightcraft-latent -- --check
+      - run: cargo clippy -p lightcraft-ios -p lightcraft-latent --all-targets -- -D warnings
+      - run: cargo test -p lightcraft-ios -p lightcraft-latent
 
   ios:
     runs-on: macos-15
@@ -52,22 +52,13 @@ jobs:
           targets: aarch64-apple-ios
       - uses: Swatinem/rust-cache@v2
         with:
-          key: ios-${{ inputs.profile || 'release' }}
-      - name: Build for iPhone and iPad
-        run: cargo build --profile "${{ inputs.profile || 'release' }}" --target aarch64-apple-ios -p lightcraft-ios
-      - name: Package and sign
-        env:
-          IOS_CERT_P12: ${{ secrets.IOS_CERT_P12 }}
-          IOS_CERT_PASSWORD: ${{ secrets.IOS_CERT_PASSWORD }}
-          IOS_PROVISION_PROFILE: ${{ secrets.IOS_PROVISION_PROFILE }}
-          IOS_BUNDLE_ID: ${{ vars.IOS_BUNDLE_ID }}
-        run: |
-          mkdir -p out
-          apps/lightcraft-ios/ios/package.sh "target/aarch64-apple-ios/${{ inputs.profile || 'release' }}/lightcraft-ios" out
+          key: latent-ios
+      - name: Install XcodeGen
+        run: brew install xcodegen
+      - name: Build Latent
+        run: apps/latent-ios/build.sh out
       - uses: actions/upload-artifact@v4
         with:
-          name: LightCraft-iOS
-          path: |
-            out/LightCraft.ipa
-            out/LightCraft-unsigned.ipa
+          name: Latent-iOS
+          path: out/Latent-unsigned.ipa
           if-no-files-found: error
