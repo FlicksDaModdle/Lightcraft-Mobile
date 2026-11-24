@@ -70,7 +70,10 @@ struct EditorView: View {
             ModelSheet(DepthModel) { model.estimateDepth() }
         }
         .sheet(isPresented: $model.showSelectionModel) {
-            ModelSheet(SelectionModel) { Sam2.forget() }
+            ModelSheet(SelectionModel) {
+                Sam2.forget()
+                model.prepareSelection()
+            }
         }
         .sheet(isPresented: $model.showInpaintModel) {
             ModelSheet(InpaintModel) { model.inpaintModelInstalled() }

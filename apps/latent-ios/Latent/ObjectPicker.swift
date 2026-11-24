@@ -118,26 +118,47 @@ enum Sam2 {
     private static let lock = NSLock()
     private static var encoded: (key: String, features: MLFeatureProvider)?
 
+    /// Whether the picture for `key` is already encoded (then no picture is needed).
+    static func hasEncoding(_ key: String) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return encoded?.key == key
+    }
+
+    /// Load the three parts now (the first load on an iPhone prepares them for its Neural Engine,
+    /// which takes a while), so the first tap doesn't wait for it.
+    static func warmUp() {
+        _ = SelectionModel.load(0)
+        _ = SelectionModel.load(1)
+        _ = SelectionModel.load(2)
+    }
+
+    /// Encode the picture for `key` ahead of the first tap (the slow part of a selection).
+    static func encode(_ image: CGImage, key: String) throws {
+        guard !hasEncoding(key), let encoder = SelectionModel.load(0) else { return }
+        guard let input = encoder.modelDescription.inputDescriptionsByName.first(where: { $0.value.type == .image }),
+              let constraint = input.value.imageConstraint
+        else { throw EngineError(message: "The selection model has an unexpected input.") }
+        let v = try MLFeatureValue(cgImage: image, constraint: constraint, options: [.cropAndScale: 2])
+        let features = try encoder.prediction(from: MLDictionaryFeatureProvider(dictionary: [input.key: v]))
+        lock.lock()
+        encoded = (key, features)
+        lock.unlock()
+    }
+
     /// Logits (`side × side`, over the picture stretched to a square, above 0 inside) for the
     /// taps: `points` 0…1 across and down the picture, `true` to include, `false` to leave out.
-    static func select(_ image: CGImage, key: String, points: [(CGPoint, Bool)]) throws -> (values: [Float], side: Int)? {
+    /// `image` is needed only when the picture for `key` isn't encoded yet.
+    static func select(_ image: CGImage?, key: String, points: [(CGPoint, Bool)]) throws -> (values: [Float], side: Int)? {
         guard let encoder = SelectionModel.load(0), let prompts = SelectionModel.load(1), let decoder = SelectionModel.load(2), !points.isEmpty else { return nil }
         guard let input = encoder.modelDescription.inputDescriptionsByName.first(where: { $0.value.type == .image }),
               let constraint = input.value.imageConstraint
         else { throw EngineError(message: "The selection model has an unexpected input.") }
-        let features: MLFeatureProvider
+        if let image { try encode(image, key: key) }
         lock.lock()
         let hit = encoded?.key == key ? encoded?.features : nil
         lock.unlock()
-        if let hit {
-            features = hit
-        } else {
-            let v = try MLFeatureValue(cgImage: image, constraint: constraint, options: [.cropAndScale: 2])
-            features = try encoder.prediction(from: MLDictionaryFeatureProvider(dictionary: [input.key: v]))
-            lock.lock()
-            encoded = (key, features)
-            lock.unlock()
-        }
+        guard let features = hit else { return nil }
         // the taps, in the encoder's pixels
         let (sw, sh) = (Float(constraint.pixelsWide), Float(constraint.pixelsHigh))
         let n = points.count

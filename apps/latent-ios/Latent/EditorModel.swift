@@ -32,10 +32,12 @@ final class EditorModel: ObservableObject {
             if mode == .remove {
                 removeEntry = historyCursor()
                 selectedSpot = nil
+                prepareSelection()
             }
             if mode == .masks {
                 masksEntry = historyCursor()
                 selectedPart = 0
+                prepareSelection()
                 refreshThumbs()
             }
             // the crop box is drawn over the whole photo; every other mode shows the result
@@ -1160,6 +1162,20 @@ final class EditorModel: ObservableObject {
 
     @Published var showSelectionModel = false
 
+    /// Get the selection model ready for this photo before the first tap: load it and encode the
+    /// picture in the background (Masking and Remove call this as they open).
+    func prepareSelection() {
+        guard SelectionModel.installed else { return }
+        let id = photo.id
+        let key = selectionKey
+        guard !Sam2.hasEncoding(key) else { return }
+        Task.detached(priority: .utility) {
+            Sam2.warmUp()
+            guard !Sam2.hasEncoding(key), let img = Engine.shared.renderUncropped(id, fitting: CGSize(width: 1024, height: 1024))?.image else { return }
+            try? Sam2.encode(img, key: key)
+        }
+    }
+
     func startPicking(_ purpose: String) {
         UIImpactFeedbackGenerator(style: .light).impactOccurred()
         pickingObject = purpose
@@ -1178,14 +1194,16 @@ final class EditorModel: ObservableObject {
         let useModel = SelectionModel.installed
         return await Task.detached(priority: .userInitiated) {
             Result {
-                guard let img = Engine.shared.renderUncropped(id, fitting: CGSize(width: 1024, height: 1024))?.image else { return nil }
                 if useModel {
+                    // the picture only when it isn't encoded yet (rendering it is half the wait)
+                    let img = Sam2.hasEncoding(key) ? nil : Engine.shared.renderUncropped(id, fitting: CGSize(width: 1024, height: 1024))?.image
                     guard let r = try Sam2.select(img, key: key, points: taps + [(p, true)]) else { return nil }
                     let c = Sam2.coverage(r.values)
                     // nothing selected comes back as an empty mask
                     guard c.contains(where: { $0 > 0.5 }) else { return nil }
                     return (c, r.side, r.side)
                 }
+                guard let img = Engine.shared.renderUncropped(id, fitting: CGSize(width: 1024, height: 1024))?.image else { return nil }
                 return try ObjectPicker.object(in: img, at: p)
             }
         }.value
@@ -1213,7 +1231,7 @@ final class EditorModel: ObservableObject {
         Task {
             let r: Result<(values: [Float], side: Int)?, Error> = await Task.detached(priority: .userInitiated) {
                 Result {
-                    guard let img = Engine.shared.renderUncropped(id, fitting: CGSize(width: 1024, height: 1024))?.image else { return nil }
+                    let img = Sam2.hasEncoding(key) ? nil : Engine.shared.renderUncropped(id, fitting: CGSize(width: 1024, height: 1024))?.image
                     return try Sam2.select(img, key: key, points: [(flip(first), true)] + taps)
                 }
             }.value

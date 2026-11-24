@@ -42,7 +42,11 @@ final class Engine: @unchecked Sendable {
         }
         latent_set_ai_model_dir(core, Self.aiModelFolder.path)
         // loading the AI remove model takes a moment: not on the way to the first screen
-        DispatchQueue.global(qos: .utility).async { Inpainting.register() }
+        DispatchQueue.global(qos: .utility).async {
+            Inpainting.register()
+            // the selection model's first load is slow: do it while the library shows
+            if SelectionModel.installed { Sam2.warmUp() }
+        }
     }
 
     /// Where the SAM 3 model files go: Documents/Models/SAM3, which the Files app shows as
