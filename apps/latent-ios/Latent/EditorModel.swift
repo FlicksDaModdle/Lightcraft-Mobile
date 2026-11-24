@@ -123,7 +123,13 @@ final class EditorModel: ObservableObject {
     private let baseRenderSize: CGSize
     /// Bigger renders while zoomed in, so the photo stays sharp.
     private var detail: CGFloat = 1
-    private var renderSize: CGSize { CGSize(width: baseRenderSize.width * detail, height: baseRenderSize.height * detail) }
+    private var renderSize: CGSize {
+        let k = detail * (drafting ? 0.4 : 1)
+        return CGSize(width: baseRenderSize.width * k, height: baseRenderSize.height * k)
+    }
+    /// While a slider or the Focus Range is dragged with lens blur on, the photo renders smaller so
+    /// it keeps up with the finger (the blur is the slow part); letting go renders it sharp again.
+    private var drafting: Bool { active != nil && blurOn && mode != .crop }
 
     init(photo: Photo) {
         self.photo = photo
@@ -175,7 +181,9 @@ final class EditorModel: ObservableObject {
     }
 
     func end() {
+        let wasDrafting = drafting
         active = nil
+        if wasDrafting { render() }
         attempt("develop.endInteraction")
         refreshHistory()
         if mode == .masks { refreshThumbs() }
