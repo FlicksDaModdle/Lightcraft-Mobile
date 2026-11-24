@@ -711,38 +711,24 @@ struct EditorView: View {
                 GeometryReader { g in
                     ScrollView {
                         VStack(spacing: 0) {
-                            let side = Swift.min(g.size.width - 170, 190)
+                            let side = Swift.min(g.size.width - 170, 128)
                             TabView(selection: Binding(get: { model.gradingRange }, set: { r in
                                 UISelectionFeedbackGenerator().selectionChanged()
                                 withAnimation(.glass) { model.gradingRange = r }
                             })) {
                                 ForEach(gradingRanges.indices, id: \.self) { i in
-                                    VStack(spacing: 6) {
-                                        GradingWheel(model: model, rangeIndex: i)
-                                            .frame(width: side, height: side)
-                                        Text(gradingRanges[i].label)
-                                            .font(.system(size: 12, weight: .semibold))
-                                            .foregroundStyle(Theme.secondaryText)
-                                    }
-                                    .frame(maxWidth: .infinity)
+                                    // the range chips above name the wheel
+                                    GradingWheel(model: model, rangeIndex: i)
+                                        .frame(width: side, height: side)
+                                        .frame(maxWidth: .infinity)
                                     .contentShape(Rectangle())
                                     .tag(i)
                                 }
                             }
                             .tabViewStyle(.page(indexDisplayMode: .never))
-                            .frame(height: side + 30)
-                            .padding(.top, 10)
+                            .frame(height: side + 4)
+                            .padding(.vertical, 8)
                             .opacity(focused && model.active != "wheel" ? 0 : 1)
-                            HStack(spacing: 6) {
-                                ForEach(gradingRanges.indices, id: \.self) { i in
-                                    Capsule()
-                                        .fill(i == model.gradingRange ? Color.white : Color.white.opacity(0.3))
-                                        .frame(width: i == model.gradingRange ? 16 : 6, height: 6)
-                                }
-                            }
-                            .padding(.bottom, 8)
-                            .animation(.glass, value: model.gradingRange)
-                            .accessibilityHidden(true)
                             ForEach(model.visible) { slider($0) }
                         }
                         .frame(maxWidth: .infinity)
@@ -750,7 +736,7 @@ struct EditorView: View {
                     }
                     .scrollIndicators(.visible)
                 }
-                .frame(height: 300)
+                .frame(height: 220)
             } else if model.tool != .curve {
                 ScrollView {
                     LazyVStack(spacing: 0) {
@@ -943,15 +929,12 @@ struct EditorView: View {
     private var colorHeader: some View {
         VStack(spacing: 10) {
             HStack(spacing: 10) {
-                Toggle(isOn: Binding(get: { model.bw }, set: { model.setBW($0) })) {
-                    Text("B&W").font(.system(size: 15))
+                // one line each: with no room for the words, the buttons show only their symbols
+                ViewThatFits(in: .horizontal) {
+                    colorButtons(words: true)
+                    colorButtons(words: false)
                 }
-                .toggleStyle(.switch)
-                .tint(Theme.accent)
-                .fixedSize()
-                Spacer()
-                stepButton("Grading", symbol: "circle.lefthalf.filled") { model.tool = .grading }
-                stepButton("Color mix", symbol: "paintpalette") { model.tool = .mixer }
+                Spacer(minLength: 0)
                 sectionEye(.color)
             }
             HStack(spacing: 8) {
@@ -977,10 +960,47 @@ struct EditorView: View {
         .padding(.top, 14)
     }
 
+    /// Black & white, and the way to Grading and Color mix.
+    private func colorButtons(words: Bool) -> some View {
+        HStack(spacing: 8) {
+            Button { model.setBW(!model.bw) } label: {
+                chipLabel("B&W", symbol: model.bw ? "circle.lefthalf.filled.inverse" : "circle.lefthalf.filled", words: words)
+                    .latentGlass(in: Capsule(), tint: model.bw ? Theme.accent : nil, interactive: true)
+            }
+            .accessibilityLabel("Black and white")
+            .accessibilityValue(model.bw ? "On" : "Off")
+            .accessibilityAddTraits(.isToggle)
+            Button { model.tool = .grading } label: {
+                chipLabel("Grading", symbol: "circle.circle", words: words).latentGlass(in: Capsule(), interactive: true)
+            }
+            .accessibilityLabel("Grading")
+            Button { model.tool = .mixer } label: {
+                chipLabel("Color mix", symbol: "paintpalette", words: words).latentGlass(in: Capsule(), interactive: true)
+            }
+            .accessibilityLabel("Color mix")
+        }
+        .foregroundStyle(.white)
+        .buttonStyle(.plain)
+    }
+
+    private func chipLabel(_ title: String, symbol: String, words: Bool) -> some View {
+        HStack(spacing: 5) {
+            Image(systemName: symbol)
+            if words { Text(title) }
+        }
+        .font(.system(size: 13, weight: .medium))
+        .lineLimit(1)
+        .fixedSize()
+        .padding(.horizontal, words ? 11 : 10)
+        .frame(height: 32)
+    }
+
     private func stepButton(_ title: String, symbol: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Label(title, systemImage: symbol)
                 .font(.system(size: 13, weight: .medium))
+                .lineLimit(1)
+                .fixedSize()
                 .padding(.horizontal, 12)
                 .frame(height: 32)
                 .latentGlass(in: Capsule(), interactive: true)
@@ -1101,8 +1121,9 @@ struct EditorView: View {
             ForEach(gradingRanges.indices, id: \.self) { i in Text(gradingRanges[i].label).tag(i) }
         }
         .pickerStyle(.segmented)
+        .controlSize(.small)
         .padding(.horizontal, 20)
-        .padding(.top, 10)
+        .padding(.top, 8)
     }
 
     // MARK: masks
