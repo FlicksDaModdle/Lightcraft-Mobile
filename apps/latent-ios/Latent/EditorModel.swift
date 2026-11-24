@@ -1226,7 +1226,17 @@ final class EditorModel: ObservableObject {
         if selectedSpot != nil { updateSpot([key: value]) }
     }
 
+    @Published var showInpaintModel = false
+
+    /// The AI remove model just arrived: hand it to the engine and show the spots it rebuilds.
+    func inpaintModelInstalled() {
+        Inpainting.register()
+        Thumbnails.shared.forgetPresets()
+        render()
+    }
+
     func setSpotMode(_ mode: String) {
+        if mode == "generate", !InpaintModel.installed, spotMode == "generate" || selectedSpot == nil { showInpaintModel = true }
         spotMode = mode
         UISelectionFeedbackGenerator().selectionChanged()
         if selectedSpot != nil {

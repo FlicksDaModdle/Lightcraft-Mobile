@@ -82,5 +82,10 @@ LatentImage *latent_render_depth(const LatentCore *core, uint64_t id, uint32_t m
 // A preview of a creative profile (built in or an imported LUT) on the photo, without editing it.
 LatentImage *latent_profile_thumb(const LatentCore *core, uint64_t id, const char *profile, uint32_t long_edge);
 
+// The app's inpainting model for AI remove spots: rgb (size*size*3, 0..1) and hole (size*size, 1 =
+// rebuild) in, size*size*3 values (0..1) written to out; false on failure. NULL takes it away.
+typedef bool (*LatentInpaintFn)(const float *rgb, const float *hole, uint32_t size, float *out);
+void latent_set_inpainter(LatentInpaintFn model, uint32_t size);
+
 void latent_image_free(LatentImage *img);
 void latent_string_free(char *s);

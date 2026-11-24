@@ -550,6 +550,7 @@ let spotModes: [(id: String, label: String, symbol: String)] = [
     ("heal", "Heal", "bandage"),
     ("clone", "Clone", "square.on.square"),
     ("fill", "Fill", "rectangle.dashed"),
+    ("generate", "AI remove", "wand.and.sparkles"),
 ]
 
 /// A creative profile (`profiles.list`): built in, or a LUT the user imported.

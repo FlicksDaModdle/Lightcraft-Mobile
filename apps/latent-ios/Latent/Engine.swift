@@ -41,6 +41,8 @@ final class Engine: @unchecked Sendable {
             problem = nil
         }
         latent_set_ai_model_dir(core, Self.aiModelFolder.path)
+        // loading the AI remove model takes a moment: not on the way to the first screen
+        DispatchQueue.global(qos: .utility).async { Inpainting.register() }
     }
 
     /// Where the SAM 3 model files go: Documents/Models/SAM3, which the Files app shows as

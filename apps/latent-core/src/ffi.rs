@@ -399,3 +399,31 @@ pub unsafe extern "C" fn latent_profile_thumb(core: *const Core, id: u64, profil
     let (Some(c), Some(profile)) = (unsafe { self::core(core) }, unsafe { text(profile) }) else { return std::ptr::null_mut() };
     give_image(c.profile_thumb(id, profile, long_edge as usize))
 }
+
+/// The app's inpainting model: `rgb` (`size × size × 3`, 0..1, row-major) and `hole` (`size × size`,
+/// 1 = rebuild) in; writes `size × size × 3` values (0..1) to `out` and returns true, or false.
+pub type InpaintCallback = unsafe extern "C" fn(rgb: *const f32, hole: *const f32, size: u32, out: *mut f32) -> bool;
+
+/// Register the app's inpainting model for AI remove spots (null takes it away; they then fill
+/// from their surroundings). The engine may call it from any thread.
+///
+/// # Safety
+/// `model` null, or a function that reads `size × size × 3` and `size × size` floats and writes
+/// `size × size × 3` floats, and is safe to call from any thread for as long as it stays registered.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn latent_set_inpainter(model: Option<InpaintCallback>, size: u32) {
+    let n = size as usize;
+    let run = model.map(|f| {
+        let run: std::sync::Arc<lightcraft_pipeline::spots::InpaintFn> = std::sync::Arc::new(move |rgb: &[f32], hole: &[f32], size: usize| {
+            if rgb.len() != size * size * 3 || hole.len() != size * size {
+                return None;
+            }
+            let mut out = vec![0.0f32; size * size * 3];
+            // SAFETY: the buffers hold the lengths the caller promised to read and write
+            let ok = unsafe { f(rgb.as_ptr(), hole.as_ptr(), size as u32, out.as_mut_ptr()) };
+            ok.then_some(out)
+        });
+        (n, run)
+    });
+    lightcraft_pipeline::spots::set_inpainter(run);
+}

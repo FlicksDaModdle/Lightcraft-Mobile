@@ -9,12 +9,46 @@
 //!   source: PatchMatch-based completion ([`lightcraft_inpaint::complete`]), coarse to fine, so the
 //!   structure is chosen at a scale set by the spot's size (the same at preview and export size).
 //!   Deterministic; the source offset is ignored.
+//! - **Generate** sends the box around the spot to the inpainting model the app registered with
+//!   [`set_inpainter`] (it can invent what the object hid), and falls back to Fill without one.
+//!   Its answers are kept, so later edits don't run the model again.
 
 use lightcraft_develop::{Spot, SpotMode};
 use lightcraft_geom::Point;
 use lightcraft_raster::Rgb32f;
 
 use crate::geometry::Frame;
+
+/// An inpainting model: `rgb` (`size × size × 3`, display-encoded 0..1, row-major) and `hole`
+/// (`size × size`, 1 = rebuild) in, the rebuilt picture (`size × size × 3`, 0..1) out; `None` when it
+/// fails.
+pub type InpaintFn = dyn Fn(&[f32], &[f32], usize) -> Option<Vec<f32>> + Send + Sync;
+
+struct Inpainter {
+    size: usize,
+    run: std::sync::Arc<InpaintFn>,
+}
+
+static INPAINTER: std::sync::RwLock<Option<Inpainter>> = std::sync::RwLock::new(None);
+
+/// Answers already given, newest last: (key, the rebuilt box).
+static INPAINTED: std::sync::Mutex<Vec<(u64, Vec<[f32; 3]>)>> = std::sync::Mutex::new(Vec::new());
+const INPAINTED_KEEP: usize = 24;
+
+/// Register the inpainting model (it works on `size × size` pictures), or take it away (`None`).
+pub fn set_inpainter(model: Option<(usize, std::sync::Arc<InpaintFn>)>) {
+    if let Ok(mut g) = INPAINTER.write() {
+        *g = model.filter(|(n, _)| (16..=4096).contains(n)).map(|(size, run)| Inpainter { size, run });
+    }
+    if let Ok(mut c) = INPAINTED.lock() {
+        c.clear();
+    }
+}
+
+/// Whether an inpainting model is registered (else Generate spots render as Fill).
+pub fn has_inpainter() -> bool {
+    INPAINTER.read().is_ok_and(|g| g.is_some())
+}
 
 #[inline]
 fn smooth(e0: f32, e1: f32, x: f32) -> f32 {
@@ -328,7 +362,7 @@ pub fn layout(spot: &Spot, frame: &Frame, w: usize, h: usize, ppl: f64) -> Optio
         })
         .collect();
     pts.first()?;
-    let fill = spot.mode == SpotMode::Fill;
+    let fill = matches!(spot.mode, SpotMode::Fill | SpotMode::Generate);
     let offset = if fill {
         Some((0.0, 0.0))
     } else {
@@ -383,6 +417,86 @@ fn fill_box(src: &mut [[f32; 3]], tgt: &[[f32; 3]], alpha: &[f32], bw: usize, bh
     }
 }
 
+/// Rebuild the box with the inpainting model: `src` becomes `tgt` with the stroke (`alpha > 0`)
+/// made up by the model. False when there is no model or it failed (the caller fills instead).
+///
+/// The box is scaled so its brightest part sits near white and gamma-encoded (the model was trained
+/// on pictures, not scene-linear light), squeezed to the model's square, rebuilt, and turned back.
+fn generate_box(src: &mut [[f32; 3]], tgt: &[[f32; 3]], alpha: &[f32], bw: usize, bh: usize) -> bool {
+    let Some((size, run)) = INPAINTER.read().ok().and_then(|g| g.as_ref().map(|m| (m.size, m.run.clone()))) else { return false };
+    // the same box, hole and picture give the same answer
+    let mut key = 0xcbf2_9ce4_8422_2325u64 ^ (bw as u64) << 32 ^ bh as u64;
+    for (p, a) in tgt.iter().zip(alpha) {
+        for v in p.iter().chain(std::iter::once(a)) {
+            key = (key ^ u64::from(v.to_bits())).wrapping_mul(0x0100_0000_01b3);
+        }
+    }
+    let cached = INPAINTED.lock().ok().and_then(|c| c.iter().find(|(k, _)| *k == key).map(|(_, v)| v.clone()));
+    let out = match cached {
+        Some(v) if v.len() == src.len() => v,
+        _ => {
+            let mut lums: Vec<f32> = tgt.iter().map(|p| p[0].max(p[1]).max(p[2])).filter(|v| v.is_finite()).collect();
+            lums.sort_by(f32::total_cmp);
+            let top = lums.get(lums.len().saturating_sub(1).min(lums.len() * 99 / 100)).copied().unwrap_or(1.0);
+            let gain = if top > 1e-6 { 0.9 / top } else { 1.0 };
+            let enc = |v: f32| (v * gain).clamp(0.0, 1.0).powf(1.0 / 2.2);
+            let dec = |v: f32| if v.is_finite() { v.clamp(0.0, 1.0).powf(2.2) / gain } else { 0.0 };
+            // squeeze the box to the model's square (bilinear), the hole by nearest so it stays whole
+            let sample = |data: &dyn Fn(usize, usize) -> [f32; 3], u: f32, v: f32| -> [f32; 3] {
+                let x = (u * bw as f32 - 0.5).clamp(0.0, (bw - 1) as f32);
+                let y = (v * bh as f32 - 0.5).clamp(0.0, (bh - 1) as f32);
+                let (x0, y0) = (x.floor() as usize, y.floor() as usize);
+                let (x1, y1) = ((x0 + 1).min(bw - 1), (y0 + 1).min(bh - 1));
+                let (fx, fy) = (x - x0 as f32, y - y0 as f32);
+                let (a, b, c, d) = (data(x0, y0), data(x1, y0), data(x0, y1), data(x1, y1));
+                std::array::from_fn(|i| (a[i] * (1.0 - fx) + b[i] * fx) * (1.0 - fy) + (c[i] * (1.0 - fx) + d[i] * fx) * fy)
+            };
+            let at = |x: usize, y: usize| tgt[y * bw + x].map(enc);
+            let mut rgb = Vec::with_capacity(size * size * 3);
+            let mut hole = Vec::with_capacity(size * size);
+            for j in 0..size {
+                for i in 0..size {
+                    let (u, v) = ((i as f32 + 0.5) / size as f32, (j as f32 + 0.5) / size as f32);
+                    rgb.extend(sample(&at, u, v));
+                    let (x, y) = (((u * bw as f32) as usize).min(bw - 1), ((v * bh as f32) as usize).min(bh - 1));
+                    hole.push(if alpha[y * bw + x] > 0.0 { 1.0 } else { 0.0 });
+                }
+            }
+            let Some(made) = run(&rgb, &hole, size).filter(|m| m.len() == size * size * 3) else { return false };
+            let made_at = |x: usize, y: usize| -> [f32; 3] {
+                let k = (y * size + x) * 3;
+                [made[k], made[k + 1], made[k + 2]]
+            };
+            let mut v = Vec::with_capacity(bw * bh);
+            for y in 0..bh {
+                for x in 0..bw {
+                    let (u, w) = ((x as f32 + 0.5) / bw as f32, (y as f32 + 0.5) / bh as f32);
+                    // back from the square: the same bilinear, the other way
+                    let sx = (u * size as f32 - 0.5).clamp(0.0, (size - 1) as f32);
+                    let sy = (w * size as f32 - 0.5).clamp(0.0, (size - 1) as f32);
+                    let (x0, y0) = (sx.floor() as usize, sy.floor() as usize);
+                    let (x1, y1) = ((x0 + 1).min(size - 1), (y0 + 1).min(size - 1));
+                    let (fx, fy) = (sx - x0 as f32, sy - y0 as f32);
+                    let (a, b, c, d) = (made_at(x0, y0), made_at(x1, y0), made_at(x0, y1), made_at(x1, y1));
+                    let p: [f32; 3] = std::array::from_fn(|i| (a[i] * (1.0 - fx) + b[i] * fx) * (1.0 - fy) + (c[i] * (1.0 - fx) + d[i] * fx) * fy);
+                    v.push(p.map(dec));
+                }
+            }
+            if let Ok(mut c) = INPAINTED.lock() {
+                c.retain(|(k, _)| *k != key);
+                c.push((key, v.clone()));
+                let extra = c.len().saturating_sub(INPAINTED_KEEP);
+                c.drain(..extra);
+            }
+            v
+        }
+    };
+    for (d, v) in src.iter_mut().zip(out) {
+        *d = v;
+    }
+    true
+}
+
 /// Apply all spots to `img` (output resolution). `ppl` = output pixels per long-edge unit.
 pub fn apply(img: &mut Rgb32f, spots: &[Spot], frame: &Frame, ppl: f64) {
     let (w, h) = (img.width, img.height);
@@ -405,7 +519,7 @@ pub fn apply(img: &mut Rgb32f, spots: &[Spot], frame: &Frame, ppl: f64) {
                 tgt[y * bw + x] = img.get(bx0 + x, by0 + y);
             }
         }
-        if fill {
+        if fill && !(spot.mode == SpotMode::Generate && generate_box(&mut src, &tgt, &alpha, bw, bh)) {
             fill_box(&mut src, &tgt, &alpha, bw, bh);
         }
         let low = if heal {
@@ -563,6 +677,60 @@ mod tests {
         let mut again = striped_with_blot(w, h, 8);
         apply(&mut again, &[fill_spot()], &frame, frame.px_per_long(w));
         assert_eq!(img.data, again.data);
+    }
+
+    /// A Generate spot is rebuilt by the registered model (here: one that paints the hole a set
+    /// grey), only inside the stroke, and asked once for the same box; with no model it fills like
+    /// Fill. Hostile model answers (wrong length, non-finite values) don't break the render.
+    #[test]
+    fn generate_uses_the_model_and_falls_back_to_fill() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static CALLS: AtomicUsize = AtomicUsize::new(0);
+        let (w, h) = (200, 160);
+        let frame = Frame::new(w, h, &DevelopSettings::default(), true);
+        let generate = Spot { mode: SpotMode::Generate, ..fill_spot() };
+        // no model: the same as Fill
+        set_inpainter(None);
+        let (mut a, mut b) = (striped_with_blot(w, h, 8), striped_with_blot(w, h, 8));
+        apply(&mut a, std::slice::from_ref(&generate), &frame, frame.px_per_long(w));
+        apply(&mut b, &[fill_spot()], &frame, frame.px_per_long(w));
+        assert_eq!(a.data, b.data);
+        // a model that paints the hole mid grey (encoded 0.5)
+        let model: Arc<InpaintFn> = Arc::new(|rgb: &[f32], hole: &[f32], n: usize| {
+            CALLS.fetch_add(1, Ordering::SeqCst);
+            let mut out = rgb.to_vec();
+            for (i, m) in hole.iter().enumerate().take(n * n) {
+                if *m > 0.5 {
+                    out[i * 3..i * 3 + 3].copy_from_slice(&[0.5; 3]);
+                }
+            }
+            Some(out)
+        });
+        set_inpainter(Some((64, model)));
+        let before = striped_with_blot(w, h, 8);
+        let mut img = before.clone();
+        apply(&mut img, std::slice::from_ref(&generate), &frame, frame.px_per_long(w));
+        let centre = img.get(100, 80)[0];
+        let first = img.get(2, 2);
+        assert!((centre - img.get(97, 80)[0]).abs() < 0.05, "the hole is one flat grey: {centre}");
+        assert_ne!(img.data, a.data, "the model's answer, not Fill's");
+        assert_eq!(first, before.get(2, 2), "outside the box nothing changes");
+        let calls = CALLS.load(Ordering::SeqCst);
+        let mut again = striped_with_blot(w, h, 8);
+        apply(&mut again, std::slice::from_ref(&generate), &frame, frame.px_per_long(w));
+        assert_eq!(again.data, img.data);
+        assert_eq!(CALLS.load(Ordering::SeqCst), calls, "the same box is answered from memory");
+        // a broken model: Fill again, and nothing non-finite
+        set_inpainter(Some((64, Arc::new(|_: &[f32], _: &[f32], _: usize| Some(vec![f32::NAN; 7])))));
+        let mut broken = striped_with_blot(w, h, 8);
+        apply(&mut broken, std::slice::from_ref(&generate), &frame, frame.px_per_long(w));
+        assert_eq!(broken.data, b.data);
+        set_inpainter(Some((64, Arc::new(|rgb: &[f32], _: &[f32], _: usize| Some(rgb.iter().map(|_| f32::NAN).collect())))));
+        let mut nan = striped_with_blot(w, h, 8);
+        apply(&mut nan, &[generate], &frame, frame.px_per_long(w));
+        assert!(nan.data.iter().flatten().all(|v| v.is_finite()));
+        set_inpainter(None);
     }
 
     #[test]

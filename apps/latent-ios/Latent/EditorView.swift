@@ -67,7 +67,10 @@ struct EditorView: View {
         .overlay(alignment: .top) { toast }
         .animation(.glass, value: model.toast)
         .sheet(isPresented: $model.showDepthModel) {
-            DepthModelSheet { model.estimateDepth() }
+            ModelSheet(DepthModel) { model.estimateDepth() }
+        }
+        .sheet(isPresented: $model.showInpaintModel) {
+            ModelSheet(InpaintModel) { model.inpaintModelInstalled() }
         }
         .sheet(isPresented: $sharing) {
             ShareView(photos: library, current: model.photo.id)
@@ -1628,6 +1631,10 @@ struct EditorView: View {
         case "heal": return "Brush over a blemish; it's replaced with texture from nearby, blended to match."
         case "clone": return "Brush over something; it's covered with an exact copy from nearby."
         case "fill": return "Brush over something; it's rebuilt from the surroundings, with no single source."
+        case "generate":
+            return InpaintModel.installed
+                ? "Brush over something, generously; the AI model rebuilds what was behind it. Zoom in for small things."
+                : "Needs the AI remove model (tap AI remove again to get it). Until then these spots fill from the surroundings."
         default: return "Tap or brush over what to take away. Pinch to zoom in for small things."
         }
     }

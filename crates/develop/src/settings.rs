@@ -1260,6 +1260,9 @@ pub enum SpotMode {
     Clone,
     /// Content-aware: the spot is rebuilt from patches of its surroundings (no single source).
     Fill,
+    /// Rebuilt by an inpainting model the app supplies (it can make up what was behind the
+    /// object); without one, as [`SpotMode::Fill`].
+    Generate,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

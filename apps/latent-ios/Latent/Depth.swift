@@ -195,66 +195,113 @@ enum DepthMaps {
 /// `VNImageCropAndScaleOption.scaleFill` without importing Vision: stretch the photo to the input.
 private let VNImageCropAndScaleOptionScaleFill = 2
 
-// MARK: the depth model
+// MARK: optional models
 
-/// Apple's Core ML conversion of Depth Anything V2 Small (Apache-2.0), downloaded on request.
-enum DepthModel {
-    static let name = "DepthAnythingV2SmallF16"
-    static let repo = "https://huggingface.co/apple/coreml-depth-anything-v2-small"
-    static let files = ["Manifest.json", "Data/com.apple.CoreML/model.mlmodel", "Data/com.apple.CoreML/weights/weight.bin"]
-    static let size = "50 MB"
+/// A Core ML model Latent downloads on request: where it comes from, and where it lives once
+/// compiled for this iPhone.
+struct ModelSpec: Sendable {
+    let name: String
+    let title: String
+    let blurb: String
+    let credit: String
+    let repo: String
+    /// The package's folder in the repository.
+    let package: String
+    let files: [String]
+    let size: String
 
-    static var folder: URL {
+    var folder: URL {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         let dir = base.appendingPathComponent("Models", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir
     }
 
-    static var compiled: URL { folder.appendingPathComponent("\(name).mlmodelc", isDirectory: true) }
-    static var installed: Bool { FileManager.default.fileExists(atPath: compiled.path) }
+    var compiled: URL { folder.appendingPathComponent("\(name).mlmodelc", isDirectory: true) }
+    var installed: Bool { FileManager.default.fileExists(atPath: compiled.path) }
 
-    private static let lock = NSLock()
-    private static var cachedModel: MLModel?
+    func load() -> MLModel? { LoadedModels.load(self) }
 
-    static func load() -> MLModel? {
-        lock.lock()
-        defer { lock.unlock() }
-        if let m = cachedModel { return m }
-        guard installed else { return nil }
-        let c = MLModelConfiguration()
-        c.computeUnits = .all
-        cachedModel = try? MLModel(contentsOf: compiled, configuration: c)
-        return cachedModel
+    func remove() {
+        LoadedModels.forget(name)
+        try? FileManager.default.removeItem(at: compiled)
     }
 
-    static func remove() {
+    static let coreFiles = ["Manifest.json", "Data/com.apple.CoreML/model.mlmodel", "Data/com.apple.CoreML/weights/weight.bin"]
+}
+
+/// Models loaded once and shared (Core ML predictions may run from several threads).
+enum LoadedModels {
+    private static let lock = NSLock()
+    private static var models: [String: MLModel] = [:]
+
+    static func load(_ spec: ModelSpec) -> MLModel? {
         lock.lock()
-        cachedModel = nil
+        defer { lock.unlock() }
+        if let m = models[spec.name] { return m }
+        guard spec.installed else { return nil }
+        let c = MLModelConfiguration()
+        c.computeUnits = .all
+        let m = try? MLModel(contentsOf: spec.compiled, configuration: c)
+        models[spec.name] = m
+        return m
+    }
+
+    static func forget(_ name: String) {
+        lock.lock()
+        models[name] = nil
         lock.unlock()
-        try? FileManager.default.removeItem(at: compiled)
     }
 }
 
-/// Downloads the depth model's files, then compiles it for this iPhone.
+/// Apple's Core ML conversion of Depth Anything V2 Small (Apache-2.0).
+let DepthModel = ModelSpec(
+    name: "DepthAnythingV2SmallF16",
+    title: "Depth model",
+    blurb: "Estimates how far away everything in a photo is, so Lens Blur can blur by distance in photos the iPhone didn't record depth for. It runs on this iPhone; nothing is uploaded.",
+    credit: "Depth Anything V2 Small, converted for Core ML by Apple, from Hugging Face. Licence: Apache 2.0.",
+    repo: "https://huggingface.co/apple/coreml-depth-anything-v2-small",
+    package: "DepthAnythingV2SmallF16.mlpackage",
+    files: ModelSpec.coreFiles,
+    size: "50 MB")
+
+/// LaMa (dilated), an inpainting model, in a Core ML conversion (Apache-2.0).
+let InpaintModel = ModelSpec(
+    name: "LaMaDilated",
+    title: "AI remove model",
+    blurb: "Rebuilds what's behind something you brush away (a person, a sign, a car) from what's around it, inventing detail where needed. It runs on this iPhone; nothing is uploaded.",
+    credit: "LaMa (Suvorov et al., Samsung AI), dilated variant, in a 6-bit Core ML conversion from Hugging Face (Dadm-n/lama-dilated-coreml). Licence: Apache 2.0.",
+    repo: "https://huggingface.co/Dadm-n/lama-dilated-coreml",
+    package: "Resources/LaMa.mlpackage",
+    files: ModelSpec.coreFiles,
+    size: "40 MB")
+
+/// Downloads a model's files, then compiles it for this iPhone.
 @MainActor
-final class DepthModelDownload: ObservableObject {
+final class ModelDownload: ObservableObject {
+    let spec: ModelSpec
     @Published private(set) var progress: Double?
     @Published private(set) var problem: String?
-    @Published private(set) var installed = DepthModel.installed
+    @Published private(set) var installed: Bool
     private var observation: NSKeyValueObservation?
+
+    init(_ spec: ModelSpec) {
+        self.spec = spec
+        installed = spec.installed
+    }
 
     func start() {
         guard progress == nil else { return }
         problem = nil
         progress = 0
+        let spec = spec
         Task {
             do {
-                let pkg = FileManager.default.temporaryDirectory.appendingPathComponent("\(DepthModel.name).mlpackage", isDirectory: true)
+                let pkg = FileManager.default.temporaryDirectory.appendingPathComponent("\(spec.name).mlpackage", isDirectory: true)
                 try? FileManager.default.removeItem(at: pkg)
                 // the weights are nearly all of it: they get the bar
-                for f in DepthModel.files {
-                    guard let url = URL(string: "\(DepthModel.repo)/resolve/main/\(DepthModel.name).mlpackage/\(f)") else { continue }
+                for f in spec.files {
+                    guard let url = URL(string: "\(spec.repo)/resolve/main/\(spec.package)/\(f)") else { continue }
                     let dest = pkg.appendingPathComponent(f)
                     try FileManager.default.createDirectory(at: dest.deletingLastPathComponent(), withIntermediateDirectories: true)
                     let tmp = try await fetch(url, tracked: f.hasSuffix("weight.bin"))
@@ -262,8 +309,8 @@ final class DepthModelDownload: ObservableObject {
                 }
                 progress = 1
                 let built = try await Task.detached(priority: .userInitiated) { try MLModel.compileModel(at: pkg) }.value
-                try? FileManager.default.removeItem(at: DepthModel.compiled)
-                try FileManager.default.moveItem(at: built, to: DepthModel.compiled)
+                try? FileManager.default.removeItem(at: spec.compiled)
+                try FileManager.default.moveItem(at: built, to: spec.compiled)
                 try? FileManager.default.removeItem(at: pkg)
                 installed = true
                 progress = nil
@@ -301,25 +348,30 @@ final class DepthModelDownload: ObservableObject {
     }
 
     func remove() {
-        DepthModel.remove()
+        spec.remove()
         installed = false
     }
 }
 
-/// Getting (or removing) the depth model.
-struct DepthModelSheet: View {
-    @StateObject private var download = DepthModelDownload()
+/// Getting (or removing) an optional model.
+struct ModelSheet: View {
+    @StateObject private var download: ModelDownload
     @Environment(\.dismiss) private var dismiss
     let installed: () -> Void
 
+    init(_ spec: ModelSpec, installed: @escaping () -> Void) {
+        _download = StateObject(wrappedValue: ModelDownload(spec))
+        self.installed = installed
+    }
+
     var body: some View {
+        let spec = download.spec
         NavigationStack {
             List {
                 Section {
                     VStack(alignment: .leading, spacing: 8) {
-                        Label("Depth model", systemImage: "square.3.layers.3d.down.right").font(.system(size: 18, weight: .semibold))
-                        Text("Estimates how far away everything in a photo is, so Lens Blur can blur by distance in photos the iPhone didn't record depth for. It runs on this iPhone; nothing is uploaded.")
-                            .font(.system(size: 14)).foregroundStyle(Theme.secondaryText)
+                        Label(spec.title, systemImage: "cpu").font(.system(size: 18, weight: .semibold))
+                        Text(spec.blurb).font(.system(size: 14)).foregroundStyle(Theme.secondaryText)
                     }
                     .padding(.vertical, 4)
                 }
@@ -334,21 +386,21 @@ struct DepthModelSheet: View {
                                 .font(.system(size: 13)).foregroundStyle(Theme.secondaryText).monospacedDigit()
                         }
                     } else {
-                        Button { download.start() } label: { Label("Download (\(DepthModel.size))", systemImage: "arrow.down.circle") }
+                        Button { download.start() } label: { Label("Download (\(spec.size))", systemImage: "arrow.down.circle") }
                     }
                     if let problem = download.problem {
                         Text(problem).font(.system(size: 13)).foregroundStyle(.red)
                     }
                 } footer: {
-                    Text("Depth Anything V2 Small, converted for Core ML by Apple, from Hugging Face. Licence: Apache 2.0.")
+                    Text(spec.credit)
                 }
                 Section {
-                    if let url = URL(string: DepthModel.repo) {
+                    if let url = URL(string: spec.repo) {
                         Link(destination: url) { Label("About the model", systemImage: "safari") }
                     }
                 }
             }
-            .navigationTitle("Depth model")
+            .navigationTitle(spec.title)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } }
@@ -357,6 +409,82 @@ struct DepthModelSheet: View {
         }
         .preferredColorScheme(.dark)
     }
+}
+
+// MARK: AI remove
+
+enum Inpainting {
+    /// Hand the engine the AI remove model when it's installed (else AI remove fills from the
+    /// surroundings).
+    static func register() {
+        guard InpaintModel.installed, let model = InpaintModel.load() else {
+            latent_set_inpainter(nil, 0)
+            return
+        }
+        let size = model.modelDescription.inputDescriptionsByName.values
+            .compactMap { $0.multiArrayConstraint?.shape.last?.intValue }.max() ?? 512
+        latent_set_inpainter(inpaintCallback, UInt32(size))
+    }
+
+    /// Run the model: `rgb` row-major size×size×3 and `hole` size×size in, `out` size×size×3 written.
+    static func run(_ rgb: UnsafePointer<Float>, _ hole: UnsafePointer<Float>, _ size: Int, _ out: UnsafeMutablePointer<Float>) -> Bool {
+        guard let model = InpaintModel.load() else { return false }
+        let inputs = model.modelDescription.inputDescriptionsByName
+        // the picture has 3 channels, the hole 1
+        guard let picture = inputs.first(where: { $0.value.multiArrayConstraint?.shape.dropFirst().first?.intValue == 3 }),
+              let mask = inputs.first(where: { $0.key != picture.key }),
+              let pc = picture.value.multiArrayConstraint, let mc = mask.value.multiArrayConstraint,
+              let pa = try? MLMultiArray(shape: pc.shape, dataType: pc.dataType),
+              let ma = try? MLMultiArray(shape: mc.shape, dataType: mc.dataType)
+        else { return false }
+        let n = size * size
+        guard pa.count == 3 * n, ma.count == n else { return false }
+        // channels first
+        for c in 0..<3 {
+            for i in 0..<n { set(pa, c * n + i, rgb[i * 3 + c]) }
+        }
+        for i in 0..<n { set(ma, i, hole[i]) }
+        guard let result = try? model.prediction(from: MLDictionaryFeatureProvider(dictionary: [picture.key: pa, mask.key: ma])),
+              let name = model.modelDescription.outputDescriptionsByName.keys.sorted().first,
+              let o = result.featureValue(for: name)?.multiArrayValue, o.count >= 3 * n
+        else { return false }
+        let strides = o.strides.map(\.intValue)
+        let dims = o.shape.map(\.intValue)
+        guard dims.count >= 3 else { return false }
+        let (sc, sy, sx) = (strides[dims.count - 3], strides[dims.count - 2], strides[dims.count - 1])
+        for y in 0..<size {
+            for x in 0..<size {
+                for c in 0..<3 {
+                    let v = get(o, c * sc + y * sy + x * sx)
+                    // some conversions answer 0…255
+                    out[(y * size + x) * 3 + c] = v > 1.5 ? v / 255 : v
+                }
+            }
+        }
+        return true
+    }
+
+    private static func set(_ a: MLMultiArray, _ i: Int, _ v: Float) {
+        switch a.dataType {
+        case .float16: a.dataPointer.assumingMemoryBound(to: Float16.self)[i] = Float16(v)
+        case .double: a.dataPointer.assumingMemoryBound(to: Double.self)[i] = Double(v)
+        default: a.dataPointer.assumingMemoryBound(to: Float.self)[i] = v
+        }
+    }
+
+    private static func get(_ a: MLMultiArray, _ i: Int) -> Float {
+        switch a.dataType {
+        case .float16: return Float(a.dataPointer.assumingMemoryBound(to: Float16.self)[i])
+        case .double: return Float(a.dataPointer.assumingMemoryBound(to: Double.self)[i])
+        default: return a.dataPointer.assumingMemoryBound(to: Float.self)[i]
+        }
+    }
+}
+
+/// The C function the engine calls for AI remove.
+private let inpaintCallback: LatentInpaintFn = { rgb, hole, size, out in
+    guard let rgb, let hole, let out else { return false }
+    return Inpainting.run(rgb, hole, Int(size), out)
 }
 
 /// The Focus Range bar: the photo's depths from near to far as a histogram, and the sharp range
