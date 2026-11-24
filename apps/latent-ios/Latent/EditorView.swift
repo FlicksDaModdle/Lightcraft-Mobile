@@ -693,7 +693,10 @@ struct EditorView: View {
                 case .light: lightHeader
                 case .blur:
                     blurHeader
-                    if model.blurOn { depthControls }
+                    if model.blurOn {
+                        bokehPicker
+                        depthControls
+                    }
                 case .curve: curveHeader
                 default: sectionRow(model.tool)
                 }
@@ -811,6 +814,31 @@ struct EditorView: View {
         .padding(.horizontal, 16)
         .padding(.top, 12)
         .padding(.bottom, 4)
+    }
+
+    /// The shape out-of-focus lights take, as different lens apertures draw them.
+    private var bokehPicker: some View {
+        ScrollView(.horizontal) {
+            HStack(spacing: 8) {
+                ForEach(bokehShapes, id: \.key) { b in
+                    let on = model.bokeh == b.key
+                    Button { model.setBokeh(b.key) } label: {
+                        Label(b.label, systemImage: b.symbol)
+                            .font(.system(size: 13, weight: on ? .semibold : .regular))
+                            .padding(.horizontal, 12).frame(height: 32)
+                            .latentGlass(in: Capsule(), tint: on ? Theme.accent : nil, interactive: true)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityAddTraits(on ? .isSelected : [])
+                }
+            }
+            .padding(.horizontal, 16)
+        }
+        .scrollIndicators(.hidden)
+        .foregroundStyle(.white)
+        .padding(.vertical, 6)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Blur shape")
     }
 
     /// Blur by depth: Subject or Depth, the Focus Range over the photo's depths, tap to focus,

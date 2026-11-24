@@ -309,6 +309,9 @@ struct LibraryCell: View {
                         .accessibilityHidden(true)
                 }
             }
+            .overlay(alignment: .topTrailing) {
+                if photo.isRaw { RawBadge() }
+            }
             .overlay(alignment: .bottomLeading) {
                 HStack(spacing: 3) {
                     if photo.flag == "pick" { Image(systemName: "flag.fill") }
@@ -322,6 +325,21 @@ struct LibraryCell: View {
                 .accessibilityHidden(true)
             }
             .opacity(photo.flag == "reject" ? 0.45 : 1)
+    }
+}
+
+/// A small "RAW" tag for a thumbnail's corner.
+struct RawBadge: View {
+    var body: some View {
+        Text("RAW")
+            .font(.system(size: 9, weight: .heavy))
+            .tracking(0.4)
+            .foregroundStyle(.white)
+            .padding(.horizontal, 5)
+            .padding(.vertical, 3)
+            .background(Color.black.opacity(0.55), in: RoundedRectangle(cornerRadius: 5, style: .continuous))
+            .padding(5)
+            .accessibilityLabel(Text("Raw"))
     }
 }
 

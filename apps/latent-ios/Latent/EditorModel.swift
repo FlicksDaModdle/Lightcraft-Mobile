@@ -800,6 +800,8 @@ final class EditorModel: ObservableObject {
     @Published private(set) var blurOn = false
     @Published private(set) var focusMask: UInt32?
     @Published private(set) var focusShape = "auto"
+    /// The shape out-of-focus lights take (`Bokeh` in the engine).
+    @Published private(set) var bokeh = "circle"
 
     private func mergeBlur(_ patch: [String: Any], _ label: String) {
         if attempt("develop.merge", ["settings": ["lens_blur": patch], "label": label]) {
@@ -821,6 +823,11 @@ final class EditorModel: ObservableObject {
         var patch: [String: Any] = ["focus_mask": mask.map { NSNumber(value: $0) } ?? NSNull(), "focal_range": 0.0]
         if let shape { patch["shape"] = shape }
         mergeBlur(patch, "Lens Blur Focus")
+    }
+
+    func setBokeh(_ shape: String) {
+        UISelectionFeedbackGenerator().selectionChanged()
+        mergeBlur(["bokeh": shape], "Lens Blur Shape")
     }
 
     /// Select the subject with the AI model, where the camera focused if the file says, and keep it sharp.
@@ -1567,6 +1574,7 @@ final class EditorModel: ObservableObject {
             blurOn = lb["enabled"] as? Bool ?? false
             focusMask = (lb["focus_mask"] as? NSNumber)?.uint32Value
             focusShape = lb["shape"] as? String ?? "auto"
+            bokeh = lb["bokeh"] as? String ?? "circle"
             focalDistance = (lb["focal_distance"] as? NSNumber)?.doubleValue ?? 0
             focalRange = (lb["focal_range"] as? NSNumber)?.doubleValue ?? 0
             if let i = selectedSpot, !spots.indices.contains(i) { selectedSpot = nil }

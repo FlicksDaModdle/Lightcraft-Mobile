@@ -12,6 +12,8 @@ struct Photo: Identifiable, Hashable {
     /// "pick", "reject" or "none".
     let flag: String
     let format: String
+    /// A camera raw file (the engine's kind "raw").
+    let isRaw: Bool
     /// What search looks in besides the file name: camera, title, keywords.
     let searchText: String
 
@@ -28,6 +30,7 @@ struct Photo: Identifiable, Hashable {
         rating = (d["rating"] as? NSNumber)?.intValue ?? 0
         flag = (d["flag"] as? String)?.lowercased() ?? "none"
         format = (d["format"] as? String)?.lowercased() ?? ""
+        isRaw = (d["kind"] as? String)?.lowercased() == "raw"
         searchText = ([d["camera"] as? String, d["title"] as? String] + ((d["keywords"] as? [String]) ?? []).map { Optional($0) })
             .compactMap { $0 }.joined(separator: " ")
     }
@@ -584,3 +587,13 @@ struct ProfileItem: Identifiable, Hashable {
         imported = d["imported"] as? Bool ?? false
     }
 }
+
+/// The bokeh shapes, as the engine names them.
+let bokehShapes: [(key: String, label: String, symbol: String)] = [
+    ("circle", "Round", "circle.fill"),
+    ("blades5", "5 blades", "pentagon.fill"),
+    ("blades6", "6 blades", "hexagon.fill"),
+    ("blades8", "8 blades", "octagon.fill"),
+    ("bubble", "Bubble", "circle.circle"),
+    ("ring", "Ring", "circle"),
+]

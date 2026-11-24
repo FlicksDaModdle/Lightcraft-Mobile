@@ -1354,6 +1354,10 @@ pub struct LensBlur {
     /// the shape's preset, in the middle of the crop.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub area: Option<FocusArea>,
+    /// The shape out-of-focus highlights take, as the lens's aperture would draw them. Omitted
+    /// while round.
+    #[serde(skip_serializing_if = "Bokeh::is_circle")]
+    pub bokeh: Bokeh,
 }
 
 /// A fixed focus shape on the photo: an upright ellipse.
@@ -1386,6 +1390,32 @@ impl LensBlur {
     pub fn focus_area(&self, crop_center: Point) -> Option<FocusArea> {
         let (rx, ry) = self.shape.radii()?;
         Some(self.area.unwrap_or(FocusArea { center: crop_center, rx, ry }).sanitized())
+    }
+}
+
+/// The shape out-of-focus highlights take: the lens's aperture.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Bokeh {
+    /// Five, six or eight straight blades: polygons, vertex up.
+    Blades5,
+    Blades6,
+    Blades8,
+    /// Discs brighter at the rim, as from lenses with an over-corrected aberration.
+    Bubble,
+    /// Rings with a dim middle, as from a mirror lens.
+    Ring,
+    /// A round aperture: smooth discs. Last, so an unknown shape reads as round.
+    #[default]
+    #[serde(other)]
+    Circle,
+}
+
+impl Bokeh {
+    pub const ALL: [Bokeh; 6] = [Bokeh::Circle, Bokeh::Blades5, Bokeh::Blades6, Bokeh::Blades8, Bokeh::Bubble, Bokeh::Ring];
+
+    pub fn is_circle(&self) -> bool {
+        *self == Bokeh::Circle
     }
 }
 
@@ -1461,6 +1491,7 @@ impl Default for LensBlur {
             transition: Self::DEFAULT_TRANSITION,
             shape: FocusShape::Auto,
             area: None,
+            bokeh: Bokeh::Circle,
         }
     }
 }

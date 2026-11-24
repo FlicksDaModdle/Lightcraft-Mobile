@@ -32,7 +32,7 @@
 //! It runs on the scene-linear image (white-balanced and denoised, before exposure: a blur is
 //! linear, so exposure commutes with it), on the CPU, for both renderers.
 
-use lightcraft_develop::{BrushStroke, DevelopSettings, LensBlur, Mask, MaskShape};
+use lightcraft_develop::{Bokeh, BrushStroke, DevelopSettings, LensBlur, Mask, MaskShape};
 use lightcraft_raster::{Plane, Rgb32f};
 
 use crate::geometry::Frame;
@@ -371,7 +371,7 @@ pub fn apply_with(
                 crate::timed("lens blur transition", || transition_ramp(&focus, transition_px(s, px_per_long), px_per_long, origin))
             };
             let coc: Vec<f32> = focus.data.iter().enumerate().map(|(i, f)| (1.0 - f) * ramp.as_ref().map_or(1.0, |r| r.at(i))).collect();
-            blur(img, &coc, r, boost_of(s.lens_blur.boost), origin);
+            blur(img, &coc, r, boost_of(s.lens_blur.boost), s.lens_blur.bokeh, origin);
         }
     }
     let ev = s.light.exposure as f32;
@@ -402,7 +402,7 @@ pub fn apply_with(
         if let Some(ramp) = transition_ramp(&sharp, transition_of(a.lens_blur_transition, px_per_long), px_per_long, origin) {
             coc.iter_mut().enumerate().for_each(|(i, c)| *c *= ramp.at(i));
         }
-        blur(img, &coc, r, boost_of(a.lens_blur_boost), origin);
+        blur(img, &coc, r, boost_of(a.lens_blur_boost), s.lens_blur.bokeh, origin);
     }
 }
 
@@ -517,11 +517,11 @@ fn transition_ramp(focus: &Plane, d: f32, px_per_long: f64, origin: (usize, usiz
 /// highlights brightened by `boost` (0..1) before they are spread.
 /// `origin`: where `img`'s pixel (0, 0) sits in the whole output (a zoomed view's window), so the
 /// coarse grids line up with the whole render's.
-fn blur(img: &mut Rgb32f, coc: &[f32], r: f32, boost: f32, origin: (usize, usize)) {
+fn blur(img: &mut Rgb32f, coc: &[f32], r: f32, boost: f32, bokeh: Bokeh, origin: (usize, usize)) {
     let w = img.width;
     // highlights brightened before they are spread (the bokeh), the rest as it is
     let gain = |c: [f32; 3]| 1.0 + BOOST_GAIN * boost * smooth(0.5, 1.0, lightcraft_color::luminance_2020(c));
-    let levels: Vec<Level> = (1..=LEVELS).map(|k| crate::timed("lens blur level", || level(img, coc, k, r, &gain, origin))).collect();
+    let levels: Vec<Level> = (1..=LEVELS).map(|k| crate::timed("lens blur level", || level(img, coc, k, r, &gain, bokeh, origin))).collect();
     // each pixel between the two levels around its circle of confusion (level 0: the image)
     let src = img.clone();
     crate::for_rows(&mut img.data, w, |y, row| {
@@ -558,7 +558,7 @@ impl Level {
 
 /// Level `k` of [`LEVELS`] (radius `k / LEVELS · r` pixels): the disc blur of the pixels at least
 /// that far out of focus.
-fn level(img: &Rgb32f, coc: &[f32], k: usize, r: f32, gain: &(impl Fn([f32; 3]) -> f32 + Sync), origin: (usize, usize)) -> Level {
+fn level(img: &Rgb32f, coc: &[f32], k: usize, r: f32, gain: &(impl Fn([f32; 3]) -> f32 + Sync), bokeh: Bokeh, origin: (usize, usize)) -> Level {
     let (w, h) = (img.width, img.height);
     let radius = r * k as f32 / LEVELS as f32;
     let (f, shift, lw, lh) = level_grid(w, h, radius, origin);
@@ -586,7 +586,7 @@ fn level(img: &Rgb32f, coc: &[f32], k: usize, r: f32, gain: &(impl Fn([f32; 3]) 
             *cell = acc;
         }
     });
-    Level { img: disc(&cells, lw, lh, radius / f as f32), f, shift }
+    Level { img: disc(&cells, lw, lh, radius / f as f32, bokeh), f, shift }
 }
 
 /// Grid scale and dimensions for one disc level, bounded even when a window's grid is offset.
@@ -604,10 +604,58 @@ fn level_grid(w: usize, h: usize, radius: f32, origin: (usize, usize)) -> (usize
     }
 }
 
-/// The normalized disc blur of radius `rho` cells of weighted sums `cells` (`[r·w, g·w, b·w, w]`,
-/// `lw × lh`): per row of the disc, a span read from that row's prefix sums, its two end cells
-/// weighted by the fraction of them inside.
-fn disc(cells: &[[f32; 4]], lw: usize, lh: usize, rho: f32) -> Rgb32f {
+/// Half the width of `bokeh`'s shape of radius `rho` at height `dy` (`None` above or below it).
+/// Shapes are left-right symmetric (a polygon stands on a flat side's opposite vertex), so a row
+/// is one span about the middle.
+fn half_width(bokeh: Bokeh, rho: f32, dy: f32) -> Option<f32> {
+    let blades = match bokeh {
+        Bokeh::Blades5 => 5,
+        Bokeh::Blades6 => 6,
+        Bokeh::Blades8 => 8,
+        _ => {
+            let q = rho * rho - dy * dy;
+            return (q >= 0.0).then(|| q.sqrt());
+        }
+    };
+    // a regular polygon of circumradius rho, a vertex straight up: inside where every edge's
+    // normal n has n·p ≤ the apothem; on the right half, the narrowest such x
+    let n = blades as f32;
+    let apothem = rho * (std::f32::consts::PI / n).cos();
+    let mut x = f32::INFINITY;
+    for i in 0..blades {
+        let phi = -std::f32::consts::FRAC_PI_2 + (2 * i + 1) as f32 * std::f32::consts::PI / n;
+        let (sin, cos) = phi.sin_cos();
+        if dy * sin > apothem + 1e-4 {
+            return None;
+        }
+        if cos > 1e-4 {
+            x = x.min((apothem - dy * sin) / cos);
+        }
+    }
+    (x.is_finite() && x >= 0.0).then_some(x)
+}
+
+/// The rows of `bokeh`'s kernel of radius `rho`: `(dy, half width, fraction of the end cells
+/// inside, weight)`. Bubble and Ring add a second, smaller disc with a negative weight, so the
+/// rim counts more than the middle.
+fn kernel_rows(bokeh: Bokeh, rho: f32) -> Vec<(isize, isize, f64, f64)> {
+    let n = rho.ceil() as isize;
+    let rows = |shape: Bokeh, r: f32, weight: f64| -> Vec<(isize, isize, f64, f64)> {
+        (-n..=n).filter_map(|dy| half_width(shape, r, dy as f32).map(|hw| (dy, hw.floor() as isize, (hw - hw.floor()) as f64, weight))).collect()
+    };
+    match bokeh {
+        // rim 2.5× the middle
+        Bokeh::Bubble => [rows(Bokeh::Circle, rho, 2.5), rows(Bokeh::Circle, rho * 0.78, -1.5)].concat(),
+        // the middle a tenth of the rim
+        Bokeh::Ring => [rows(Bokeh::Circle, rho, 1.0), rows(Bokeh::Circle, rho * 0.62, -0.9)].concat(),
+        other => rows(other, rho, 1.0),
+    }
+}
+
+/// The normalized blur of radius `rho` cells, in `bokeh`'s shape, of weighted sums `cells`
+/// (`[r·w, g·w, b·w, w]`, `lw × lh`): per row of the shape, a span read from that row's prefix
+/// sums, its two end cells weighted by the fraction of them inside.
+fn disc(cells: &[[f32; 4]], lw: usize, lh: usize, rho: f32, bokeh: Bokeh) -> Rgb32f {
     let stride = lw + 1;
     let mut pre = vec![[0f64; 4]; stride * lh];
     crate::for_rows(&mut pre, stride, |y, p| {
@@ -624,23 +672,14 @@ fn disc(cells: &[[f32; 4]], lw: usize, lh: usize, rho: f32) -> Rgb32f {
     });
     // (a disc past the grid reads nothing more)
     let rho = if rho.is_finite() { rho.clamp(0.0, lw.max(lh) as f32 + 1.0) } else { 0.0 };
-    let n = rho.ceil() as isize;
-    let spans: Vec<(isize, isize, f64)> = (-n..=n)
-        .filter_map(|dy| {
-            let q = rho * rho - (dy * dy) as f32;
-            (q >= 0.0).then(|| {
-                let hw = q.sqrt();
-                (dy, hw.floor() as isize, (hw - hw.floor()) as f64)
-            })
-        })
-        .collect();
+    let spans = kernel_rows(bokeh, rho);
     let mut out = Rgb32f::new(lw, lh);
     let (lwi, lhi) = (lw as isize, lh as isize);
     crate::for_rows(&mut out.data, lw, |y, row| {
         for (x, px) in row.iter_mut().enumerate() {
             let x = x as isize;
             let mut acc = [0f64; 4];
-            for &(dy, hw, fr) in &spans {
+            for &(dy, hw, fr, wt) in &spans {
                 let yy = y as isize + dy;
                 if yy < 0 || yy >= lhi {
                     continue;
@@ -651,7 +690,7 @@ fn disc(cells: &[[f32; 4]], lw: usize, lh: usize, rho: f32) -> Rgb32f {
                     && let (Some(pa), Some(pb)) = (pre.get(base + a as usize), pre.get(base + b as usize))
                 {
                     for ch in 0..4 {
-                        acc[ch] += pb[ch] - pa[ch];
+                        acc[ch] += wt * (pb[ch] - pa[ch]);
                     }
                 }
                 if fr > 0.0 {
@@ -661,7 +700,7 @@ fn disc(cells: &[[f32; 4]], lw: usize, lh: usize, rho: f32) -> Rgb32f {
                             && let Some(c) = cells.get(yy as usize * lw + xx as usize)
                         {
                             for ch in 0..4 {
-                                acc[ch] += fr * c[ch] as f64;
+                                acc[ch] += wt * fr * c[ch] as f64;
                             }
                         }
                     }
@@ -781,6 +820,37 @@ mod tests {
         }
         let after: f32 = img.data.iter().map(|c| c[1]).sum();
         assert!((after - before).abs() / before < 0.15, "{before} → {after}");
+    }
+
+    /// The bokeh shape draws a point of light as that shape: six blades cut the round disc's sides
+    /// flat, and a ring leaves its middle darker than its rim.
+    #[test]
+    fn the_bokeh_shape_draws_points_of_light() {
+        let (w, h) = (600, 600);
+        let spread = |bokeh: Bokeh| {
+            let mut s = on(100.0);
+            s.masks.push(centre_mask(7, 0.05));
+            s.lens_blur.focus_mask = Some(7);
+            s.lens_blur.bokeh = bokeh;
+            let mut img = Rgb32f::filled(w, h, [0.0; 3]);
+            img.set(100, 100, [100.0; 3]);
+            apply(&mut img, &s, &frame(&s, w, h), w as f64, None);
+            (img, radius_px(&s, w as f64))
+        };
+        let (round, r) = spread(Bokeh::Circle);
+        let (hex, _) = spread(Bokeh::Blades6);
+        let (ring, _) = spread(Bokeh::Ring);
+        assert!(r > 12.0, "{r}");
+        let at = |img: &Rgb32f, dx: f32, dy: f32| img.get((100.0 + dx).round() as usize, (100.0 + dy).round() as usize)[1];
+        // beside the middle, near the rim: inside the disc, outside the hexagon's flat side
+        let side = 0.95 * r;
+        assert!(at(&hex, side, 0.0) < 0.5 * at(&round, side, 0.0), "{} vs {}", at(&hex, side, 0.0), at(&round, side, 0.0));
+        // straight up is a vertex, so the hexagon still reaches as far as the disc there
+        assert!(at(&hex, 0.0, -0.8 * r) > 0.5 * at(&round, 0.0, -0.8 * r));
+        // the ring's middle is darker than its rim; the disc's is not
+        let (mid, rim) = (at(&ring, 0.0, 0.0), at(&ring, 0.0, -0.85 * r));
+        assert!(mid < 0.5 * rim, "{mid} vs {rim}");
+        assert!(at(&round, 0.0, 0.0) > 0.5 * at(&round, 0.0, -0.85 * r));
     }
 
     /// What is in focus stays sharp, and its brightness doesn't bleed into the blurred background as a halo.

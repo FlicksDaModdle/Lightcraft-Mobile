@@ -183,6 +183,7 @@ struct AssetThumb: View {
     let bringing: Bool
     var edited = false
     @State private var image: UIImage?
+    @State private var raw = false
 
     var body: some View {
         Color(white: 0.12)
@@ -212,6 +213,9 @@ struct AssetThumb: View {
                         .padding(5)
                 }
             }
+            .overlay(alignment: .topTrailing) {
+                if raw { RawBadge() }
+            }
             .overlay {
                 if bringing {
                     ZStack {
@@ -221,6 +225,7 @@ struct AssetThumb: View {
                 }
             }
             .task(id: asset.localIdentifier) {
+                raw = RawAssets.isRaw(asset)
                 let img = await load()
                 withAnimation(.easeOut(duration: 0.2)) { image = img }
             }
@@ -237,5 +242,22 @@ struct AssetThumb: View {
                 done.resume(returning: img)
             }
         }
+    }
+}
+
+/// Which Camera Roll photos are raw: the photo itself, or a raw kept alongside its JPEG.
+enum RawAssets {
+    @MainActor private static var known: [String: Bool] = [:]
+
+    @MainActor static func isRaw(_ asset: PHAsset) -> Bool {
+        guard asset.mediaType == .image else { return false }
+        if let k = known[asset.localIdentifier] { return k }
+        let raw = PHAssetResource.assetResources(for: asset).contains { r in
+            guard r.type == .photo || r.type == .alternatePhoto,
+                  let t = UTType(r.uniformTypeIdentifier) else { return false }
+            return t.conforms(to: .rawImage)
+        }
+        known[asset.localIdentifier] = raw
+        return raw
     }
 }
