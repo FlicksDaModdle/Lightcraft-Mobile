@@ -68,6 +68,42 @@ final class Library: ObservableObject {
     func rate(_ p: Photo, _ stars: Int) { change("photo.rate", ["rating": stars, "ids": [p.id]]) }
     func flag(_ p: Photo, _ flag: String) { change("photo.flag", ["flag": flag, "ids": [p.id]]) }
 
+    // MARK: several photos at once
+
+    /// Whether edits have been copied (from the editor or a photo's menu), so they can be pasted.
+    var canPaste: Bool { EditorModel.copied }
+
+    /// Copy photo `p`'s edits (all but crop, masks and spots), to paste on others.
+    func copyEdits(_ p: Photo) {
+        do {
+            try Engine.shared.run("library.select", ["ids": [p.id], "active": p.id])
+            try Engine.shared.run("develop.copy")
+            EditorModel.copied = true
+            notice = nil
+        } catch {
+            notice = error.localizedDescription
+        }
+    }
+
+    func pasteEdits(_ ids: [UInt64]) { bulk("develop.paste", ["ids": ids], ids) }
+    func applyPreset(_ preset: String, to ids: [UInt64]) { bulk("preset.apply", ["id": preset, "ids": ids], ids) }
+    func resetEdits(_ ids: [UInt64]) { bulk("develop.reset", ["ids": ids], ids) }
+
+    func remove(_ ids: [UInt64]) {
+        change("photo.delete", ["ids": ids])
+        ids.forEach(Thumbnails.shared.forget)
+    }
+
+    /// The presets, for the menu of several photos.
+    func presets() -> [Preset] {
+        ((try? Engine.shared.run("presets.list")) as? [Any] ?? []).compactMap(Preset.init)
+    }
+
+    private func bulk(_ command: String, _ params: [String: Any], _ ids: [UInt64]) {
+        ids.forEach(Thumbnails.shared.forget)
+        change(command, params)
+    }
+
     /// Take a photo out of the library (the engine keeps it in Recently Deleted).
     func remove(_ p: Photo) {
         change("photo.delete", ["ids": [p.id]])

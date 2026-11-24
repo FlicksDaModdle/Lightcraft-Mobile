@@ -157,6 +157,10 @@ struct LibraryGrid: View {
     @Binding var sharing: Photo?
     let browseDevice: () -> Void
     let addPhotos: () -> Void
+    /// Choosing several photos, to paste edits, apply a preset or export them together.
+    @State private var selecting = false
+    @State private var selected: Set<UInt64> = []
+    @State private var exporting = false
 
     private let columns = Array(repeating: GridItem(.flexible(), spacing: 2), count: 4)
 
@@ -173,20 +177,102 @@ struct LibraryGrid: View {
             } else {
                 LazyVGrid(columns: columns, spacing: 2) {
                     ForEach(shown) { photo in
-                        Button { open = photo } label: { LibraryCell(photo: photo) }
+                        Button {
+                            if selecting {
+                                UISelectionFeedbackGenerator().selectionChanged()
+                                if selected.contains(photo.id) { selected.remove(photo.id) } else { selected.insert(photo.id) }
+                            } else {
+                                open = photo
+                            }
+                        } label: {
+                            LibraryCell(photo: photo)
+                                .overlay(alignment: .bottomTrailing) {
+                                    if selecting {
+                                        Image(systemName: selected.contains(photo.id) ? "checkmark.circle.fill" : "circle")
+                                            .font(.system(size: 20, weight: .semibold))
+                                            .symbolRenderingMode(.palette)
+                                            .foregroundStyle(.white, selected.contains(photo.id) ? Theme.accent : Color.black.opacity(0.3))
+                                            .shadow(color: .black.opacity(0.4), radius: 2)
+                                            .padding(5)
+                                    }
+                                }
+                                .overlay {
+                                    if selecting && selected.contains(photo.id) { Color.white.opacity(0.15) }
+                                }
+                        }
                             .buttonStyle(.plain)
                             .contextMenu { menu(photo) } preview: {
                                 ContextPreview(photo: photo)
                             }
                             .accessibilityLabel(Text(photo.fileName))
-                            .accessibilityValue(Text(photo.edited ? "Edited" : ""))
+                            .accessibilityValue(Text([photo.edited ? "Edited" : nil, photo.isRaw ? "Raw" : nil, selecting && selected.contains(photo.id) ? "Selected" : nil].compactMap { $0 }.joined(separator: ", ")))
+                            .accessibilityAddTraits(selecting && selected.contains(photo.id) ? .isSelected : [])
                     }
                 }
                 .animation(.glass, value: shown.map(\.id))
+                .padding(.bottom, selecting ? 80 : 0)
             }
         }
         .scrollIndicators(.hidden)
         .refreshable { library.reload() }
+        .overlay(alignment: .bottom) {
+            if selecting { selectionBar.transition(.move(edge: .bottom).combined(with: .opacity)) }
+        }
+        .animation(.glass, value: selecting)
+        .sheet(isPresented: $exporting) {
+            let chosen = shown.filter { selected.contains($0.id) }
+            ShareView(photos: chosen, current: chosen.first?.id ?? 0, all: true).presentationDragIndicator(.visible)
+        }
+    }
+
+    /// What to do with the chosen photos.
+    private var selectionBar: some View {
+        let ids = library.shown.map(\.id).filter { selected.contains($0) }
+        return HStack(spacing: 8) {
+            Text(ids.isEmpty ? "Choose photos" : "\(ids.count) chosen")
+                .font(.system(size: 14, weight: .semibold))
+                .monospacedDigit()
+                .foregroundStyle(.white)
+                .padding(.leading, 6)
+            Spacer()
+            Button { library.pasteEdits(ids) } label: { barIcon("doc.on.clipboard") }
+                .disabled(ids.isEmpty || !library.canPaste)
+                .accessibilityLabel(Text("Paste edits"))
+            Menu {
+                ForEach(library.presets()) { p in
+                    Button(p.name) { library.applyPreset(p.id, to: ids) }
+                }
+            } label: { barIcon("camera.filters") }
+                .disabled(ids.isEmpty)
+                .accessibilityLabel(Text("Apply a preset"))
+            Button { exporting = true } label: { barIcon("square.and.arrow.up") }
+                .disabled(ids.isEmpty)
+                .accessibilityLabel(Text("Export"))
+            Menu {
+                Button { selected = Set(library.shown.map(\.id)) } label: { Label("Choose all", systemImage: "checkmark.circle") }
+                Button { library.resetEdits(ids) } label: { Label("Reset edits", systemImage: "arrow.uturn.backward") }
+                    .disabled(ids.isEmpty)
+                Button(role: .destructive) {
+                    library.remove(ids)
+                    selected = []
+                } label: { Label("Remove from Silverbath", systemImage: "trash") }
+                    .disabled(ids.isEmpty)
+            } label: { barIcon("ellipsis") }
+                .accessibilityLabel(Text("More"))
+        }
+        .padding(8)
+        .latentGlass(in: Capsule())
+        .latentGlassGroup()
+        .padding(.horizontal, 14)
+        .padding(.bottom, 8)
+    }
+
+    private func barIcon(_ symbol: String) -> some View {
+        Image(systemName: symbol)
+            .font(.system(size: 16, weight: .semibold))
+            .foregroundStyle(.white)
+            .frame(width: 42, height: 42)
+            .latentGlass(in: Circle(), interactive: true)
     }
 
     private func header(count: Int) -> some View {
@@ -213,6 +299,20 @@ struct LibraryGrid: View {
                     .contentTransition(.numericText())
             }
             Spacer()
+            if !library.photos.isEmpty {
+                Button {
+                    selecting.toggle()
+                    if !selecting { selected = [] }
+                } label: {
+                    Text(selecting ? "Done" : "Select")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 14)
+                        .frame(height: 42)
+                        .latentGlass(in: Capsule(), tint: selecting ? Theme.accent : nil, interactive: true)
+                }
+                .buttonStyle(.plain)
+            }
             Menu {
                 Picker("Sort", selection: $library.sort) {
                     ForEach(LibrarySort.allCases) { Text($0.label).tag($0) }
@@ -235,6 +335,10 @@ struct LibraryGrid: View {
     private func menu(_ photo: Photo) -> some View {
         Button { open = photo } label: { Label("Edit", systemImage: "slider.horizontal.3") }
         Button { sharing = photo } label: { Label("Share\u{2026}", systemImage: "square.and.arrow.up") }
+        Button { library.copyEdits(photo) } label: { Label("Copy edits", systemImage: "doc.on.doc") }
+        if library.canPaste {
+            Button { library.pasteEdits([photo.id]) } label: { Label("Paste edits", systemImage: "doc.on.clipboard") }
+        }
         Divider()
         Button { library.flag(photo, photo.flag == "pick" ? "none" : "pick") } label: {
             Label(photo.flag == "pick" ? "Unflag" : "Pick", systemImage: photo.flag == "pick" ? "flag.slash" : "flag")

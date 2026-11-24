@@ -164,10 +164,10 @@ struct ShareView: View {
     @State private var options: Destination?
     @State private var previews: [UInt64: CGImage] = [:]
 
-    init(photos: [Photo], current: UInt64) {
+    init(photos: [Photo], current: UInt64, all: Bool = false) {
         self.photos = photos
         self.current = current
-        _chosen = State(initialValue: [current])
+        _chosen = State(initialValue: all ? Set(photos.map(\.id)) : [current])
     }
 
     private var ordered: [UInt64] { photos.map(\.id).filter { chosen.contains($0) } }

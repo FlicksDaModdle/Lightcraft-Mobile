@@ -1539,7 +1539,7 @@ final class EditorModel: ObservableObject {
     // MARK: export and settings between photos
 
     /// Edits were copied in this session (the engine keeps them until the app quits).
-    private static var copied = false
+    static var copied = false
     @Published private(set) var canPaste = EditorModel.copied
     /// A quick save is running.
     @Published private(set) var saving = false
