@@ -217,7 +217,7 @@ final class EditorModel: ObservableObject {
             return
         }
         do {
-            let r = try Engine.shared.run("mask.add", ["kind": kind]) as? [String: Any]
+            let r = try run("mask.add", ["kind": kind]) as? [String: Any]
             refresh()
             selectedMask = (r?["activeMask"] as? NSNumber)?.uint32Value
             selectedPart = 0
@@ -247,7 +247,7 @@ final class EditorModel: ObservableObject {
         var p: [String: Any] = ["id": id, "op": op, "kind": kind]
         if let text { p["text"] = text }
         do {
-            let r = try Engine.shared.run("mask.addComponent", p) as? [String: Any]
+            let r = try run("mask.addComponent", p) as? [String: Any]
             refreshMasksOnly()
             refreshHistory()
             selectedPart = Swift.max((currentMask?.parts.count ?? 1) - 1, 0)
@@ -345,7 +345,7 @@ final class EditorModel: ObservableObject {
         var p: [String: Any] = ["kind": kind]
         if let text { p["text"] = text }
         do {
-            let r = try Engine.shared.run("mask.add", p) as? [String: Any]
+            let r = try run("mask.add", p) as? [String: Any]
             refresh()
             if let id = (r?["activeMask"] as? NSNumber)?.uint32Value { selectedMask = id }
             if kind == "object" { toast = "Tap what to select. The first selection loads the AI model, which takes a moment." }
@@ -365,7 +365,7 @@ final class EditorModel: ObservableObject {
         }
         guard let id = selectedMask else { return }
         do {
-            try Engine.shared.run("mask.objectPoint", ["id": id, "x": p.x, "y": p.y, "exclude": objectExclude])
+            try run("mask.objectPoint", ["id": id, "x": p.x, "y": p.y, "exclude": objectExclude])
             refreshMasksOnly()
             refreshHistory()
             watchAI()
@@ -590,14 +590,30 @@ final class EditorModel: ObservableObject {
         render()
     }
 
-    /// Undo, one step at a time, back to a history position (stopping if the history stops moving back).
+    /// Put this photo's edits back as they were at History step `entry` (`nil`: before its first
+    /// edit).
     private func undoBack(to entry: Int?) {
-        guard let entry else { return }
-        var last = Int.max
-        while let c = historyCursor(), c > entry, c < last {
-            last = c
-            attempt("edit.undo")
+        if let entry {
+            if let c = historyCursor(), c > entry { attempt("history.restore", ["index": entry]) }
+            return
         }
+        var last = Int.max
+        while let c = historyCursor(), c < last, undoStep() { last = c }
+    }
+
+    /// Undo one of this photo's edits. The app's Undo also holds steps that are not this photo's
+    /// edits, among them the one that brought it into the library; undoing that would take the
+    /// photo away under the editor. Such a step is redone at once, and `false` says nothing of
+    /// this photo's was undone.
+    @discardableResult
+    private func undoStep() -> Bool {
+        let before = historyCursor() ?? -1
+        guard (try? Engine.shared.run("edit.undo")) != nil else { return false }
+        let present = (try? Engine.shared.run("library.select", ["ids": [photo.id], "active": photo.id])) != nil
+        if present, (historyCursor() ?? -1) != before { return true }
+        _ = try? Engine.shared.run("edit.redo")
+        _ = try? Engine.shared.run("library.select", ["ids": [photo.id], "active": photo.id])
+        return false
     }
 
     // MARK: crop mode
@@ -782,7 +798,11 @@ final class EditorModel: ObservableObject {
 
     func auto() { command("develop.auto", toast: "Auto settings applied") }
     func resetAll() { command("develop.reset", toast: "Edits reset") }
-    func undo() { command("edit.undo") }
+    func undo() {
+        if !undoStep() { toast = "Nothing more to undo on this photo" }
+        refresh()
+        render()
+    }
     func redo() { command("edit.redo") }
     func setBW(_ on: Bool) { command("develop.treatment", ["bw": on]) }
     func setHDR(_ on: Bool) { command("develop.hdr", ["enabled": on], toast: on ? "HDR on" : "HDR off") }
@@ -1373,7 +1393,7 @@ final class EditorModel: ObservableObject {
     func addSpot(_ points: [CGPoint]) {
         guard !points.isEmpty else { return }
         do {
-            let r = try Engine.shared.run("spot.add", [
+            let r = try run("spot.add", [
                 "mode": spotMode, "points": points.map { [Double($0.x), Double($0.y)] },
                 "size": spotSize, "feather": spotFeather, "opacity": spotOpacity,
             ]) as? [String: Any]
@@ -1540,11 +1560,23 @@ final class EditorModel: ObservableObject {
     @discardableResult
     private func attempt(_ name: String, _ params: [String: Any] = [:]) -> Bool {
         do {
-            try Engine.shared.run(name, params)
+            try run(name, params)
             return true
         } catch {
             toast = error.localizedDescription
             return false
+        }
+    }
+
+    /// Run an engine command on this photo. If the engine lost track of which photo is open (it
+    /// answers "no photo selected"), open this one again and try once more.
+    @discardableResult
+    private func run(_ name: String, _ params: [String: Any] = [:]) throws -> Any {
+        do {
+            return try Engine.shared.run(name, params)
+        } catch where name != "library.select" && error.localizedDescription.contains("no photo selected") {
+            try Engine.shared.run("library.select", ["ids": [photo.id], "active": photo.id])
+            return try Engine.shared.run(name, params)
         }
     }
 
