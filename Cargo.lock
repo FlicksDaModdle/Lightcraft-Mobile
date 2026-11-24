@@ -4232,6 +4232,7 @@ dependencies = [
  "lightcraft-codecs",
  "lightcraft-develop",
  "lightcraft-engine",
+ "lightcraft-geom",
  "lightcraft-pipeline",
  "lightcraft-raster",
  "log",

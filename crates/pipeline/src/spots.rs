@@ -382,8 +382,15 @@ pub fn layout(spot: &Spot, frame: &Frame, w: usize, h: usize, ppl: f64) -> Optio
     }
     // content-aware fill reads the spot's surroundings (the window holds 2 radii around it)
     let pad = if fill { 2.0 * r } else { r };
-    let (bx0, by0) = (((x0 - pad).floor().max(0.0)) as usize, ((y0 - pad).floor().max(0.0)) as usize);
-    let (bx1, by1) = (((x1 + pad).ceil() as usize).min(w), ((y1 + pad).ceil() as usize).min(h));
+    let (mut x0, mut y0, mut x1, mut y1) = (x0 - pad, y0 - pad, x1 + pad, y1 + pad);
+    if spot.mode == SpotMode::Generate {
+        // the model works on a square: give it a square of the photo, not a stretched strip
+        let side = (x1 - x0).max(y1 - y0);
+        let (cx, cy) = ((x0 + x1) / 2.0, (y0 + y1) / 2.0);
+        (x0, x1, y0, y1) = (cx - side / 2.0, cx + side / 2.0, cy - side / 2.0, cy + side / 2.0);
+    }
+    let (bx0, by0) = ((x0.floor().max(0.0)) as usize, (y0.floor().max(0.0)) as usize);
+    let (bx1, by1) = ((x1.ceil().max(0.0) as usize).min(w), (y1.ceil().max(0.0) as usize).min(h));
     if bx1 <= bx0 || by1 <= by0 {
         return None;
     }

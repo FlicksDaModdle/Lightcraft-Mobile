@@ -402,6 +402,19 @@ struct EditorView: View {
                         if model.mode == .remove && chrome {
                             SpotCanvas(model: model, imageSize: CGSize(width: img.width, height: img.height), size: geo.size, zoom: zoom)
                         }
+                        if model.pickingObject != nil {
+                            // the next tap picks an object
+                            Color.white.opacity(0.001)
+                                .frame(width: geo.size.width, height: geo.size.height)
+                                .onTapGesture { at in
+                                    let s = Swift.min(geo.size.width / CGFloat(img.width), geo.size.height / CGFloat(img.height))
+                                    let fw = CGFloat(img.width) * s
+                                    let fh = CGFloat(img.height) * s
+                                    let u = CGPoint(x: (at.x - (geo.size.width - fw) / 2) / fw, y: (at.y - (geo.size.height - fh) / 2) / fh)
+                                    model.pickObject(atShown: u)
+                                }
+                                .accessibilityLabel(Text("Tap an object to select it"))
+                        }
                     }
                     .scaleEffect(zoom)
                     .offset(pan)
@@ -418,6 +431,24 @@ struct EditorView: View {
                     .padding(.bottom, 10)
                     .frame(width: geo.size.width, height: geo.size.height, alignment: .bottom)
                     .transition(.opacity)
+                }
+                if model.pickingObject != nil || model.picking {
+                    HStack(spacing: 8) {
+                        if model.picking { ProgressView().tint(.white) } else { Image(systemName: "hand.tap") }
+                        Text(model.picking ? "Finding it\u{2026}" : "Tap what to select")
+                        if !model.picking {
+                            Button { model.pickingObject = nil } label: { Image(systemName: "xmark") }
+                                .accessibilityLabel(Text("Stop"))
+                        }
+                    }
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 14)
+                    .frame(height: 36)
+                    .latentGlass(in: Capsule(), interactive: true)
+                    .frame(maxWidth: .infinity, alignment: .center)
+                    .padding(.top, 8)
+                    .transition(.scale(scale: 0.8).combined(with: .opacity))
                 }
                 if zoom > 1.01 {
                     HStack(spacing: 6) {
@@ -1127,6 +1158,14 @@ struct EditorView: View {
             describing = true
             return
         }
+        if kind == "object" {
+            model.refreshAIModel()
+            if !model.aiModel.installed {
+                // no SAM 3: pick it with Vision instead
+                model.startPicking(op ?? "new")
+                return
+            }
+        }
         withAnimation(.glass) {
             if let op { model.addPart(kind, op: op) } else { model.addMask(kind) }
         }
@@ -1596,6 +1635,12 @@ struct EditorView: View {
                     }
                     .accessibilityLabel(Text("Delete spot"))
                 }
+                Button { model.startPicking("remove") } label: {
+                    Label("Select object", systemImage: "person.crop.rectangle").font(.system(size: 13, weight: .semibold))
+                        .padding(.horizontal, 12).frame(height: 40)
+                        .latentGlass(in: Capsule(), tint: Theme.accent.opacity(0.7), interactive: true)
+                }
+                .accessibilityHint(Text("Then tap a person, animal or thing to remove it."))
                 Spacer()
                 Menu {
                     Button { model.findDust() } label: { Label("Find sensor dust", systemImage: "sparkle.magnifyingglass") }
@@ -1614,6 +1659,8 @@ struct EditorView: View {
             .opacity(focused ? 0 : 1)
             Text(removeHint)
                 .font(.system(size: 12))
+                .lineLimit(2)
+                .fixedSize(horizontal: false, vertical: true)
                 .foregroundStyle(Theme.secondaryText)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.horizontal, 20)
@@ -1624,8 +1671,10 @@ struct EditorView: View {
     }
 
     private var removeHint: String {
-        if model.selectedSpot != nil {
-            return "Drag the spot to move it, or its pin to take from somewhere else. Tap elsewhere for a new spot."
+        if let i = model.selectedSpot, model.spots.indices.contains(i) {
+            return ["fill", "generate"].contains(model.spots[i].mode)
+                ? "Drag the spot to move it. Tap elsewhere or brush for a new one."
+                : "Drag the spot to move it, or its pin to take from somewhere else."
         }
         switch model.spotMode {
         case "heal": return "Brush over a blemish; it's replaced with texture from nearby, blended to match."
@@ -3018,7 +3067,7 @@ struct SpotCanvas: View {
             }
             if !stroke.isEmpty {
                 Path { p in p.addLines(stroke) }
-                    .stroke(Color.white.opacity(0.35), style: StrokeStyle(lineWidth: Swift.max(4, CGFloat(model.spotSize) * perLongEdge * 2), lineCap: .round, lineJoin: .round))
+                    .stroke(Color(red: 1, green: 0.25, blue: 0.3).opacity(0.5), style: StrokeStyle(lineWidth: Swift.max(4, CGFloat(model.spotSize) * perLongEdge * 2), lineCap: .round, lineJoin: .round))
             }
         }
         .frame(width: size.width, height: size.height)
@@ -3079,34 +3128,43 @@ struct SpotCanvas: View {
         let r = radius(sp)
         let line = 1.5 / zoom
         let pts = sp.points.map(toView)
+        let shape = area(pts, r)
         ZStack {
-            shape(pts, r)
-                .stroke(Color.white.opacity(selected ? 1 : 0.6), style: StrokeStyle(lineWidth: line, dash: selected ? [] : [4 / zoom, 3 / zoom]))
-            if selected, let src = sourceCenter(sp), let tc = pts.isEmpty ? nil : CGPoint(x: pts.map(\.x).reduce(0, +) / CGFloat(pts.count), y: pts.map(\.y).reduce(0, +) / CGFloat(pts.count)) {
-                let shifted = pts.map { CGPoint(x: $0.x + src.x - tc.x, y: $0.y + src.y - tc.y) }
-                shape(shifted, r)
-                    .stroke(Theme.accent, style: StrokeStyle(lineWidth: line, dash: [4 / zoom, 3 / zoom]))
-                Path { p in
-                    p.move(to: tc)
-                    p.addLine(to: src)
+            if selected {
+                // what the spot covers, as one clean shape
+                shape.fill(Color.white.opacity(0.16))
+                shape.stroke(Color.white, lineWidth: line)
+                if let src = sourceCenter(sp), !pts.isEmpty {
+                    let tc = CGPoint(x: pts.map(\.x).reduce(0, +) / CGFloat(pts.count), y: pts.map(\.y).reduce(0, +) / CGFloat(pts.count))
+                    area(pts.map { CGPoint(x: $0.x + src.x - tc.x, y: $0.y + src.y - tc.y) }, r)
+                        .stroke(Theme.accent, style: StrokeStyle(lineWidth: line, dash: [4 / zoom, 3 / zoom]))
+                    Path { p in
+                        p.move(to: tc)
+                        p.addLine(to: src)
+                    }
+                    .stroke(Color.white.opacity(0.7), style: StrokeStyle(lineWidth: line, dash: [3 / zoom, 3 / zoom]))
+                    Circle().fill(Theme.accent).overlay(Circle().strokeBorder(Color.white, lineWidth: 2 / zoom))
+                        .frame(width: 16 / zoom, height: 16 / zoom).position(src)
                 }
-                .stroke(Color.white.opacity(0.7), style: StrokeStyle(lineWidth: line, dash: [3 / zoom, 3 / zoom]))
-                Circle().fill(Theme.accent).overlay(Circle().strokeBorder(Color.white, lineWidth: 2 / zoom))
-                    .frame(width: 16 / zoom, height: 16 / zoom).position(src)
+            } else {
+                // the others: a faint outline and a pin to tap
+                shape.stroke(Color.white.opacity(0.35), lineWidth: line)
+                if !pts.isEmpty {
+                    let c = CGPoint(x: pts.map(\.x).reduce(0, +) / CGFloat(pts.count), y: pts.map(\.y).reduce(0, +) / CGFloat(pts.count))
+                    Circle().fill(Color.white).frame(width: 10 / zoom, height: 10 / zoom).position(c)
+                }
             }
         }
-        .shadow(color: .black.opacity(0.5), radius: 1.5 / zoom)
+        .shadow(color: .black.opacity(0.45), radius: 1.5 / zoom)
         .allowsHitTesting(false)
     }
 
-    /// A round spot, or a brushed path as wide as the spot.
-    private func shape(_ pts: [CGPoint], _ r: CGFloat) -> Path {
-        if pts.count == 1, let c = pts.first {
-            return Path(ellipseIn: CGRect(x: c.x - r, y: c.y - r, width: r * 2, height: r * 2))
-        }
+    /// The area a spot covers (every point's circle; brushed strokes are dense), merged into one
+    /// outline.
+    private func area(_ pts: [CGPoint], _ r: CGFloat) -> Path {
         var p = Path()
-        p.addLines(pts)
-        return p.strokedPath(StrokeStyle(lineWidth: r * 2, lineCap: .round, lineJoin: .round))
+        for c in pts { p.addEllipse(in: CGRect(x: c.x - r, y: c.y - r, width: r * 2, height: r * 2)) }
+        return Path(p.cgPath.normalized())
     }
 }
 

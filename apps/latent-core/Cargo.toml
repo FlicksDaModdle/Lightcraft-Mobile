@@ -31,6 +31,7 @@ heif = ["lightcraft-codecs/heif"]
 lightcraft-engine = { workspace = true, features = ["sam"] }
 lightcraft-codecs = { workspace = true }
 lightcraft-develop = { workspace = true }
+lightcraft-geom = { workspace = true }
 lightcraft-raster = { workspace = true }
 lightcraft-pipeline = { workspace = true }
 serde_json = { workspace = true }

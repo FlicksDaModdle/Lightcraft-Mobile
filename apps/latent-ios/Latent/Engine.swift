@@ -124,6 +124,21 @@ final class Engine: @unchecked Sendable {
         return Self.convert(img.pointee)
     }
 
+    /// An object mask from Latent's own selection (`side × side` coverage bytes over the uncropped,
+    /// oriented photo): a part of mask `mask` with `op`, or a new mask. Returns the mask's id.
+    func objectFromCoverage(mask: UInt32?, op: String, side: Int, probs: [UInt8], at: CGPoint) throws -> UInt32 {
+        var problem: UnsafeMutablePointer<CChar>? = nil
+        let id = probs.withUnsafeBufferPointer { b in
+            latent_object_from_coverage(core, mask ?? 0, op, UInt32(side), b.baseAddress, Double(at.x), Double(at.y), &problem)
+        }
+        if id == 0 {
+            let message = problem.map { String(cString: $0) } ?? "The object couldn't be selected."
+            if let problem { latent_string_free(problem) }
+            throw EngineError(message: message)
+        }
+        return id
+    }
+
     /// Give a photo its depth map (nil takes it away).
     func setDepth(_ id: UInt64, _ m: DepthMap?) {
         guard let m else {

@@ -135,6 +135,55 @@ impl Core {
         self.finish(job.run())
     }
 
+    /// An object mask from a selection the app made (Apple's Vision, say): `probs` is `side × side`
+    /// coverage (0 out … 255 in) over the uncropped, oriented photo stretched to a square, the
+    /// way the engine's own segmentations are stored; `at` is where the user tapped (mask
+    /// coordinates). With `mask` it becomes a part of that mask (`op` "add", "subtract" or
+    /// "intersect"), else a new mask. Returns the mask's id.
+    pub fn object_from_coverage(&self, mask: Option<u32>, op: &str, side: usize, probs: &[u8], at: (f64, f64)) -> Result<u32, String> {
+        use lightcraft_develop::{MaskShape, SegMask};
+        if side == 0 || side > lightcraft_develop::segmask::MAX_SIDE || probs.len() != side * side {
+            return Err("the selection is the wrong size".into());
+        }
+        // coverage to logits: 0 and 255 are fully out and in
+        let logits: Vec<f32> = probs
+            .iter()
+            .map(|&b| {
+                let p = (f32::from(b) / 255.0).clamp(1e-4, 1.0 - 1e-4);
+                (p / (1.0 - p)).ln()
+            })
+            .collect();
+        let hint = if at.0.is_finite() && at.1.is_finite() { vec![lightcraft_geom::Point::new(at.0, at.1)] } else { Vec::new() };
+        let shape = MaskShape::Object { hint, exclude: Vec::new(), seg: Some(SegMask::from_logits(side, &logits)), detail: Vec::new(), edge: 0.0 };
+        let shape = serde_json::to_value(&shape).map_err(|e| e.to_string())?;
+        let run = |cmd: &str, p: serde_json::Value| -> Result<serde_json::Value, String> {
+            let r: serde_json::Value = serde_json::from_str(&self.execute(cmd, &p.to_string())).map_err(|e| e.to_string())?;
+            match r.get("error").and_then(|e| e.as_str()) {
+                Some(e) => Err(e.to_string()),
+                None => Ok(r.get("ok").cloned().unwrap_or(r)),
+            }
+        };
+        let (id, component) = match mask {
+            Some(id) => {
+                run("mask.addComponent", serde_json::json!({"id": id, "op": op, "kind": "brush"}))?;
+                let d = run("develop.get", serde_json::json!({}))?;
+                let parts = d["masks"]
+                    .as_array()
+                    .and_then(|ms| ms.iter().find(|m| m["id"].as_u64() == Some(u64::from(id))))
+                    .and_then(|m| m["components"].as_array())
+                    .map_or(1, Vec::len);
+                (id, parts.saturating_sub(1))
+            }
+            None => {
+                let r = run("mask.add", serde_json::json!({"kind": "brush"}))?;
+                let id = r["activeMask"].as_u64().and_then(|v| u32::try_from(v).ok()).ok_or("no mask was made")?;
+                (id, 0)
+            }
+        };
+        run("mask.update", serde_json::json!({"id": id, "component": component, "shape": shape}))?;
+        Ok(id)
+    }
+
     /// Give photo `id` a depth map: `w × h` bytes, 0 nearest … 255 farthest, over the photo as
     /// the camera stood it (upright, before the user's rotation). An empty or ill-sized map takes
     /// the photo's depth map away. Lens Blur's Focus Range and Depth Range masks use it.
@@ -573,6 +622,29 @@ mod tests {
         assert_ne!(thumb, core.thumb(id, 96).map(|i| i.rgba).unwrap_or_default(), "the preview shows the LUT");
         assert!(core.profile_thumb(id, "lut:nope", 96).is_err());
         ok(&core.execute("develop.profile", &json!({"id": pid, "amount": 100}).to_string()));
+    }
+
+    #[test]
+    fn a_selection_from_the_app_becomes_an_object_mask() {
+        let core = Core::demo();
+        let photos = ok(&core.execute("catalog.query", ""));
+        let id = photos["photos"][0]["id"].as_u64().unwrap_or(0);
+        ok(&core.execute("library.select", &json!({"ids": [id], "active": id}).to_string()));
+        let side = 32;
+        // the left half selected
+        let probs: Vec<u8> = (0..side * side).map(|i| if i % side < side / 2 { 255 } else { 0 }).collect();
+        let m = core.object_from_coverage(None, "add", side, &probs, (0.25, 0.5));
+        let Ok(m) = m else { panic!("{:?}", m.err()) };
+        let d = ok(&core.execute("develop.get", ""));
+        let mask = d["masks"].as_array().and_then(|ms| ms.iter().find(|x| x["id"].as_u64() == Some(u64::from(m)))).cloned().unwrap_or_default();
+        assert_eq!(mask["components"][0]["shape"]["kind"], "object", "{mask}");
+        let view = core.render_mask_as(id, 64, 64, m, MaskLook { view: "whiteOnBlack", color: [255, 255, 255], opacity: 100 });
+        let Ok(v) = view else { panic!("{:?}", view.err()) };
+        let at = |x: usize| v.rgba.get(4 * ((v.height / 2) * v.width + x)).copied().unwrap_or(0);
+        assert!(at(4) > 200 && at(v.width - 5) < 50, "{} {}", at(4), at(v.width - 5));
+        // and as a part taken away from it
+        assert!(core.object_from_coverage(Some(m), "subtract", side, &probs, (0.25, 0.5)).is_ok());
+        assert!(core.object_from_coverage(None, "add", side, &probs[..10], (0.5, 0.5)).is_err());
     }
 
     #[test]

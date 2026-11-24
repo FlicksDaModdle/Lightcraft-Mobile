@@ -87,5 +87,9 @@ LatentImage *latent_profile_thumb(const LatentCore *core, uint64_t id, const cha
 typedef bool (*LatentInpaintFn)(const float *rgb, const float *hole, uint32_t size, float *out);
 void latent_set_inpainter(LatentInpaintFn model, uint32_t size);
 
+// An object mask from the app's own selection (side*side coverage bytes over the uncropped,
+// oriented photo); added to `mask` with `op`, or a new mask when mask is 0. 0 on failure.
+uint32_t latent_object_from_coverage(const LatentCore *core, uint32_t mask, const char *op, uint32_t side, const uint8_t *probs, double x, double y, char **error);
+
 void latent_image_free(LatentImage *img);
 void latent_string_free(char *s);

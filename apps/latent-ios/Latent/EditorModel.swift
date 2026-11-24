@@ -1146,6 +1146,68 @@ final class EditorModel: ObservableObject {
         try? FileManager.default.removeItem(at: tmp)
     }
 
+    // MARK: picking an object
+
+    /// What the next tap on the photo picks an object for: "remove", or a mask ("new", "add",
+    /// "subtract"). Nil when taps do their usual thing.
+    @Published var pickingObject: String?
+    @Published private(set) var picking = false
+
+    func startPicking(_ purpose: String) {
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        pickingObject = purpose
+        toast = "Tap a person, animal or thing in the photo."
+    }
+
+    /// The tap (shown picture, 0…1): find the object there and remove it, or mask it.
+    func pickObject(atShown u: CGPoint) {
+        guard let purpose = pickingObject else { return }
+        pickingObject = nil
+        let m = toMask(u)
+        let (fh, fv) = (flipH, flipV)
+        // the uncropped picture has the flips; mask coordinates don't
+        let flip = { (q: CGPoint) in CGPoint(x: fh ? 1 - q.x : q.x, y: fv ? 1 - q.y : q.y) }
+        let id = photo.id
+        picking = true
+        Task {
+            let found: Result<(values: [Float], width: Int, height: Int)?, Error> = await Task.detached(priority: .userInitiated) {
+                Result {
+                    guard let img = Engine.shared.renderUncropped(id, fitting: CGSize(width: 1024, height: 1024))?.image else { return nil }
+                    return try ObjectPicker.object(in: img, at: flip(m))
+                }
+            }.value
+            picking = false
+            guard case .success(let c?) = found else {
+                if case .failure(let e) = found { toast = e.localizedDescription } else { toast = "No person, animal or thing found there. Try tapping its middle." }
+                return
+            }
+            UINotificationFeedbackGenerator().notificationOccurred(.success)
+            if purpose == "remove" {
+                guard let s = ObjectPicker.spot(c) else { return }
+                let keep = (spotMode, spotSize)
+                spotMode = InpaintModel.installed ? "generate" : "fill"
+                spotSize = s.size
+                addSpot(s.points.map(flip))
+                (spotMode, spotSize) = keep
+                if !InpaintModel.installed { toast = "Filled from the surroundings. Get the AI remove model for a better fill." }
+            } else {
+                let probs = ObjectPicker.grid(c, side: 256, place: flip)
+                do {
+                    let op = purpose == "new" ? "add" : purpose
+                    let mid = try Engine.shared.objectFromCoverage(mask: purpose == "new" ? nil : selectedMask, op: op, side: 256, probs: probs, at: m)
+                    refresh()
+                    selectedMask = mid
+                    selectedPart = Swift.max((currentMask?.parts.count ?? 1) - 1, 0)
+                    if mode != .masks { mode = .masks }
+                    render()
+                    refreshThumbs()
+                } catch {
+                    toast = error.localizedDescription
+                }
+            }
+        }
+    }
+
     // MARK: zoom
 
     /// Two fingers are on the photo: drawing tools stop so the pinch doesn't paint.

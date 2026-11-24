@@ -427,3 +427,42 @@ pub unsafe extern "C" fn latent_set_inpainter(model: Option<InpaintCallback>, si
     });
     lightcraft_pipeline::spots::set_inpainter(run);
 }
+
+/// An object mask from the app's own selection: `side × side` coverage bytes (0 out … 255 in)
+/// over the uncropped, oriented photo; added to mask `mask` with `op` (or a new mask when `mask`
+/// is 0). Returns the mask's id, or 0 with `error` (if not null) saying why.
+///
+/// # Safety
+/// `core` from [`latent_open`]; `probs` `side × side` readable bytes; `op` NUL-terminated or
+/// null; `error` null or writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn latent_object_from_coverage(
+    core: *const Core,
+    mask: u32,
+    op: *const c_char,
+    side: u32,
+    probs: *const u8,
+    x: f64,
+    y: f64,
+    error: *mut *mut c_char,
+) -> u32 {
+    // SAFETY: as documented above
+    let (Some(c), op) = (unsafe { self::core(core) }, unsafe { text(op) }) else { return 0 };
+    let n = (side as usize).saturating_mul(side as usize);
+    let bytes: &[u8] = if probs.is_null() {
+        &[]
+    } else {
+        // SAFETY: the caller promises side × side readable bytes
+        unsafe { std::slice::from_raw_parts(probs, n) }
+    };
+    match c.object_from_coverage((mask != 0).then_some(mask), op.unwrap_or("add"), side as usize, bytes, (x, y)) {
+        Ok(id) => id,
+        Err(e) => {
+            if !error.is_null() {
+                // SAFETY: the caller promises `error` is writable
+                unsafe { *error = give_string(e) };
+            }
+            0
+        }
+    }
+}
