@@ -220,7 +220,7 @@ struct EditorView: View {
                                 UISelectionFeedbackGenerator().selectionChanged()
                                 withAnimation(.glass) { model.mode = m }
                             } else {
-                                model.toast = "\(m.label) is not in Latent yet. It's coming in a later build."
+                                model.toast = "\(m.label) is not in Silverbath yet. It's coming in a later build."
                             }
                         }
                     }
@@ -2946,7 +2946,7 @@ struct AIModelsSheet: View {
                 Section("Add the model") {
                     step(1, "On huggingface.co, open facebook/sam3 and accept Meta's licence (\(model.aiModel.license)).")
                     step(2, "Download three files from it: model.safetensors (3.4 GB), vocab.json and merges.txt.")
-                    step(3, "In the Files app, open On My iPhone \u{203A} Latent \u{203A} Models \u{203A} SAM3, and move the three files there.")
+                    step(3, "In the Files app, open On My iPhone \u{203A} Silverbath \u{203A} Models \u{203A} SAM3, and move the three files there.")
                     step(4, "Come back here and tap Check again.")
                     if let url = URL(string: "shareddocuments://" + Engine.aiModelFolder.path) {
                         Link(destination: url) { Label("Open the SAM3 folder in Files", systemImage: "folder") }
@@ -2956,7 +2956,7 @@ struct AIModelsSheet: View {
                     }
                 }
                 Section {
-                    Text("The model is Meta's, under its own licence, not Latent's; Latent only reads it from your phone. It needs about 3.5 GB of memory while it runs, so it suits phones with 8 GB (iPhone 15 Pro and later). The first selection after opening a photo takes longest.")
+                    Text("The model is Meta's, under its own licence, not Silverbath's; Silverbath only reads it from your phone. It needs about 3.5 GB of memory while it runs, so it suits phones with 8 GB (iPhone 15 Pro and later). The first selection after opening a photo takes longest.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                     if let url = model.aiModel.licenseURL {

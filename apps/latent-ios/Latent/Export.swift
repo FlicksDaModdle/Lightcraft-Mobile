@@ -115,7 +115,7 @@ enum Exporter {
     static func saveToPhotos(_ files: [ExportedFile]) async throws {
         let status = await PHPhotoLibrary.requestAuthorization(for: .addOnly)
         guard status == .authorized || status == .limited else {
-            throw EngineError(message: "Latent isn't allowed to add photos. Turn it on in Settings › Privacy & Security › Photos › Latent.")
+            throw EngineError(message: "Silverbath isn't allowed to add photos. Turn it on in Settings › Privacy & Security › Photos › Silverbath.")
         }
         try await PHPhotoLibrary.shared().performChanges {
             for f in files {

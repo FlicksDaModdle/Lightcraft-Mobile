@@ -73,7 +73,7 @@ struct LibraryView: View {
             ShareView(photos: library.shown, current: photo.id).presentationDragIndicator(.visible)
         }
         .sheet(isPresented: $showAbout) { AboutView() }
-        .alert("Latent", isPresented: Binding(get: { library.notice != nil }, set: { if !$0 { library.notice = nil } })) {
+        .alert("Silverbath", isPresented: Binding(get: { library.notice != nil }, set: { if !$0 { library.notice = nil } })) {
             Button("OK", role: .cancel) {}
         } message: {
             Text(library.notice ?? "")
@@ -106,7 +106,7 @@ struct LibraryView: View {
                 .frame(width: 40, height: 40)
                 .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
                 .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(Color.white.opacity(0.12)))
-                .accessibilityLabel(Text("Latent"))
+                .accessibilityLabel(Text("Silverbath"))
             Spacer()
             HStack(spacing: 0) {
                 Menu {
@@ -132,7 +132,7 @@ struct LibraryView: View {
                     }
                     .pickerStyle(.menu)
                     Divider()
-                    Button { showAbout = true } label: { Label("About Latent", systemImage: "info.circle") }
+                    Button { showAbout = true } label: { Label("About Silverbath", systemImage: "info.circle") }
                 } label: {
                     Image(systemName: "ellipsis").frame(width: 48, height: 44)
                 }
@@ -256,7 +256,7 @@ struct LibraryGrid: View {
             Label("Rate", systemImage: "star")
         }
         Divider()
-        Button(role: .destructive) { library.remove(photo) } label: { Label("Remove from Latent", systemImage: "trash") }
+        Button(role: .destructive) { library.remove(photo) } label: { Label("Remove from Silverbath", systemImage: "trash") }
     }
 
     private var empty: some View {
@@ -428,14 +428,14 @@ struct AboutView: View {
                         Image("Mark").resizable().frame(width: 56, height: 56)
                             .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
                         VStack(alignment: .leading, spacing: 2) {
-                            Text("Latent").font(.system(size: 20, weight: .semibold))
+                            Text("Silverbath").font(.system(size: 20, weight: .semibold))
                             Text("Version \(version)").font(.system(size: 14)).foregroundStyle(Theme.secondaryText)
                         }
                     }
                     .padding(.vertical, 4)
                 }
                 Section {
-                    Text("Latent is built on the open-source LightCraft engine, \u{00A9} 2026 ArtCraft Team and the LightCraft contributors, used under the MIT License (it is also available under the Apache License 2.0).")
+                    Text("Silverbath is built on the open-source LightCraft engine, \u{00A9} 2026 ArtCraft Team and the LightCraft contributors, used under the MIT License (it is also available under the Apache License 2.0).")
                         .font(.system(size: 14))
                     if let url = URL(string: "https://github.com/FlicksDaModdle/Lightcraft-Mobile") {
                         Link("LightCraft source and licence", destination: url)

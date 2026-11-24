@@ -1178,7 +1178,7 @@ final class EditorModel: ObservableObject {
             if let g = done.first?["group"] as? String { profileGroup = g }
             UINotificationFeedbackGenerator().notificationOccurred(done.isEmpty ? .error : .success)
             if done.isEmpty {
-                toast = "No LUTs found. Latent reads .cube files, folders of them, and .zip files."
+                toast = "No LUTs found. Silverbath reads .cube files, folders of them, and .zip files."
             } else {
                 toast = "Imported \(done.count) LUT\(done.count == 1 ? "" : "s")" + (failed > 0 ? " (\(failed) couldn't be read)" : "")
             }

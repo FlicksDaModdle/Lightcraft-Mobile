@@ -73,7 +73,7 @@ final class DeviceAlbum: ObservableObject {
             ?? resources.first(where: { $0.type == .fullSizePhoto })
             ?? resources.first
         else {
-            throw EngineError(message: "This photo has no file Latent can open.")
+            throw EngineError(message: "This photo has no file Silverbath can open.")
         }
         let name = resource.originalFilename.isEmpty ? "Photo.jpg" : resource.originalFilename
         let dest = Library.importFolder.appendingPathComponent(name)
@@ -156,7 +156,7 @@ struct DeviceView: View {
             Image(systemName: "photo.badge.exclamationmark")
                 .font(.system(size: 44, weight: .light))
                 .foregroundStyle(Theme.secondaryText)
-            Text("Latent can't see your photos").font(.system(size: 20, weight: .semibold))
+            Text("Silverbath can't see your photos").font(.system(size: 20, weight: .semibold))
             Text("Allow access in Settings to browse this iPhone's photos here. You can still add photos with + at the top.")
                 .font(.system(size: 15))
                 .foregroundStyle(Theme.secondaryText)

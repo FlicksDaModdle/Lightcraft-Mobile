@@ -1,4 +1,4 @@
-"""Adds a Latent build to the app source (source.json), newest first. The format is AltStore's,
+"""Adds a Silverbath build to the app source (source.json), newest first. The format is AltStore's,
 which Feather and other sideloading apps read too; the newest build is also given in the older
 app-level fields some of them use.
 
@@ -18,12 +18,12 @@ RAW = f"https://raw.githubusercontent.com/{REPO}/main/apps/latent-ios"
 KEEP = 10
 
 APP = {
-    "name": "Latent",
+    "name": "Silverbath",
     "bundleIdentifier": "app.latent.Latent",
-    "developerName": "Latent contributors",
+    "developerName": "Silverbath contributors",
     "subtitle": "A raw photo editor, built on the LightCraft engine.",
     "localizedDescription": (
-        "Latent edits photos on your iPhone and iPad: light, colour, curves, HDR, colour grading, "
+        "Silverbath edits photos on your iPhone and iPad: light, colour, curves, HDR, colour grading, "
         "effects, detail, crop and presets, all non-destructive. Built on the open-source LightCraft "
         "engine; every build of the main branch is published here."
     ),
@@ -34,7 +34,7 @@ APP = {
     "appPermissions": {
         "entitlements": [],
         "privacy": {
-            "NSPhotoLibraryAddUsageDescription": "Latent saves your edited photos to your library when you ask it to.",
+            "NSPhotoLibraryAddUsageDescription": "Silverbath saves your edited photos to your library when you ask it to.",
         },
     },
 }
@@ -69,9 +69,9 @@ def main():
         size=newest["size"],
     )
     out = {
-        "name": "Latent",
+        "name": "Silverbath",
         "identifier": "app.latent.source",
-        "subtitle": "Latent builds, straight from the repository.",
+        "subtitle": "Silverbath builds, straight from the repository.",
         "website": f"https://github.com/{REPO}",
         "iconURL": APP["iconURL"],
         "tintColor": APP["tintColor"],

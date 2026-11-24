@@ -5,7 +5,7 @@
 	<key>CFBundleDevelopmentRegion</key>
 	<string>en</string>
 	<key>CFBundleDisplayName</key>
-	<string>Latent</string>
+	<string>Silverbath</string>
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
 	<key>CFBundleIdentifier</key>
@@ -34,9 +34,9 @@
 	<key>LSSupportsOpeningDocumentsInPlace</key>
 	<true/>
 	<key>NSPhotoLibraryUsageDescription</key>
-	<string>Latent shows the photos on this iPhone so you can pick ones to edit. Only the photos you open are copied into Latent.</string>
+	<string>Silverbath shows the photos on this iPhone so you can pick ones to edit. Only the photos you open are copied into Silverbath.</string>
 	<key>NSPhotoLibraryAddUsageDescription</key>
-	<string>Latent saves your edited photos to your library when you ask it to.</string>
+	<string>Silverbath saves your edited photos to your library when you ask it to.</string>
 	<key>UISupportedInterfaceOrientations</key>
 	<array>
 		<string>UIInterfaceOrientationPortrait</string>
