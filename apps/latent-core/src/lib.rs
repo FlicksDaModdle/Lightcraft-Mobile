@@ -135,6 +135,22 @@ impl Core {
         self.finish(job.run())
     }
 
+    /// A stored segmentation (the `seg` of an object mask) from `side × side` coverage bytes over
+    /// the uncropped, oriented photo stretched to a square, as JSON.
+    pub fn seg_from_coverage(side: usize, probs: &[u8]) -> Result<String, String> {
+        if side == 0 || side > lightcraft_develop::segmask::MAX_SIDE || probs.len() != side * side {
+            return Err("the selection is the wrong size".into());
+        }
+        let logits: Vec<f32> = probs
+            .iter()
+            .map(|&b| {
+                let p = (f32::from(b) / 255.0).clamp(1e-4, 1.0 - 1e-4);
+                (p / (1.0 - p)).ln()
+            })
+            .collect();
+        serde_json::to_string(&lightcraft_develop::SegMask::from_logits(side, &logits)).map_err(|e| e.to_string())
+    }
+
     /// An object mask from a selection the app made (Apple's Vision, say): `probs` is `side × side`
     /// coverage (0 out … 255 in) over the uncropped, oriented photo stretched to a square, the
     /// way the engine's own segmentations are stored; `at` is where the user tapped (mask
@@ -642,6 +658,10 @@ mod tests {
         let Ok(v) = view else { panic!("{:?}", view.err()) };
         let at = |x: usize| v.rgba.get(4 * ((v.height / 2) * v.width + x)).copied().unwrap_or(0);
         assert!(at(4) > 200 && at(v.width - 5) < 50, "{} {}", at(4), at(v.width - 5));
+        // the same grid as a stored segmentation, for a shape the app writes itself
+        let seg = Core::seg_from_coverage(side, &probs).map(|j| serde_json::from_str::<serde_json::Value>(&j).unwrap_or_default());
+        assert!(seg.as_ref().is_ok_and(|v| v["side"] == 32 && v["data"].as_str().is_some_and(|d| !d.is_empty())), "{seg:?}");
+        assert!(Core::seg_from_coverage(0, &[]).is_err());
         // and as a part taken away from it
         assert!(core.object_from_coverage(Some(m), "subtract", side, &probs, (0.25, 0.5)).is_ok());
         assert!(core.object_from_coverage(None, "add", side, &probs[..10], (0.5, 0.5)).is_err());

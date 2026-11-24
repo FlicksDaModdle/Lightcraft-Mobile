@@ -466,3 +466,22 @@ pub unsafe extern "C" fn latent_object_from_coverage(
         }
     }
 }
+
+/// A stored segmentation from `side × side` coverage bytes, as JSON (give it back with
+/// [`latent_string_free`]); null when the sizes don't fit.
+///
+/// # Safety
+/// `probs` null or `side × side` readable bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn latent_seg_from_coverage(side: u32, probs: *const u8) -> *mut c_char {
+    let n = (side as usize).saturating_mul(side as usize);
+    if probs.is_null() {
+        return std::ptr::null_mut();
+    }
+    // SAFETY: the caller promises side × side readable bytes
+    let bytes = unsafe { std::slice::from_raw_parts(probs, n) };
+    match Core::seg_from_coverage(side as usize, bytes) {
+        Ok(json) => give_string(json),
+        Err(_) => std::ptr::null_mut(),
+    }
+}

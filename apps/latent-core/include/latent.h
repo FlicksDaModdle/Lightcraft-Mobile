@@ -91,5 +91,8 @@ void latent_set_inpainter(LatentInpaintFn model, uint32_t size);
 // oriented photo); added to `mask` with `op`, or a new mask when mask is 0. 0 on failure.
 uint32_t latent_object_from_coverage(const LatentCore *core, uint32_t mask, const char *op, uint32_t side, const uint8_t *probs, double x, double y, char **error);
 
+// A stored segmentation (an object mask's "seg") from side*side coverage bytes, as JSON; NULL on bad sizes.
+char *latent_seg_from_coverage(uint32_t side, const uint8_t *probs);
+
 void latent_image_free(LatentImage *img);
 void latent_string_free(char *s);

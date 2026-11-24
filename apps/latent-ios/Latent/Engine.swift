@@ -139,6 +139,13 @@ final class Engine: @unchecked Sendable {
         return id
     }
 
+    /// A stored segmentation (an object mask's `seg`) from `side × side` coverage bytes.
+    func segmentation(side: Int, probs: [UInt8]) -> [String: Any]? {
+        guard let raw = probs.withUnsafeBufferPointer({ latent_seg_from_coverage(UInt32(side), $0.baseAddress) }) else { return nil }
+        defer { latent_string_free(raw) }
+        return (try? JSONSerialization.jsonObject(with: Data(String(cString: raw).utf8))) as? [String: Any]
+    }
+
     /// Give a photo its depth map (nil takes it away).
     func setDepth(_ id: UInt64, _ m: DepthMap?) {
         guard let m else {

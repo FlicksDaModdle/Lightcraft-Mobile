@@ -205,8 +205,8 @@ struct ModelSpec: Sendable {
     let blurb: String
     let credit: String
     let repo: String
-    /// The package's folder in the repository.
-    let package: String
+    /// The packages' folders in the repository (a model may come in parts).
+    let packages: [String]
     let files: [String]
     let size: String
 
@@ -217,14 +217,21 @@ struct ModelSpec: Sendable {
         return dir
     }
 
-    var compiled: URL { folder.appendingPathComponent("\(name).mlmodelc", isDirectory: true) }
-    var installed: Bool { FileManager.default.fileExists(atPath: compiled.path) }
+    /// Where part `i`, compiled for this iPhone, lives.
+    func compiled(_ i: Int) -> URL {
+        let part = packages.count > 1 ? "-\(i)" : ""
+        return folder.appendingPathComponent("\(name)\(part).mlmodelc", isDirectory: true)
+    }
 
-    func load() -> MLModel? { LoadedModels.load(self) }
+    var installed: Bool { packages.indices.allSatisfy { FileManager.default.fileExists(atPath: compiled($0).path) } }
+
+    func load(_ part: Int = 0) -> MLModel? { LoadedModels.load(self, part) }
 
     func remove() {
-        LoadedModels.forget(name)
-        try? FileManager.default.removeItem(at: compiled)
+        for i in packages.indices {
+            LoadedModels.forget(compiled(i).path)
+            try? FileManager.default.removeItem(at: compiled(i))
+        }
     }
 
     static let coreFiles = ["Manifest.json", "Data/com.apple.CoreML/model.mlmodel", "Data/com.apple.CoreML/weights/weight.bin"]
@@ -235,15 +242,16 @@ enum LoadedModels {
     private static let lock = NSLock()
     private static var models: [String: MLModel] = [:]
 
-    static func load(_ spec: ModelSpec) -> MLModel? {
+    static func load(_ spec: ModelSpec, _ part: Int) -> MLModel? {
+        let url = spec.compiled(part)
         lock.lock()
         defer { lock.unlock() }
-        if let m = models[spec.name] { return m }
-        guard spec.installed else { return nil }
+        if let m = models[url.path] { return m }
+        guard FileManager.default.fileExists(atPath: url.path) else { return nil }
         let c = MLModelConfiguration()
         c.computeUnits = .all
-        let m = try? MLModel(contentsOf: spec.compiled, configuration: c)
-        models[spec.name] = m
+        let m = try? MLModel(contentsOf: url, configuration: c)
+        models[url.path] = m
         return m
     }
 
@@ -261,7 +269,7 @@ let DepthModel = ModelSpec(
     blurb: "Estimates how far away everything in a photo is, so Lens Blur can blur by distance in photos the iPhone didn't record depth for. It runs on this iPhone; nothing is uploaded.",
     credit: "Depth Anything V2 Small, converted for Core ML by Apple, from Hugging Face. Licence: Apache 2.0.",
     repo: "https://huggingface.co/apple/coreml-depth-anything-v2-small",
-    package: "DepthAnythingV2SmallF16.mlpackage",
+    packages: ["DepthAnythingV2SmallF16.mlpackage"],
     files: ModelSpec.coreFiles,
     size: "50 MB")
 
@@ -272,9 +280,21 @@ let InpaintModel = ModelSpec(
     blurb: "Rebuilds what's behind something you brush away (a person, a sign, a car) from what's around it, inventing detail where needed. It runs on this iPhone; nothing is uploaded.",
     credit: "LaMa (Suvorov et al., Samsung AI), dilated variant, in a 6-bit Core ML conversion from Hugging Face (Dadm-n/lama-dilated-coreml). Licence: Apache 2.0.",
     repo: "https://huggingface.co/Dadm-n/lama-dilated-coreml",
-    package: "Resources/LaMa.mlpackage",
+    packages: ["Resources/LaMa.mlpackage"],
     files: ModelSpec.coreFiles,
     size: "40 MB")
+
+/// SAM 2.1 Small (Meta), in Apple's Core ML conversion (Apache-2.0): tap an object to select it.
+/// Three parts: the picture's encoder, the taps' encoder, and the decoder that makes the mask.
+let SelectionModel = ModelSpec(
+    name: "SAM2_1Small",
+    title: "Object selection model",
+    blurb: "Selects exactly what you tap (a person, a bike, a cup, a cloud) with clean edges, for masks and for Remove. Tap more to add to it or to leave parts out. It runs on this iPhone; nothing is uploaded.",
+    credit: "SAM 2.1 Small by Meta, converted for Core ML by Apple, from Hugging Face. Licence: Apache 2.0.",
+    repo: "https://huggingface.co/apple/coreml-sam2.1-small",
+    packages: ["SAM2_1SmallImageEncoderFLOAT16.mlpackage", "SAM2_1SmallPromptEncoderFLOAT16.mlpackage", "SAM2_1SmallMaskDecoderFLOAT16.mlpackage"],
+    files: ModelSpec.coreFiles,
+    size: "94 MB")
 
 /// Downloads a model's files, then compiles it for this iPhone.
 @MainActor
@@ -283,6 +303,8 @@ final class ModelDownload: ObservableObject {
     @Published private(set) var progress: Double?
     @Published private(set) var problem: String?
     @Published private(set) var installed: Bool
+    /// Which part is downloading, of how many.
+    @Published private(set) var part = (0, 1)
     private var observation: NSKeyValueObservation?
 
     init(_ spec: ModelSpec) {
@@ -297,21 +319,24 @@ final class ModelDownload: ObservableObject {
         let spec = spec
         Task {
             do {
-                let pkg = FileManager.default.temporaryDirectory.appendingPathComponent("\(spec.name).mlpackage", isDirectory: true)
-                try? FileManager.default.removeItem(at: pkg)
-                // the weights are nearly all of it: they get the bar
-                for f in spec.files {
-                    guard let url = URL(string: "\(spec.repo)/resolve/main/\(spec.package)/\(f)") else { continue }
-                    let dest = pkg.appendingPathComponent(f)
-                    try FileManager.default.createDirectory(at: dest.deletingLastPathComponent(), withIntermediateDirectories: true)
-                    let tmp = try await fetch(url, tracked: f.hasSuffix("weight.bin"))
-                    try FileManager.default.moveItem(at: tmp, to: dest)
+                for (i, package) in spec.packages.enumerated() {
+                    part = (i, spec.packages.count)
+                    let pkg = FileManager.default.temporaryDirectory.appendingPathComponent("\(spec.name)-\(i).mlpackage", isDirectory: true)
+                    try? FileManager.default.removeItem(at: pkg)
+                    // the weights are nearly all of it: they get the bar
+                    for f in spec.files {
+                        guard let url = URL(string: "\(spec.repo)/resolve/main/\(package)/\(f)") else { continue }
+                        let dest = pkg.appendingPathComponent(f)
+                        try FileManager.default.createDirectory(at: dest.deletingLastPathComponent(), withIntermediateDirectories: true)
+                        let tmp = try await fetch(url, tracked: f.hasSuffix("weight.bin"))
+                        try FileManager.default.moveItem(at: tmp, to: dest)
+                    }
+                    let built = try await Task.detached(priority: .userInitiated) { try MLModel.compileModel(at: pkg) }.value
+                    try? FileManager.default.removeItem(at: spec.compiled(i))
+                    try FileManager.default.moveItem(at: built, to: spec.compiled(i))
+                    try? FileManager.default.removeItem(at: pkg)
                 }
                 progress = 1
-                let built = try await Task.detached(priority: .userInitiated) { try MLModel.compileModel(at: pkg) }.value
-                try? FileManager.default.removeItem(at: spec.compiled)
-                try FileManager.default.moveItem(at: built, to: spec.compiled)
-                try? FileManager.default.removeItem(at: pkg)
                 installed = true
                 progress = nil
             } catch {
@@ -382,7 +407,7 @@ struct ModelSheet: View {
                     } else if let p = download.progress {
                         VStack(alignment: .leading, spacing: 8) {
                             ProgressView(value: p).tint(Theme.accent)
-                            Text(p >= 1 ? "Preparing it for this iPhone\u{2026}" : "Downloading\u{2026} \(Int(p * 100))%")
+                            Text(p >= 1 ? "Preparing it for this iPhone\u{2026}" : "Downloading\u{2026} \(Int(p * 100))%" + (download.part.1 > 1 ? " (part \(download.part.0 + 1) of \(download.part.1))" : ""))
                                 .font(.system(size: 13)).foregroundStyle(Theme.secondaryText).monospacedDigit()
                         }
                     } else {

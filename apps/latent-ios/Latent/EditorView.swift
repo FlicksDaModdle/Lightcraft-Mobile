@@ -69,6 +69,9 @@ struct EditorView: View {
         .sheet(isPresented: $model.showDepthModel) {
             ModelSheet(DepthModel) { model.estimateDepth() }
         }
+        .sheet(isPresented: $model.showSelectionModel) {
+            ModelSheet(SelectionModel) { Sam2.forget() }
+        }
         .sheet(isPresented: $model.showInpaintModel) {
             ModelSheet(InpaintModel) { model.inpaintModelInstalled() }
         }
@@ -1108,15 +1111,15 @@ struct EditorView: View {
             HStack {
                 Text("Create a mask").font(.system(size: 17, weight: .semibold))
                 Spacer()
-                Button { model.refreshAIModel(); model.showAIModels = true } label: {
-                    Label("AI model", systemImage: "cpu").font(.system(size: 13, weight: .medium))
+                Button { model.showSelectionModel = true } label: {
+                    Label(SelectionModel.installed ? "Selection model" : "Get selection model", systemImage: "cpu").font(.system(size: 13, weight: .medium))
                         .padding(.horizontal, 10).frame(height: 30)
                         .latentGlass(in: Capsule(), interactive: true)
                 }
             }
             .foregroundStyle(.white)
             LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 6), count: 5), spacing: 8) {
-                ForEach(maskTools, id: \.kind) { t in
+                ForEach(maskTools.filter { $0.kind != "prompt" || model.aiModel.installed }, id: \.kind) { t in
                     Button { choose(t.kind, op: nil) } label: {
                         VStack(spacing: 6) {
                             Image(systemName: t.symbol).font(.system(size: 20)).frame(height: 26)
@@ -1188,11 +1191,12 @@ struct EditorView: View {
                 Button { choose(t.kind, op: op) } label: { Label(t.label, systemImage: t.symbol) }
             }
         }
-        Section("With the AI model") {
-            ForEach(maskTools.filter(\.ai), id: \.kind) { t in
+        Section("Select by tapping") {
+            ForEach(maskTools.filter { $0.kind == "object" || ($0.kind == "prompt" && model.aiModel.installed) }, id: \.kind) { t in
                 Button { choose(t.kind, op: op) } label: { Label(t.kind == "prompt" ? "Describe\u{2026}" : "Select object", systemImage: t.symbol) }
             }
-            Button { model.refreshAIModel(); model.showAIModels = true } label: { Label("AI model\u{2026}", systemImage: "cpu") }
+            Button { model.showSelectionModel = true } label: { Label("Object selection model\u{2026}", systemImage: "cpu") }
+            Button { model.refreshAIModel(); model.showAIModels = true } label: { Label("SAM 3 (for Describe)\u{2026}", systemImage: "cpu") }
         }
     }
 
@@ -1644,6 +1648,8 @@ struct EditorView: View {
                 Spacer()
                 Menu {
                     Button { model.findDust() } label: { Label("Find sensor dust", systemImage: "sparkle.magnifyingglass") }
+                    Button { model.showSelectionModel = true } label: { Label("Object selection model\u{2026}", systemImage: "cpu") }
+                    Button { model.showInpaintModel = true } label: { Label("AI remove model\u{2026}", systemImage: "cpu") }
                     Button { model.selectedSpot = nil } label: { Label("Deselect", systemImage: "xmark.circle") }
                         .disabled(model.selectedSpot == nil)
                 } label: {

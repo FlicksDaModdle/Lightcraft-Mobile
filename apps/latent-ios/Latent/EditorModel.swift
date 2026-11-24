@@ -348,6 +348,11 @@ final class EditorModel: ObservableObject {
 
     /// A tap on the photo for the selected Object mask (mask coordinates).
     func objectPoint(_ p: CGPoint) {
+        refreshAIModel()
+        if !aiModel.installed, SelectionModel.installed, currentPart?.kind == "object" {
+            refineObject(p)
+            return
+        }
         guard let id = selectedMask else { return }
         do {
             try Engine.shared.run("mask.objectPoint", ["id": id, "x": p.x, "y": p.y, "exclude": objectExclude])
@@ -1153,10 +1158,82 @@ final class EditorModel: ObservableObject {
     @Published var pickingObject: String?
     @Published private(set) var picking = false
 
+    @Published var showSelectionModel = false
+
     func startPicking(_ purpose: String) {
         UIImpactFeedbackGenerator(style: .light).impactOccurred()
         pickingObject = purpose
-        toast = "Tap a person, animal or thing in the photo."
+        toast = SelectionModel.installed ? "Tap what to select." : "Tap a person, animal or thing. (The object selection model selects anything, more exactly.)"
+    }
+
+    /// The uncropped picture's cache key for the selection model (it has the flips).
+    private var selectionKey: String { "\(photo.id)-\(flipH)-\(flipV)" }
+
+    /// The object at `p` (picture coordinates, 0…1) as coverage, by the best way available: the
+    /// selection model (a square grid over the stretched picture), else Vision (the picture's own
+    /// pixels). `taps` are earlier ones to keep (selection model only).
+    private func findObject(at p: CGPoint, taps: [(CGPoint, Bool)] = []) async -> Result<(values: [Float], width: Int, height: Int)?, Error> {
+        let id = photo.id
+        let key = selectionKey
+        let useModel = SelectionModel.installed
+        return await Task.detached(priority: .userInitiated) {
+            Result {
+                guard let img = Engine.shared.renderUncropped(id, fitting: CGSize(width: 1024, height: 1024))?.image else { return nil }
+                if useModel {
+                    guard let r = try Sam2.select(img, key: key, points: taps + [(p, true)]) else { return nil }
+                    let c = Sam2.coverage(r.values)
+                    // nothing selected comes back as an empty mask
+                    guard c.contains(where: { $0 > 0.5 }) else { return nil }
+                    return (c, r.side, r.side)
+                }
+                return try ObjectPicker.object(in: img, at: p)
+            }
+        }.value
+    }
+
+    /// Another tap on a selection-model object part: add it (or, with Leave out, take it away)
+    /// and select again with every tap so far.
+    func refineObject(_ m: CGPoint) {
+        guard let part = currentPart, part.kind == "object", SelectionModel.installed else { return }
+        let (fh, fv) = (flipH, flipV)
+        let flip = { (q: CGPoint) in CGPoint(x: fh ? 1 - q.x : q.x, y: fv ? 1 - q.y : q.y) }
+        let read = { (key: String) -> [CGPoint] in
+            (part.shape[key] as? [[String: Any]] ?? []).compactMap { d in
+                guard let x = (d["x"] as? NSNumber)?.doubleValue, let y = (d["y"] as? NSNumber)?.doubleValue else { return nil }
+                return CGPoint(x: x, y: y)
+            }
+        }
+        var hint = read("hint"), exclude = read("exclude")
+        if objectExclude { exclude.append(m) } else { hint.append(m) }
+        guard let first = hint.first else { return }
+        let taps = hint.dropFirst().map { (flip($0), true) } + exclude.map { (flip($0), false) }
+        let id = photo.id
+        let key = selectionKey
+        picking = true
+        Task {
+            let r: Result<(values: [Float], side: Int)?, Error> = await Task.detached(priority: .userInitiated) {
+                Result {
+                    guard let img = Engine.shared.renderUncropped(id, fitting: CGSize(width: 1024, height: 1024))?.image else { return nil }
+                    return try Sam2.select(img, key: key, points: [(flip(first), true)] + taps)
+                }
+            }.value
+            picking = false
+            guard case .success(let found?) = r else {
+                if case .failure(let e) = r { toast = e.localizedDescription }
+                return
+            }
+            let c = (values: Sam2.coverage(found.values), width: found.side, height: found.side)
+            guard let seg = Engine.shared.segmentation(side: 256, probs: ObjectPicker.grid(c, side: 256, place: flip)) else { return }
+            var shape = part.shape
+            shape["hint"] = hint.map { ["x": $0.x, "y": $0.y] }
+            shape["exclude"] = exclude.map { ["x": $0.x, "y": $0.y] }
+            shape["seg"] = seg
+            shape["detail"] = [Any]()
+            UISelectionFeedbackGenerator().selectionChanged()
+            beginMask("Select Object")
+            updateMaskShape(shape)
+            end()
+        }
     }
 
     /// The tap (shown picture, 0…1): find the object there and remove it, or mask it.
@@ -1167,15 +1244,10 @@ final class EditorModel: ObservableObject {
         let (fh, fv) = (flipH, flipV)
         // the uncropped picture has the flips; mask coordinates don't
         let flip = { (q: CGPoint) in CGPoint(x: fh ? 1 - q.x : q.x, y: fv ? 1 - q.y : q.y) }
-        let id = photo.id
         picking = true
+        let aspect = photoAspect
         Task {
-            let found: Result<(values: [Float], width: Int, height: Int)?, Error> = await Task.detached(priority: .userInitiated) {
-                Result {
-                    guard let img = Engine.shared.renderUncropped(id, fitting: CGSize(width: 1024, height: 1024))?.image else { return nil }
-                    return try ObjectPicker.object(in: img, at: flip(m))
-                }
-            }.value
+            let found = await findObject(at: flip(m))
             picking = false
             guard case .success(let c?) = found else {
                 if case .failure(let e) = found { toast = e.localizedDescription } else { toast = "No person, animal or thing found there. Try tapping its middle." }
@@ -1183,7 +1255,9 @@ final class EditorModel: ObservableObject {
             }
             UINotificationFeedbackGenerator().notificationOccurred(.success)
             if purpose == "remove" {
-                guard let s = ObjectPicker.spot(c) else { return }
+                // the model's square grid back to the picture's shape, for round dabs
+                let shaped = c.width == c.height && SelectionModel.installed ? Sam2.unstretched(c.values, side: c.width, aspect: aspect) : c
+                guard let s = ObjectPicker.spot(shaped) else { return }
                 let keep = (spotMode, spotSize)
                 spotMode = InpaintModel.installed ? "generate" : "fill"
                 spotSize = s.size

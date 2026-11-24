@@ -1,6 +1,7 @@
 import CoreGraphics
 import CoreVideo
 import Foundation
+import CoreML
 import Vision
 
 /// Picking a whole object (a person, an animal, a thing) by tapping it, with Apple's Vision
@@ -108,5 +109,111 @@ enum ObjectPicker {
             if c.values[py * c.width + px] > 0.5 { return true }
         }
         return false
+    }
+}
+
+/// Tap-to-select with SAM 2.1 (the object selection model): the picture is encoded once per photo,
+/// then each set of taps gives a mask in a few tens of milliseconds.
+enum Sam2 {
+    private static let lock = NSLock()
+    private static var encoded: (key: String, features: MLFeatureProvider)?
+
+    /// Logits (`side × side`, over the picture stretched to a square, above 0 inside) for the
+    /// taps: `points` 0…1 across and down the picture, `true` to include, `false` to leave out.
+    static func select(_ image: CGImage, key: String, points: [(CGPoint, Bool)]) throws -> (values: [Float], side: Int)? {
+        guard let encoder = SelectionModel.load(0), let prompts = SelectionModel.load(1), let decoder = SelectionModel.load(2), !points.isEmpty else { return nil }
+        guard let input = encoder.modelDescription.inputDescriptionsByName.first(where: { $0.value.type == .image }),
+              let constraint = input.value.imageConstraint
+        else { throw EngineError(message: "The selection model has an unexpected input.") }
+        let features: MLFeatureProvider
+        lock.lock()
+        let hit = encoded?.key == key ? encoded?.features : nil
+        lock.unlock()
+        if let hit {
+            features = hit
+        } else {
+            let v = try MLFeatureValue(cgImage: image, constraint: constraint, options: [.cropAndScale: 2])
+            features = try encoder.prediction(from: MLDictionaryFeatureProvider(dictionary: [input.key: v]))
+            lock.lock()
+            encoded = (key, features)
+            lock.unlock()
+        }
+        // the taps, in the encoder's pixels
+        let (sw, sh) = (Float(constraint.pixelsWide), Float(constraint.pixelsHigh))
+        let n = points.count
+        let coords = try MLMultiArray(shape: [1, NSNumber(value: n), 2], dataType: .float32)
+        let labels = try MLMultiArray(shape: [1, NSNumber(value: n)], dataType: .int32)
+        for (i, (p, include)) in points.enumerated() {
+            coords[[0, NSNumber(value: i), 0]] = NSNumber(value: Float(p.x) * sw)
+            coords[[0, NSNumber(value: i), 1]] = NSNumber(value: Float(p.y) * sh)
+            labels[[0, NSNumber(value: i)]] = NSNumber(value: include ? 1 : 0)
+        }
+        let names = prompts.modelDescription.inputDescriptionsByName
+        let pointsName = names.keys.first { $0.contains("point") } ?? "points"
+        let labelsName = names.keys.first { $0.contains("label") } ?? "labels"
+        let encodedTaps = try prompts.prediction(from: MLDictionaryFeatureProvider(dictionary: [pointsName: coords, labelsName: labels]))
+        // everything the decoder asks for, from the picture's features or the taps'
+        var inputs: [String: Any] = [:]
+        for name in decoder.modelDescription.inputDescriptionsByName.keys {
+            if let v = features.featureValue(for: name) ?? encodedTaps.featureValue(for: name) ?? encodedTaps.featureValue(for: name + "s") {
+                inputs[name] = v
+            }
+        }
+        let out = try decoder.prediction(from: MLDictionaryFeatureProvider(dictionary: inputs))
+        let outNames = decoder.modelDescription.outputDescriptionsByName.keys
+        guard let masksName = outNames.first(where: { $0.contains("mask") }), let masks = out.featureValue(for: masksName)?.multiArrayValue else { return nil }
+        let scores = outNames.first(where: { $0.contains("score") }).flatMap { out.featureValue(for: $0)?.multiArrayValue }
+        let dims = masks.shape.map(\.intValue)
+        guard dims.count == 4 else { return nil }
+        let (k, h, w) = (dims[1], dims[2], dims[3])
+        // the candidate the model rates best
+        var best = 0
+        if let scores, scores.count >= k {
+            for i in 1..<k where scores[i].floatValue > scores[best].floatValue { best = i }
+        }
+        let st = masks.strides.map(\.intValue)
+        var values = [Float](repeating: 0, count: h * w)
+        for y in 0..<h {
+            for x in 0..<w {
+                values[y * w + x] = element(masks, best * st[1] + y * st[2] + x * st[3])
+            }
+        }
+        return (values, w == h ? w : Swift.min(w, h))
+    }
+
+    /// One element at a memory offset (strides included), whatever the array's number type.
+    private static func element(_ a: MLMultiArray, _ offset: Int) -> Float {
+        switch a.dataType {
+        case .float16: return Float(a.dataPointer.assumingMemoryBound(to: Float16.self)[offset])
+        case .double: return Float(a.dataPointer.assumingMemoryBound(to: Double.self)[offset])
+        case .int32: return Float(a.dataPointer.assumingMemoryBound(to: Int32.self)[offset])
+        default: return a.dataPointer.assumingMemoryBound(to: Float.self)[offset]
+        }
+    }
+
+    /// Forget the encoded picture (the photo changed).
+    static func forget() {
+        lock.lock()
+        encoded = nil
+        lock.unlock()
+    }
+
+    /// Logits to coverage 0…1.
+    static func coverage(_ logits: [Float]) -> [Float] { logits.map { 1 / (1 + exp(-$0)) } }
+
+    /// A square grid (over the stretched picture) resampled to the picture's own shape, `long`
+    /// pixels on its long edge.
+    static func unstretched(_ values: [Float], side: Int, aspect: CGFloat, long: Int = 512) -> (values: [Float], width: Int, height: Int) {
+        let w = aspect >= 1 ? long : Swift.max(Int(CGFloat(long) * aspect), 1)
+        let h = aspect >= 1 ? Swift.max(Int(CGFloat(long) / aspect), 1) : long
+        var out = [Float](repeating: 0, count: w * h)
+        for y in 0..<h {
+            for x in 0..<w {
+                let gx = Swift.min(Int((CGFloat(x) + 0.5) / CGFloat(w) * CGFloat(side)), side - 1)
+                let gy = Swift.min(Int((CGFloat(y) + 0.5) / CGFloat(h) * CGFloat(side)), side - 1)
+                out[y * w + x] = values[gy * side + gx]
+            }
+        }
+        return (out, w, h)
     }
 }

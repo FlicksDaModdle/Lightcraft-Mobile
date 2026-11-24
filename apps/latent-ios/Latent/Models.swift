@@ -409,7 +409,7 @@ let maskTools: [(kind: String, label: String, symbol: String, ai: Bool)] = [
     ("subject", "Subject", "person.crop.rectangle", false),
     ("sky", "Sky", "cloud.sun", false),
     ("background", "Background", "photo", false),
-    ("object", "Object", "hand.tap", true),
+    ("object", "Object", "hand.tap", false),
     ("prompt", "Describe", "text.magnifyingglass", true),
     ("brush", "Brush", "paintbrush.pointed", false),
     ("linear", "Linear", "rectangle.split.1x2", false),
