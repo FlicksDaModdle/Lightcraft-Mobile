@@ -7,6 +7,7 @@ struct EditorView: View {
     @StateObject private var model: EditorModel
     @Environment(\.dismiss) private var dismiss
     @Environment(\.verticalSizeClass) private var verticalSize
+    @Environment(\.horizontalSizeClass) private var horizontalSize
     @AppStorage("histogramShown") private var showHistogram = true
     @State private var naming = false
     @State private var newPresetName = ""
@@ -192,50 +193,78 @@ struct EditorView: View {
     }
 
     private var editScreen: some View {
-        VStack(spacing: 0) {
-            if chrome {
-                Group {
-                    if model.mode == .crop { cropHeader } else { topBar }
-                }
-                .opacity(focused ? 0 : 1)
-            }
-            photoArea
-            if chrome {
-                card
-                    .padding(.horizontal, 8)
-                    .padding(.top, 6)
-                Group {
-                    if model.profilesOpen && model.mode == .edit {
-                        PresetsBar(title: "Profile", cancel: { model.cancelProfiles() }, done: { model.doneProfiles() })
-                            .latentGlassID("bottomBar", in: glass)
-                    } else if model.mode == .remove {
-                        PresetsBar(title: "Remove", cancel: { withAnimation(.glass) { model.cancelRemove() } }, done: { withAnimation(.glass) { model.doneRemove() } })
-                            .latentGlassID("bottomBar", in: glass)
-                    } else if model.mode == .masks {
-                        PresetsBar(title: "Masking", cancel: { withAnimation(.glass) { model.cancelMasks() } }, done: { withAnimation(.glass) { model.doneMasks() } })
-                            .latentGlassID("bottomBar", in: glass)
-                    } else if model.mode == .crop {
-                        PresetsBar(title: "Crop", cancel: { withAnimation(.glass) { model.cancelCrop() } }, done: { withAnimation(.glass) { model.doneCrop() } })
-                            .latentGlassID("bottomBar", in: glass)
-                    } else if model.mode == .presets {
-                        PresetsBar(cancel: { withAnimation(.glass) { model.cancelPresets() } }, done: { withAnimation(.glass) { model.donePresets() } })
-                            .latentGlassID("bottomBar", in: glass)
-                    } else {
-                        ModeBar(mode: model.mode, glassID: "bottomBar", namespace: glass) { m in
-                            if m.available {
-                                UISelectionFeedbackGenerator().selectionChanged()
-                                withAnimation(.glass) { model.mode = m }
-                            } else {
-                                model.toast = "\(m.label) is not in Silverbath yet. It's coming in a later build."
-                            }
+        Group {
+            if horizontalSize == .regular && chrome {
+                // iPad (and wide windows): the photo on the left, the tools in a column on the right
+                HStack(spacing: 0) {
+                    VStack(spacing: 0) {
+                        Group {
+                            if model.mode == .crop { cropHeader } else { topBar }
                         }
+                        .opacity(focused ? 0 : 1)
+                        photoArea
+                    }
+                    VStack(spacing: 6) {
+                        Spacer(minLength: 0)
+                        card
+                        bottomBar
+                    }
+                    .frame(width: 400)
+                    .padding(.horizontal, 8)
+                    .padding(.bottom, 6)
+                }
+            } else {
+                VStack(spacing: 0) {
+                    if chrome {
+                        Group {
+                            if model.mode == .crop { cropHeader } else { topBar }
+                        }
+                        .opacity(focused ? 0 : 1)
+                    }
+                    photoArea
+                    if chrome {
+                        card
+                            .padding(.horizontal, 8)
+                            .padding(.top, 6)
+                        bottomBar
                     }
                 }
-                .latentGlassGroup()
-                .opacity(focused ? 0 : 1)
-                .transition(.move(edge: .bottom).combined(with: .opacity))
             }
         }
+    }
+
+    /// Cancel and Done for a mode, or the bar of modes.
+    private var bottomBar: some View {
+        Group {
+            if model.profilesOpen && model.mode == .edit {
+                PresetsBar(title: "Profile", cancel: { model.cancelProfiles() }, done: { model.doneProfiles() })
+                    .latentGlassID("bottomBar", in: glass)
+            } else if model.mode == .remove {
+                PresetsBar(title: "Remove", cancel: { withAnimation(.glass) { model.cancelRemove() } }, done: { withAnimation(.glass) { model.doneRemove() } })
+                    .latentGlassID("bottomBar", in: glass)
+            } else if model.mode == .masks {
+                PresetsBar(title: "Masking", cancel: { withAnimation(.glass) { model.cancelMasks() } }, done: { withAnimation(.glass) { model.doneMasks() } })
+                    .latentGlassID("bottomBar", in: glass)
+            } else if model.mode == .crop {
+                PresetsBar(title: "Crop", cancel: { withAnimation(.glass) { model.cancelCrop() } }, done: { withAnimation(.glass) { model.doneCrop() } })
+                    .latentGlassID("bottomBar", in: glass)
+            } else if model.mode == .presets {
+                PresetsBar(cancel: { withAnimation(.glass) { model.cancelPresets() } }, done: { withAnimation(.glass) { model.donePresets() } })
+                    .latentGlassID("bottomBar", in: glass)
+            } else {
+                ModeBar(mode: model.mode, glassID: "bottomBar", namespace: glass) { m in
+                    if m.available {
+                        UISelectionFeedbackGenerator().selectionChanged()
+                        withAnimation(.glass) { model.mode = m }
+                    } else {
+                        model.toast = "\(m.label) is not in Silverbath yet. It's coming in a later build."
+                    }
+                }
+            }
+        }
+        .latentGlassGroup()
+        .opacity(focused ? 0 : 1)
+        .transition(.move(edge: .bottom).combined(with: .opacity))
     }
 
     /// What's behind the photo: a chosen grey, or a dark colour taken from the photo with a
@@ -1818,6 +1847,16 @@ struct EditorView: View {
             settingSlider("Size", value: $model.brushSize, min: 0.005, max: 0.3, scale: 100, decimals: 1)
             settingSlider("Feather", value: $model.brushFeather, min: 0, max: 100, scale: 1, decimals: 0)
             settingSlider("Flow", value: $model.brushFlow, min: 1, max: 100, scale: 1, decimals: 0)
+            Toggle(isOn: $model.brushAutoEdge) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Keep to edges").font(.system(size: 15))
+                    Text("Paints only what looks like where the stroke starts").font(.system(size: 12)).foregroundStyle(Theme.secondaryText)
+                }
+            }
+            .toggleStyle(.switch)
+            .tint(Theme.accent)
+            .padding(.horizontal, 20)
+            .padding(.vertical, 8)
         }
     }
 

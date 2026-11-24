@@ -94,6 +94,8 @@ final class EditorModel: ObservableObject {
     @Published var brushSize = 0.04
     @Published var brushFeather = 50.0
     @Published var brushFlow = 100.0
+    /// The brush keeps to edges: it paints only what looks like where the stroke began.
+    @Published var brushAutoEdge = false
     /// Object masks: taps leave a part out instead of adding it.
     @Published var objectExclude = false
     /// AI work (an object or a description being found) is running.
@@ -136,6 +138,8 @@ final class EditorModel: ObservableObject {
         let screen = UIScreen.main.bounds.size
         let long = Swift.min(Swift.max(screen.width, screen.height) * UIScreen.main.scale, 2048)
         baseRenderSize = CGSize(width: long, height: long)
+        // the grid's thumbnail at once, until the first full render (a large raw takes a moment to decode)
+        image = Thumbnails.shared.cached(photo.id)
     }
 
     func open() {
@@ -438,7 +442,7 @@ final class EditorModel: ObservableObject {
         guard let id = selectedMask, !points.isEmpty else { return }
         attempt("mask.brushStroke", [
             "id": id, "points": points.map { [Double($0.x), Double($0.y)] }, "size": brushSize, "feather": brushFeather,
-            "flow": brushFlow, "erase": brushErase,
+            "flow": brushFlow, "erase": brushErase, "autoMask": brushAutoEdge,
         ])
         refreshMasksOnly()
         refreshHistory()
