@@ -539,7 +539,8 @@ fn parse_denoised(bytes: &[u8]) -> Option<lightcraft_raster::Rgb32f> {
         return None;
     }
     let mut img = lightcraft_raster::Rgb32f::filled(w, h, [0.0; 3]);
-    for (p, c) in img.data.iter_mut().zip(data.chunks_exact(6)) {
+    let (cells, _) = data.as_chunks::<6>();
+    for (p, c) in img.data.iter_mut().zip(cells) {
         *p = std::array::from_fn(|i| {
             let v = half::f16::from_le_bytes([c[i * 2], c[i * 2 + 1]]).to_f32();
             if v.is_finite() { v } else { 0.0 }
