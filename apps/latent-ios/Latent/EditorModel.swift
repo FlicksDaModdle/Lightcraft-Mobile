@@ -1277,11 +1277,11 @@ final class EditorModel: ObservableObject {
                 let shaped = c.width == c.height && SelectionModel.installed ? Sam2.unstretched(c.values, side: c.width, aspect: aspect) : c
                 guard let s = ObjectPicker.spot(shaped) else { return }
                 let keep = (spotMode, spotSize)
-                spotMode = InpaintModel.installed ? "generate" : "fill"
+                spotMode = Inpainting.installed ? "generate" : "fill"
                 spotSize = s.size
                 addSpot(s.points.map(flip))
                 (spotMode, spotSize) = keep
-                if !InpaintModel.installed { toast = "Filled from the surroundings. Get the AI remove model for a better fill." }
+                if !Inpainting.installed { toast = "Filled from the surroundings. Get the AI remove model for a better fill." }
             } else {
                 let probs = ObjectPicker.grid(c, side: 256, place: flip)
                 do {
@@ -1390,7 +1390,7 @@ final class EditorModel: ObservableObject {
     }
 
     func setSpotMode(_ mode: String) {
-        if mode == "generate", !InpaintModel.installed, spotMode == "generate" || selectedSpot == nil { showInpaintModel = true }
+        if mode == "generate", !Inpainting.installed || (spotMode == "generate" && !InpaintModel.installed) { showInpaintModel = true }
         spotMode = mode
         UISelectionFeedbackGenerator().selectionChanged()
         if selectedSpot != nil {

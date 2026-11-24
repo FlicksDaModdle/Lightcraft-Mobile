@@ -1690,7 +1690,7 @@ struct EditorView: View {
         case "clone": return "Brush over something; it's covered with an exact copy from nearby."
         case "fill": return "Brush over something; it's rebuilt from the surroundings, with no single source."
         case "generate":
-            return InpaintModel.installed
+            return Inpainting.installed
                 ? "Brush over something, generously; the AI model rebuilds what was behind it. Zoom in for small things."
                 : "Needs the AI remove model (tap AI remove again to get it). Until then these spots fill from the surroundings."
         default: return "Tap or brush over what to take away. Pinch to zoom in for small things."

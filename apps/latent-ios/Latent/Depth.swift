@@ -209,6 +209,9 @@ struct ModelSpec: Sendable {
     let packages: [String]
     let files: [String]
     let size: String
+    /// Set when the repository has the package zipped: that file's path (the packages are then
+    /// the `.mlpackage` folders inside it).
+    var archive: String? = nil
 
     var folder: URL {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -273,10 +276,22 @@ let DepthModel = ModelSpec(
     files: ModelSpec.coreFiles,
     size: "50 MB")
 
-/// LaMa (dilated), an inpainting model, in a Core ML conversion (Apache-2.0).
+/// Big LaMa, the full inpainting model, at 800 × 800 in a Core ML conversion (Apache-2.0).
 let InpaintModel = ModelSpec(
-    name: "LaMaDilated",
+    name: "BigLaMa800",
     title: "AI remove model",
+    blurb: "Rebuilds what's behind something you brush away (a person, a sign, a car) from what's around it, inventing detail where needed. This is the full model at its larger working size, for sharper, cleaner fills. It runs on this iPhone; nothing is uploaded.",
+    credit: "LaMa (Suvorov et al., Samsung AI), the full Big LaMa model, in an 800 × 800 Core ML conversion from Hugging Face (mlboydaisuke/coreml-zoo). Licence: Apache 2.0.",
+    repo: "https://huggingface.co/mlboydaisuke/coreml-zoo",
+    packages: ["LaMa.mlpackage"],
+    files: [],
+    size: "196 MB",
+    archive: "lama/LaMa.mlpackage.zip")
+
+/// The smaller LaMa (dilated, 6-bit, 512 × 512): still used when it's what's installed.
+let InpaintModelLite = ModelSpec(
+    name: "LaMaDilated",
+    title: "AI remove model (small)",
     blurb: "Rebuilds what's behind something you brush away (a person, a sign, a car) from what's around it, inventing detail where needed. It runs on this iPhone; nothing is uploaded.",
     credit: "LaMa (Suvorov et al., Samsung AI), dilated variant, in a 6-bit Core ML conversion from Hugging Face (Dadm-n/lama-dilated-coreml). Licence: Apache 2.0.",
     repo: "https://huggingface.co/Dadm-n/lama-dilated-coreml",
@@ -319,7 +334,27 @@ final class ModelDownload: ObservableObject {
         let spec = spec
         Task {
             do {
-                for (i, package) in spec.packages.enumerated() {
+                if let archive = spec.archive {
+                    // one zip holding the package(s)
+                    guard let url = URL(string: "\(spec.repo)/resolve/main/\(archive)") else { throw EngineError(message: "Bad model address.") }
+                    let zip = try await fetch(url, tracked: true)
+                    progress = 1
+                    let out = FileManager.default.temporaryDirectory.appendingPathComponent("\(spec.name)-unzipped", isDirectory: true)
+                    try? FileManager.default.removeItem(at: out)
+                    try await Task.detached(priority: .userInitiated) { try Unzip.extract(zip, into: out) }.value
+                    try? FileManager.default.removeItem(at: zip)
+                    for (i, package) in spec.packages.enumerated() {
+                        // the package may sit in a folder inside the zip
+                        let found = FileManager.default.enumerator(at: out, includingPropertiesForKeys: nil)?
+                            .compactMap { $0 as? URL }.first { $0.lastPathComponent == package }
+                        guard let pkg = found else { throw EngineError(message: "The download didn't hold the model.") }
+                        let built = try await Task.detached(priority: .userInitiated) { try MLModel.compileModel(at: pkg) }.value
+                        try? FileManager.default.removeItem(at: spec.compiled(i))
+                        try FileManager.default.moveItem(at: built, to: spec.compiled(i))
+                    }
+                    try? FileManager.default.removeItem(at: out)
+                }
+                for (i, package) in spec.packages.enumerated() where spec.archive == nil {
                     part = (i, spec.packages.count)
                     let pkg = FileManager.default.temporaryDirectory.appendingPathComponent("\(spec.name)-\(i).mlpackage", isDirectory: true)
                     try? FileManager.default.removeItem(at: pkg)
@@ -442,19 +477,27 @@ enum Inpainting {
     /// Hand the engine the AI remove model when it's installed (else AI remove fills from the
     /// surroundings).
     static func register() {
-        guard InpaintModel.installed, let model = InpaintModel.load() else {
+        guard let model = current() else {
             latent_set_inpainter(nil, 0)
             return
         }
         let size = model.modelDescription.inputDescriptionsByName.values
-            .compactMap { $0.multiArrayConstraint?.shape.last?.intValue }.max() ?? 512
+            .compactMap { $0.multiArrayConstraint?.shape.last?.intValue ?? $0.imageConstraint?.pixelsWide }.max() ?? 512
         latent_set_inpainter(inpaintCallback, UInt32(size))
     }
 
+    /// The best AI remove model installed: the full one, else the small one.
+    static func current() -> MLModel? { InpaintModel.load() ?? InpaintModelLite.load() }
+
+    static var installed: Bool { InpaintModel.installed || InpaintModelLite.installed }
+
     /// Run the model: `rgb` row-major size×size×3 and `hole` size×size in, `out` size×size×3 written.
     static func run(_ rgb: UnsafePointer<Float>, _ hole: UnsafePointer<Float>, _ size: Int, _ out: UnsafeMutablePointer<Float>) -> Bool {
-        guard let model = InpaintModel.load() else { return false }
+        guard let model = current() else { return false }
         let inputs = model.modelDescription.inputDescriptionsByName
+        if inputs.values.contains(where: { $0.type == .image }) {
+            return runOnImages(model, rgb, hole, size, out)
+        }
         // the picture has 3 channels, the hole 1
         guard let picture = inputs.first(where: { $0.value.multiArrayConstraint?.shape.dropFirst().first?.intValue == 3 }),
               let mask = inputs.first(where: { $0.key != picture.key }),
@@ -484,6 +527,89 @@ enum Inpainting {
                     // some conversions answer 0…255
                     out[(y * size + x) * 3 + c] = v > 1.5 ? v / 255 : v
                 }
+            }
+        }
+        return true
+    }
+
+    /// The same for a model that takes and gives pictures (an RGB picture and a grey mask).
+    private static func runOnImages(_ model: MLModel, _ rgb: UnsafePointer<Float>, _ hole: UnsafePointer<Float>, _ size: Int, _ out: UnsafeMutablePointer<Float>) -> Bool {
+        let inputs = model.modelDescription.inputDescriptionsByName
+        guard let picture = inputs.first(where: { $0.value.type == .image && $0.value.imageConstraint?.pixelFormatType != kCVPixelFormatType_OneComponent8 }),
+              let mask = inputs.first(where: { $0.key != picture.key }),
+              let pc = picture.value.imageConstraint
+        else { return false }
+        let n = size * size
+        var rgba = [UInt8](repeating: 255, count: n * 4)
+        for i in 0..<n {
+            for c in 0..<3 { rgba[i * 4 + c] = UInt8(Swift.min(Swift.max(rgb[i * 3 + c], 0), 1) * 255) }
+        }
+        var grey = (0..<n).map { UInt8(hole[$0] > 0.5 ? 255 : 0) }
+        guard let space = CGColorSpace(name: CGColorSpace.sRGB),
+              let pImg = rgba.withUnsafeMutableBytes({ b in
+                  CGContext(data: b.baseAddress, width: size, height: size, bitsPerComponent: 8, bytesPerRow: size * 4, space: space,
+                            bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue)?.makeImage()
+              }),
+              let mImg = grey.withUnsafeMutableBytes({ b in
+                  CGContext(data: b.baseAddress, width: size, height: size, bitsPerComponent: 8, bytesPerRow: size, space: CGColorSpaceCreateDeviceGray(),
+                            bitmapInfo: CGImageAlphaInfo.none.rawValue)?.makeImage()
+              })
+        else { return false }
+        var values: [String: Any] = [:]
+        do {
+            values[picture.key] = try MLFeatureValue(cgImage: pImg, constraint: pc, options: [.cropAndScale: 2])
+            if let mc = mask.value.imageConstraint {
+                values[mask.key] = try MLFeatureValue(cgImage: mImg, constraint: mc, options: [.cropAndScale: 2])
+            } else if let mc = mask.value.multiArrayConstraint {
+                let ma = try MLMultiArray(shape: mc.shape, dataType: mc.dataType)
+                guard ma.count == n else { return false }
+                for i in 0..<n { set(ma, i, hole[i]) }
+                values[mask.key] = ma
+            }
+            let result = try model.prediction(from: MLDictionaryFeatureProvider(dictionary: values))
+            guard let name = model.modelDescription.outputDescriptionsByName.keys.sorted().first, let f = result.featureValue(for: name) else { return false }
+            if let buf = f.imageBufferValue {
+                return readImage(buf, size, out)
+            }
+            guard let o = f.multiArrayValue, o.count >= 3 * n else { return false }
+            let dims = o.shape.map(\.intValue), st = o.strides.map(\.intValue)
+            guard dims.count >= 3 else { return false }
+            let (sc, sy, sx) = (st[dims.count - 3], st[dims.count - 2], st[dims.count - 1])
+            for y in 0..<size {
+                for x in 0..<size {
+                    for c in 0..<3 {
+                        let v = get(o, c * sc + y * sy + x * sx)
+                        out[(y * size + x) * 3 + c] = v > 1.5 ? v / 255 : v
+                    }
+                }
+            }
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    /// An output picture (32BGRA or 32ARGB) into 0…1 RGB, resampled to `size` if it differs.
+    private static func readImage(_ buf: CVPixelBuffer, _ size: Int, _ out: UnsafeMutablePointer<Float>) -> Bool {
+        CVPixelBufferLockBaseAddress(buf, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(buf, .readOnly) }
+        let w = CVPixelBufferGetWidth(buf), h = CVPixelBufferGetHeight(buf), row = CVPixelBufferGetBytesPerRow(buf)
+        guard let base = CVPixelBufferGetBaseAddress(buf)?.assumingMemoryBound(to: UInt8.self), w > 0, h > 0 else { return false }
+        let format = CVPixelBufferGetPixelFormatType(buf)
+        // where red, green and blue sit in each 4-byte pixel
+        let order: [Int]
+        switch format {
+        case kCVPixelFormatType_32BGRA: order = [2, 1, 0]
+        case kCVPixelFormatType_32ARGB: order = [1, 2, 3]
+        case kCVPixelFormatType_32RGBA: order = [0, 1, 2]
+        default: return false
+        }
+        for y in 0..<size {
+            let sy = Swift.min(y * h / size, h - 1)
+            for x in 0..<size {
+                let sx = Swift.min(x * w / size, w - 1)
+                let p = base + sy * row + sx * 4
+                for c in 0..<3 { out[(y * size + x) * 3 + c] = Float(p[order[c]]) / 255 }
             }
         }
         return true
