@@ -7,11 +7,12 @@ enum HomeTab: String, Hashable {
     case library, device, search
 }
 
-/// The home screen: the system's Liquid Glass tab bar (Library, On iPhone, and Search on its own
+/// The home screen: the system's Liquid Glass tab bar (Camera Roll first, Library, and Search on its own
 /// at the end), each tab with Latent's glass top bar over its grid.
 struct LibraryView: View {
     @StateObject private var library = Library()
-    @State private var tab: HomeTab = .library
+    /// The camera roll first: what's on the iPhone, ready to open.
+    @State private var tab: HomeTab = .device
     @State private var open: Photo?
     @State private var picked: [PhotosPickerItem] = []
     @State private var pickingPhotos = false
@@ -22,17 +23,17 @@ struct LibraryView: View {
 
     var body: some View {
         TabView(selection: $tab) {
+            Tab("Camera Roll", systemImage: "photo.on.rectangle.angled", value: HomeTab.device) {
+                VStack(spacing: 0) {
+                    topBar
+                    DeviceView(library: library) { photo in open = photo }
+                }
+                .background(Color.black.ignoresSafeArea())
+            }
             Tab("Library", systemImage: "photo.stack", value: HomeTab.library) {
                 VStack(spacing: 0) {
                     topBar
                     LibraryGrid(library: library, open: $open, sharing: $sharing, browseDevice: { tab = .device }, addPhotos: { pickingPhotos = true })
-                }
-                .background(Color.black.ignoresSafeArea())
-            }
-            Tab("On iPhone", systemImage: "iphone", value: HomeTab.device) {
-                VStack(spacing: 0) {
-                    topBar
-                    DeviceView(library: library) { photo in open = photo }
                 }
                 .background(Color.black.ignoresSafeArea())
             }
@@ -271,7 +272,7 @@ struct LibraryGrid: View {
                 .multilineTextAlignment(.center)
             HStack(spacing: 10) {
                 Button(action: browseDevice) {
-                    Label("Browse this iPhone", systemImage: "iphone").padding(.horizontal, 16).frame(height: 44)
+                    Label("Open the camera roll", systemImage: "photo.on.rectangle.angled").padding(.horizontal, 16).frame(height: 44)
                         .latentGlass(in: Capsule(), tint: Theme.accent.opacity(0.8), interactive: true)
                 }
                 Button(action: addPhotos) {

@@ -695,7 +695,7 @@ struct EditorView: View {
                     blurHeader
                     if model.blurOn { depthControls }
                 case .curve: curveHeader
-                default: EmptyView()
+                default: sectionRow(model.tool)
                 }
                 if !model.tool.tabs.isEmpty { tabs }
                 if model.tool == .mixer { bandChips }
@@ -924,6 +924,7 @@ struct EditorView: View {
                 Spacer()
                 stepButton("Grading", symbol: "circle.lefthalf.filled") { model.tool = .grading }
                 stepButton("Color mix", symbol: "paintpalette") { model.tool = .mixer }
+                sectionEye(.color)
             }
             HStack(spacing: 8) {
                 Text("White balance").font(.system(size: 14)).foregroundStyle(Theme.secondaryText)
@@ -971,6 +972,7 @@ struct EditorView: View {
             stepButton("Profile", symbol: "camera.filters") { model.openProfiles() }
                 .accessibilityLabel(Text("Profile"))
             stepButton("Curve", symbol: "chart.line.uptrend.xyaxis") { model.tool = .curve }
+            sectionEye(.light)
         }
         .padding(.horizontal, 20)
         .padding(.top, 12)
@@ -1015,9 +1017,37 @@ struct EditorView: View {
             }
             .foregroundStyle(.white)
             Spacer()
+            sectionEye(model.tool)
         }
         .padding(.horizontal, 20)
         .padding(.top, 14)
+    }
+
+    /// The eye that hides a tool's edits (they're kept) so you can compare with and without them.
+    private func sectionEye(_ t: Tool) -> some View {
+        let shown = model.sectionShown(t)
+        return Button { withAnimation(.glass) { model.toggleSection(t) } } label: {
+            Image(systemName: shown ? "eye" : "eye.slash")
+                .font(.system(size: 15, weight: .semibold))
+                .contentTransition(.symbolEffect(.replace))
+                .frame(width: 36, height: 32)
+                .latentGlass(in: Capsule(), tint: shown ? nil : Theme.accent.opacity(0.6), interactive: true)
+        }
+        .foregroundStyle(.white)
+        .accessibilityLabel(Text(shown ? "Hide \(t.label) edits" : "Show \(t.label) edits"))
+    }
+
+    /// A tool's title and eye, for tools without a header of their own.
+    private func sectionRow(_ t: Tool) -> some View {
+        HStack {
+            Text(t.label).font(.system(size: 15, weight: .semibold))
+            if !model.sectionShown(t) { Text("hidden").font(.system(size: 12)).foregroundStyle(Theme.secondaryText) }
+            Spacer()
+            sectionEye(t)
+        }
+        .foregroundStyle(.white)
+        .padding(.horizontal, 20)
+        .padding(.top, 10)
     }
 
     private var bandChips: some View {
@@ -2161,7 +2191,7 @@ struct ToolStrip: View {
                 Rectangle().fill(Theme.separator).frame(width: 1, height: 32).padding(.horizontal, 4)
                 ForEach(Tool.strip) { t in
                     let on = model.tool == t || (t == .color && (model.tool == .mixer || model.tool == .grading)) || (t == .light && model.tool == .curve)
-                    item(t.label, symbol: t.symbol, selected: on, edited: model.edited(t)) {
+                    item(t.label, symbol: t.symbol, selected: on, edited: model.edited(t), hidden: !model.sectionShown(t)) {
                         UISelectionFeedbackGenerator().selectionChanged()
                         withAnimation(.glass) { model.tool = t }
                     }
@@ -2173,11 +2203,15 @@ struct ToolStrip: View {
         .padding(.bottom, 4)
     }
 
-    private func item(_ label: String, symbol: String, selected: Bool, edited: Bool, action: @escaping () -> Void) -> some View {
+    private func item(_ label: String, symbol: String, selected: Bool, edited: Bool, hidden: Bool = false, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             VStack(spacing: 5) {
                 Image(systemName: symbol).font(.system(size: 20)).frame(height: 24)
                     .symbolEffect(.bounce, value: selected)
+                    .opacity(hidden ? 0.4 : 1)
+                    .overlay(alignment: .topTrailing) {
+                        if hidden { Image(systemName: "eye.slash.fill").font(.system(size: 9, weight: .bold)).offset(x: 8, y: -4) }
+                    }
                 Text(label).font(.system(size: 11))
                 Circle().fill(edited ? Theme.secondaryText : .clear).frame(width: 4, height: 4)
             }

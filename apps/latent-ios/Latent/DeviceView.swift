@@ -111,7 +111,8 @@ struct DeviceView: View {
                                     if let p = await album.bring(asset, into: library) { open(p) }
                                 }
                             } label: {
-                                AssetThumb(asset: asset, manager: album.images, bringing: album.bringing == asset.localIdentifier)
+                                AssetThumb(asset: asset, manager: album.images, bringing: album.bringing == asset.localIdentifier,
+                                           edited: DeviceAlbum.imported(asset).flatMap(library.photo)?.edited ?? false)
                             }
                             .buttonStyle(.plain)
                             .disabled(album.bringing != nil)
@@ -138,7 +139,7 @@ struct DeviceView: View {
     private func header(count: Int) -> some View {
         HStack {
             VStack(alignment: .leading, spacing: 2) {
-                Text("Recents").font(.system(size: 30, weight: .bold))
+                Text("Camera Roll").font(.system(size: 30, weight: .bold))
                 Text(album.status == .limited ? "\(count) photos you allowed" : "\(count) photos")
                     .font(.system(size: 14))
                     .foregroundStyle(Theme.secondaryText)
@@ -180,6 +181,7 @@ struct AssetThumb: View {
     let asset: PHAsset
     let manager: PHCachingImageManager
     let bringing: Bool
+    var edited = false
     @State private var image: UIImage?
 
     var body: some View {
@@ -194,7 +196,15 @@ struct AssetThumb: View {
             }
             .clipped()
             .overlay(alignment: .topLeading) {
-                if DeviceAlbum.imported(asset) != nil {
+                if edited {
+                    Image(systemName: "slider.horizontal.3")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundStyle(.white)
+                        .padding(5)
+                        .background(Color.black.opacity(0.5), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+                        .padding(5)
+                        .accessibilityLabel(Text("Edited"))
+                } else if DeviceAlbum.imported(asset) != nil {
                     Image(systemName: "checkmark.circle.fill")
                         .font(.system(size: 14, weight: .semibold))
                         .symbolRenderingMode(.palette)

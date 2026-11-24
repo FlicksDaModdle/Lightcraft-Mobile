@@ -187,6 +187,20 @@ enum Tool: String, CaseIterable, Identifiable {
     }
 
     /// The engine sections whose sliders the tool shows.
+    /// The engine section this tool's eye shows and hides (the steps inside Light and Color go
+    /// with them).
+    var eyeSection: String? {
+        switch self {
+        case .light, .curve: "light"
+        case .color, .mixer, .grading: "color"
+        case .blur: "lensBlur"
+        case .effects: "effects"
+        case .detail: "detail"
+        case .optics: "optics"
+        case .geometry: "geometry"
+        }
+    }
+
     var sections: [String] {
         switch self {
         case .light: ["light"]

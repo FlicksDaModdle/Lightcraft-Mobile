@@ -1308,6 +1308,22 @@ final class EditorModel: ObservableObject {
         }
     }
 
+    // MARK: section eyes
+
+    /// Sections whose edits are kept but not shown (their eye is off).
+    @Published private(set) var disabledSections: Set<String> = []
+
+    func sectionShown(_ t: Tool) -> Bool { t.eyeSection.map { !disabledSections.contains($0) } ?? true }
+
+    /// Hide a tool's edits (they're kept) to compare without them, or show them again.
+    func toggleSection(_ t: Tool) {
+        guard let sec = t.eyeSection else { return }
+        let show = disabledSections.contains(sec)
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        command("develop.sectionEnabled", ["section": sec, "enabled": show])
+        toast = show ? "\(t.label) edits shown" : "\(t.label) edits hidden (kept: tap the eye to show them)"
+    }
+
     // MARK: zoom
 
     /// Two fingers are on the photo: drawing tools stop so the pinch doesn't paint.
@@ -1543,6 +1559,7 @@ final class EditorModel: ObservableObject {
             readCrop(s)
             masks = (s["masks"] as? [Any] ?? []).compactMap(MaskItem.init)
             spots = (s["spots"] as? [Any] ?? []).compactMap(SpotItem.init)
+            disabledSections = Set(s["disabled_sections"] as? [String] ?? [])
             let prof = s["profile"] as? [String: Any] ?? [:]
             profileID = prof["id"] as? String ?? "lc.color"
             profileAmount = (prof["amount"] as? NSNumber)?.doubleValue ?? 100

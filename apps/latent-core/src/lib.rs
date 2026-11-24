@@ -71,9 +71,9 @@ impl Core {
         let (session, problem) = match dir {
             None => (bare(), Some("There is no folder to keep the library in.".to_string())),
             Some(dir) => {
-                let first_run = !dir.exists();
+                // no sample photos: the library starts empty and fills from the camera roll
                 let mut s = bare();
-                match s.open_library(&dir, first_run) {
+                match s.open_library(&dir, false) {
                     Ok(report) => {
                         log::info!("library {}: {} log records replayed", dir.display(), report.replayed);
                         (s.with_default_lens_database().with_lens_auto_download(), None)
@@ -85,6 +85,15 @@ impl Core {
         let mut session = session;
         // AI mask work runs on the engine's own thread; `poll` takes the results in
         session.segmenter.background = true;
+        // sample photos earlier versions added go away for good
+        let demos: Vec<u64> =
+            session.catalog.photos().filter(|p| matches!(p.source, lightcraft_catalog::Source::Demo { .. })).map(|p| p.id.0).collect();
+        if !demos.is_empty() {
+            let ids = serde_json::json!({ "ids": demos });
+            if let Err(e) = session.execute("photo.deletePermanently", &ids) {
+                log::warn!("removing the sample photos: {e}");
+            }
+        }
         (Core { session: Mutex::new(session) }, problem)
     }
 
@@ -665,6 +674,18 @@ mod tests {
         // and as a part taken away from it
         assert!(core.object_from_coverage(Some(m), "subtract", side, &probs, (0.25, 0.5)).is_ok());
         assert!(core.object_from_coverage(None, "add", side, &probs[..10], (0.5, 0.5)).is_err());
+    }
+
+    #[test]
+    fn a_new_library_starts_without_sample_photos() {
+        let dir = std::env::temp_dir().join(format!("latent-empty-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (core, problem) = Core::open(Some(&dir));
+        assert!(problem.is_none(), "{problem:?}");
+        let photos = ok(&core.execute("catalog.query", ""));
+        assert_eq!(photos["photos"].as_array().map_or(0, Vec::len), 0, "{photos}");
+        drop(core);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
