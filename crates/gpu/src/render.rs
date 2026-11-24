@@ -1055,12 +1055,25 @@ fn linear(cx: &mut Cx<'_>, sampled: &Buf, info: &SourceInfo, plan: &Plan<'_>, ho
         }
     };
     let img = denoise(cx, img, plan, colour_noise);
-    if !lightcraft_pipeline::lens_blur::renders(s) {
+    let blur = lightcraft_pipeline::lens_blur::renders(s);
+    let glow = lightcraft_pipeline::glow::active(s);
+    if !blur && !glow {
         return img;
     }
-    // Lens Blur (global or a mask's): on the CPU, like the CPU renderer's (`lens_blur::apply`)
+    // Lens Blur (global or a mask's) and Glow: on the CPU, like the CPU renderer's (`lens_blur::apply`,
+    // `glow::apply`)
     let mut host_img = cx.read_rgb(&img, w, h);
-    lightcraft_pipeline::lens_blur::apply_with(&mut host_img, s, &plan.frame, plan.px_per_long, plan.mattes.as_deref(), plan.lens_subject.as_deref());
+    if blur {
+        lightcraft_pipeline::lens_blur::apply_with(
+            &mut host_img,
+            s,
+            &plan.frame,
+            plan.px_per_long,
+            plan.mattes.as_deref(),
+            plan.lens_subject.as_deref(),
+        );
+    }
+    lightcraft_pipeline::glow::apply(&mut host_img, s, plan.px_per_long);
     cx.gpu.upload(rgb_words(&host_img))
 }
 

@@ -222,7 +222,7 @@ enum Tool: String, CaseIterable, Identifiable {
     /// Tabs across the top of the panel: a name and the control ids (by prefix) each shows.
     var tabs: [(name: String, prefixes: [String])] {
         switch self {
-        case .effects: [("Effects", ["effects."]), ("Vignette", ["vignette."]), ("Grain", ["grain."])]
+        case .effects: [("Effects", ["effects."]), ("Vignette", ["vignette."]), ("Grain", ["grain."]), ("Glow", ["glow."])]
         case .detail:
             [("Sharpening", ["detail.sharpen"]), ("Noise", ["detail.nrLuminance", "detail.nrDetail", "detail.nrContrast"]), ("Color noise", ["detail.nrColor"])]
         default: []
@@ -597,3 +597,16 @@ let bokehShapes: [(key: String, label: String, symbol: String)] = [
     ("bubble", "Bubble", "circle.circle"),
     ("ring", "Ring", "circle"),
 ]
+
+/// The ways Glow can spread light, as the engine names them, with a line on each.
+let glowStyles: [(key: String, label: String, about: String)] = [
+    ("bloom", "Bloom", "A soft halo around bright lights"),
+    ("diffusion", "Diffusion", "Softens the whole picture, brightest parts most"),
+    ("halation", "Halation", "A red-orange fringe, like light inside film"),
+    ("motion", "Motion", "Light smeared sideways"),
+    ("streak", "Streak", "Thin rays across and down from each light"),
+]
+
+/// The fixed focus shapes' half-width and half-height, in units of the photo's long edge (as the engine's
+/// `FocusShape::radii`).
+let focusShapeRadii: [String: (Double, Double)] = ["round": (0.22, 0.22), "wide": (0.32, 0.17), "tall": (0.17, 0.32)]

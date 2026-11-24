@@ -18,6 +18,9 @@ struct EditorView: View {
     @State private var describeOp: String?
     @State private var chromeHidden = false
     @State private var showingOriginal = false
+    /// Before and after side by side, split by a line that can be dragged.
+    @State private var splitView = false
+    @State private var splitAt: CGFloat = 0.5
     @State private var hold: Task<Void, Never>?
     /// Pinch zoom: the scale and where the zoomed photo has been moved to.
     @State private var zoom: CGFloat = 1
@@ -334,6 +337,13 @@ struct EditorView: View {
                 }
                 Button { sharing = true } label: { Label("Export", systemImage: "square.and.arrow.up") }
             }
+            Button {
+                splitView.toggle()
+                if splitView { model.loadOriginal() }
+            } label: {
+                Label(splitView ? "Hide before and after" : "Before and after", systemImage: "rectangle.split.2x1")
+            }
+            Toggle(isOn: $model.clipWarnings) { Label("Show clipping", systemImage: "exclamationmark.triangle") }
             Menu {
                 Toggle(isOn: $showHistogram) { Label("Histogram", systemImage: "chart.bar.xaxis") }
                 Picker(selection: $background) {
@@ -393,6 +403,24 @@ struct EditorView: View {
                             .scaledToFit()
                             .shadow(color: .black.opacity(background == EditorBackground.black.rawValue || zoom > 1 ? 0 : 0.35), radius: 16, y: 6)
                             .frame(width: geo.size.width, height: geo.size.height)
+                        if splitView, !showingOriginal, zoom <= 1.01, let orig = model.original {
+                            Image(decorative: orig, scale: 1)
+                                .resizable()
+                                .interpolation(.high)
+                                .scaledToFit()
+                                .frame(width: geo.size.width, height: geo.size.height)
+                                .mask(alignment: .leading) { Rectangle().frame(width: geo.size.width * splitAt) }
+                                .allowsHitTesting(false)
+                        }
+                        if model.clipWarnings, !showingOriginal, let marks = model.clipOverlay {
+                            Image(decorative: marks, scale: 1)
+                                .resizable()
+                                .interpolation(.none)
+                                .scaledToFit()
+                                .frame(width: geo.size.width, height: geo.size.height)
+                                .allowsHitTesting(false)
+                                .accessibilityHidden(true)
+                        }
                         if model.showDepth, model.tool == .blur, let dv = model.depthView {
                             Image(decorative: dv, scale: 1)
                                 .resizable()
@@ -404,6 +432,9 @@ struct EditorView: View {
                         }
                         if model.mode == .masks && chrome, model.currentMask != nil {
                             MaskCanvas(model: model, imageSize: CGSize(width: img.width, height: img.height), size: geo.size, zoom: zoom)
+                        }
+                        if model.tool == .blur && model.mode == .edit && chrome && model.shownFocusArea != nil && !model.tapToFocus {
+                            FocusOval(model: model, imageSize: CGSize(width: img.width, height: img.height), size: geo.size)
                         }
                         if model.mode == .remove && chrome {
                             SpotCanvas(model: model, imageSize: CGSize(width: img.width, height: img.height), size: geo.size, zoom: zoom)
@@ -426,6 +457,21 @@ struct EditorView: View {
                     .offset(pan)
                 } else {
                     ProgressView().tint(.white).frame(width: geo.size.width, height: geo.size.height)
+                }
+                if splitView && !showingOriginal && model.mode != .crop && zoom <= 1.01 && model.original != nil {
+                    splitHandle(geo.size)
+                    let x = geo.size.width * splitAt
+                    ZStack {
+                        Text("Before").padding(.horizontal, 10).padding(.vertical, 5).latentGlass(in: Capsule())
+                            .position(x: Swift.max(x - 52, 40), y: 24)
+                        Text("After").padding(.horizontal, 10).padding(.vertical, 5).latentGlass(in: Capsule())
+                            .position(x: Swift.min(x + 48, geo.size.width - 36), y: 24)
+                    }
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .frame(width: geo.size.width, height: geo.size.height)
+                    .allowsHitTesting(false)
+                    .accessibilityHidden(true)
                 }
                 if model.mode == .masks && chrome && !focused {
                     HStack(alignment: .bottom) {
@@ -479,14 +525,25 @@ struct EditorView: View {
                 if showHistogram && chrome && model.tool != .curve && model.mode != .crop && model.mode != .masks && model.mode != .remove && !focused && zoom <= 1.01 {
                     HistogramView(bins: model.histogram, hdrStops: model.showingHDR ? model.headroom : nil)
                         .frame(height: model.showingHDR ? 62 : 50)
+                        .overlay(alignment: .topLeading) { clipMark(model.clipped.shadows, on: model.clipWarnings, colour: Color(red: 0.25, green: 0.5, blue: 1)) }
+                        .overlay(alignment: .topTrailing) { clipMark(model.clipped.highlights, on: model.clipWarnings, colour: Color(red: 1, green: 0.3, blue: 0.3)) }
                         .padding(.horizontal, 10)
                         .padding(.vertical, 6)
                         .background(Color.black.opacity(0.45), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                        .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                        .onTapGesture {
+                            UISelectionFeedbackGenerator().selectionChanged()
+                            model.clipWarnings.toggle()
+                        }
+                        .accessibilityElement(children: .ignore)
+                        .accessibilityLabel(Text("Histogram"))
+                        .accessibilityValue(Text(clipSummary))
+                        .accessibilityHint(Text(model.clipWarnings ? "Double-tap to hide clipping on the photo" : "Double-tap to show clipping on the photo"))
+                        .accessibilityAddTraits(.isButton)
                         .frame(maxWidth: geo.size.width * 0.72)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(.leading, 12)
                         .padding(.top, 8)
-                        .allowsHitTesting(false)
                         .transition(.opacity)
                 }
                 if let readout = model.readout {
@@ -560,6 +617,48 @@ struct EditorView: View {
                 }
                 model.zoomChanged(zoom)
             }
+        }
+    }
+
+    /// A small triangle in a corner of the histogram: lit when that end clips, filled while the warnings show on the photo.
+    private func clipMark(_ clipping: Bool, on: Bool, colour: Color) -> some View {
+        Image(systemName: on ? "triangle.fill" : "triangle")
+            .font(.system(size: 9, weight: .bold))
+            .foregroundStyle(clipping ? colour : Color.white.opacity(0.35))
+            .padding(2)
+    }
+
+    private var clipSummary: String {
+        switch (model.clipped.highlights, model.clipped.shadows) {
+        case (true, true): "Highlights and shadows clip"
+        case (true, false): "Highlights clip"
+        case (false, true): "Shadows clip"
+        default: "Nothing clips"
+        }
+    }
+
+    /// The line between before (left) and after (right), dragged sideways.
+    private func splitHandle(_ size: CGSize) -> some View {
+        let x = size.width * splitAt
+        return ZStack {
+            Rectangle().fill(.white).frame(width: 2, height: size.height).shadow(color: .black.opacity(0.5), radius: 2)
+            Image(systemName: "chevron.left.chevron.right")
+                .font(.system(size: 13, weight: .bold))
+                .foregroundStyle(.white)
+                .frame(width: 40, height: 40)
+                .latentGlass(in: Circle(), interactive: true)
+        }
+        .frame(width: 44, height: size.height)
+        .contentShape(Rectangle())
+        .position(x: x, y: size.height / 2)
+        .gesture(DragGesture(minimumDistance: 0).onChanged { v in
+            splitAt = Swift.min(Swift.max(v.location.x / size.width, 0.02), 0.98)
+        })
+        .accessibilityElement()
+        .accessibilityLabel(Text("Before and after divider"))
+        .accessibilityValue(Text("\(Int((splitAt * 100).rounded())) percent before"))
+        .accessibilityAdjustableAction { d in
+            splitAt = Swift.min(Swift.max(splitAt + (d == .increment ? 0.05 : -0.05), 0.02), 0.98)
         }
     }
 
@@ -701,6 +800,7 @@ struct EditorView: View {
                 default: sectionRow(model.tool)
                 }
                 if !model.tool.tabs.isEmpty { tabs }
+                if model.tool == .effects, model.tool.tabs.indices.contains(model.tab), model.tool.tabs[model.tab].name == "Glow" { glowStyleRow }
                 if model.tool == .mixer { bandChips }
                 if model.tool == .grading { rangeChips }
             }
@@ -800,6 +900,37 @@ struct EditorView: View {
         .padding(.horizontal, 16)
         .padding(.top, 12)
         .padding(.bottom, 4)
+    }
+
+    /// How Glow spreads light.
+    private var glowStyleRow: some View {
+        HStack(spacing: 10) {
+            Text("Style").font(.system(size: 14)).foregroundStyle(Theme.secondaryText)
+            Menu {
+                Picker("Style", selection: Binding(get: { model.glowStyle }, set: { model.setGlowStyle($0) })) {
+                    ForEach(glowStyles, id: \.key) { g in
+                        Text(g.label).tag(g.key)
+                    }
+                }
+            } label: {
+                HStack(spacing: 4) {
+                    Text(glowStyles.first { $0.key == model.glowStyle }?.label ?? "Bloom")
+                        .font(.system(size: 16, weight: .semibold))
+                    Image(systemName: "chevron.up.chevron.down").font(.system(size: 11, weight: .semibold))
+                }
+                .foregroundStyle(.white)
+            }
+            .accessibilityLabel("Glow style")
+            .accessibilityValue(glowStyles.first { $0.key == model.glowStyle }?.label ?? "Bloom")
+            Spacer()
+            Text(glowStyles.first { $0.key == model.glowStyle }?.about ?? "")
+                .font(.system(size: 12))
+                .foregroundStyle(Theme.secondaryText)
+                .lineLimit(2)
+                .multilineTextAlignment(.trailing)
+        }
+        .padding(.horizontal, 20)
+        .padding(.top, 10)
     }
 
     /// The shape out-of-focus lights take, as different lens apertures draw them.
@@ -3321,5 +3452,103 @@ struct PinchPan: UIGestureRecognizerRepresentable {
         default:
             ended()
         }
+    }
+}
+
+/// The fixed focus shape of Lens Blur on the photo: drag inside it to move it, drag a handle to make it wider,
+/// taller, or both.
+struct FocusOval: View {
+    @ObservedObject var model: EditorModel
+    let imageSize: CGSize
+    let size: CGSize
+    @State private var grab: (center: CGPoint, rx: Double, ry: Double, at: CGPoint)?
+
+    private var fitted: CGRect {
+        guard imageSize.width > 0, imageSize.height > 0 else { return .zero }
+        let s = Swift.min(size.width / imageSize.width, size.height / imageSize.height)
+        let w = imageSize.width * s, h = imageSize.height * s
+        return CGRect(x: (size.width - w) / 2, y: (size.height - h) / 2, width: w, height: h)
+    }
+
+    private func toView(_ m: CGPoint) -> CGPoint {
+        let f = fitted
+        let u = model.fromMask(m)
+        return CGPoint(x: f.minX + u.x * f.width, y: f.minY + u.y * f.height)
+    }
+
+    private func toMask(_ q: CGPoint) -> CGPoint {
+        let f = fitted
+        return model.toMask(CGPoint(x: (q.x - f.minX) / Swift.max(f.width, 1), y: (q.y - f.minY) / Swift.max(f.height, 1)))
+    }
+
+    /// View points per unit of the photo's long edge.
+    private var perLongEdge: CGFloat {
+        let f = fitted
+        let a = model.photoAspect
+        let perWidth = f.width / Swift.max(model.cropRect.width, 1e-6)
+        return a >= 1 ? perWidth : perWidth / Swift.max(a, 1e-6)
+    }
+
+    var body: some View {
+        if let area = model.shownFocusArea {
+            let c = toView(area.center)
+            let (w, h) = (CGFloat(area.rx) * perLongEdge * 2, CGFloat(area.ry) * perLongEdge * 2)
+            ZStack {
+                Ellipse()
+                    .stroke(.white.opacity(0.9), style: StrokeStyle(lineWidth: 1.5, dash: [6, 4]))
+                    .shadow(color: .black.opacity(0.6), radius: 2)
+                    .frame(width: w, height: h)
+                    .contentShape(Ellipse())
+                    .position(c)
+                    .gesture(drag { start, t in (toMask(CGPoint(x: toView(start.center).x + t.width, y: toView(start.center).y + t.height)), start.rx, start.ry) })
+                    .accessibilityLabel(Text("Sharp area"))
+                    .accessibilityHint(Text("Drag to move what stays sharp"))
+                handle(at: CGPoint(x: c.x + w / 2, y: c.y), label: "Width") { start, t in
+                    (start.center, start.rx + Double(t.width / perLongEdge), start.ry)
+                }
+                handle(at: CGPoint(x: c.x, y: c.y + h / 2), label: "Height") { start, t in
+                    (start.center, start.rx, start.ry + Double(t.height / perLongEdge))
+                }
+                handle(at: CGPoint(x: c.x + w / 2 * 0.7071, y: c.y + h / 2 * 0.7071), label: "Size") { start, t in
+                    let k = 1 + Double((t.width + t.height) / 2 / Swift.max(perLongEdge * CGFloat(Swift.max(start.rx, start.ry)), 1))
+                    return (start.center, start.rx * Swift.max(k, 0.05), start.ry * Swift.max(k, 0.05))
+                }
+            }
+            .frame(width: size.width, height: size.height)
+        }
+    }
+
+    private typealias Change = ((center: CGPoint, rx: Double, ry: Double, at: CGPoint), CGSize) -> (CGPoint, Double, Double)
+
+    private func drag(_ change: @escaping Change) -> some Gesture {
+        DragGesture(minimumDistance: 2)
+            .onChanged { v in
+                guard let area = model.shownFocusArea else { return }
+                if grab == nil {
+                    grab = (area.center, area.rx, area.ry, v.startLocation)
+                    model.beginFocusArea()
+                }
+                if let g = grab {
+                    let (c, rx, ry) = change(g, v.translation)
+                    model.moveFocusArea(center: c, rx: rx, ry: ry)
+                }
+            }
+            .onEnded { _ in
+                grab = nil
+                model.end()
+            }
+    }
+
+    private func handle(at p: CGPoint, label: String, _ change: @escaping Change) -> some View {
+        Circle()
+            .fill(.white)
+            .frame(width: 14, height: 14)
+            .shadow(color: .black.opacity(0.5), radius: 2)
+            .frame(width: 44, height: 44)
+            .contentShape(Rectangle())
+            .position(p)
+            .gesture(drag(change))
+            .accessibilityLabel(Text(label))
+            .accessibilityHint(Text("Drag to change the sharp area's \(label.lowercased())"))
     }
 }

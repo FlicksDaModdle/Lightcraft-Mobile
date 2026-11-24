@@ -820,6 +820,17 @@ final class EditorModel: ObservableObject {
     @Published private(set) var blurOn = false
     @Published private(set) var focusMask: UInt32?
     @Published private(set) var focusShape = "auto"
+    /// How Glow spreads light (`GlowStyle` in the engine).
+    @Published private(set) var glowStyle = "bloom"
+
+    func setGlowStyle(_ style: String) {
+        UISelectionFeedbackGenerator().selectionChanged()
+        if attempt("develop.merge", ["settings": ["glow": ["style": style]], "label": "Glow Style"]) {
+            refresh()
+            render()
+        }
+    }
+
     /// The shape out-of-focus lights take (`Bokeh` in the engine).
     @Published private(set) var bokeh = "circle"
 
@@ -841,7 +852,8 @@ final class EditorModel: ObservableObject {
     /// Keep the subject (shape "auto"), a fixed shape ("round", "wide", "tall") or a mask sharp.
     func setFocus(shape: String? = nil, mask: UInt32? = nil) {
         var patch: [String: Any] = ["focus_mask": mask.map { NSNumber(value: $0) } ?? NSNull(), "focal_range": 0.0]
-        if let shape { patch["shape"] = shape }
+        // a new shape starts again in the middle at its own size
+        if let shape { patch["shape"] = shape; patch["area"] = NSNull() }
         mergeBlur(patch, "Lens Blur Focus")
     }
 
@@ -876,6 +888,29 @@ final class EditorModel: ObservableObject {
     @Published private(set) var depthBusy = false
     @Published private(set) var focalDistance = 0.0
     @Published private(set) var focalRange = 0.0
+    /// The fixed focus shape as moved and resized on the photo: centre in mask coordinates, radii in units of the
+    /// photo's long edge (`FocusArea` in the engine); nil while it is where its shape puts it.
+    @Published private(set) var focusArea: (center: CGPoint, rx: Double, ry: Double)?
+
+    /// Where the fixed focus shape is now (nil while the blur keeps a mask or the subject sharp).
+    var shownFocusArea: (center: CGPoint, rx: Double, ry: Double)? {
+        guard blurOn, focusMask == nil, let radii = focusShapeRadii[focusShape] else { return nil }
+        return focusArea ?? (toMask(CGPoint(x: 0.5, y: 0.5)), radii.0, radii.1)
+    }
+
+    func beginFocusArea() {
+        active = "focusArea"
+        attempt("develop.beginInteraction", ["label": "Lens Blur Focus Area"])
+    }
+
+    func moveFocusArea(center: CGPoint, rx: Double, ry: Double) {
+        let r = { (v: Double) in Swift.min(Swift.max(v, 0.02), 1.0) }
+        let area: [String: Any] = ["center": ["x": Double(center.x), "y": Double(center.y)], "rx": r(rx), "ry": r(ry)]
+        focusArea = (center, r(rx), r(ry))
+        if attempt("develop.merge", ["settings": ["lens_blur": ["area": area]], "label": "Lens Blur Focus Area"]) {
+            render()
+        }
+    }
     /// Blur by depth (a Focus Range) rather than by the subject.
     var depthBlur: Bool { depth != nil && focalRange > 0 && focusMask == nil && focusShape == "auto" }
     /// The next tap on the photo sets the focus distance.
@@ -1607,8 +1642,16 @@ final class EditorModel: ObservableObject {
             focusMask = (lb["focus_mask"] as? NSNumber)?.uint32Value
             focusShape = lb["shape"] as? String ?? "auto"
             bokeh = lb["bokeh"] as? String ?? "circle"
+            glowStyle = (s["glow"] as? [String: Any])?["style"] as? String ?? "bloom"
             focalDistance = (lb["focal_distance"] as? NSNumber)?.doubleValue ?? 0
             focalRange = (lb["focal_range"] as? NSNumber)?.doubleValue ?? 0
+            if let a = lb["area"] as? [String: Any], let c = a["center"] as? [String: Any],
+               let x = (c["x"] as? NSNumber)?.doubleValue, let y = (c["y"] as? NSNumber)?.doubleValue,
+               let rx = (a["rx"] as? NSNumber)?.doubleValue, let ry = (a["ry"] as? NSNumber)?.doubleValue {
+                focusArea = (CGPoint(x: x, y: y), rx, ry)
+            } else {
+                focusArea = nil
+            }
             if let i = selectedSpot, !spots.indices.contains(i) { selectedSpot = nil }
             if let sel = selectedMask, !masks.contains(where: { $0.id == sel }) { selectedMask = nil }
             let h = s["hdr"] as? [String: Any]
@@ -1662,6 +1705,7 @@ final class EditorModel: ObservableObject {
                 image = r.image
                 histogram = r.histogram
                 showingHDR = r.peak > 1
+                updateClipping()
             } else if image == nil {
                 toast = "This photo could not be rendered"
             }
@@ -1673,6 +1717,27 @@ final class EditorModel: ObservableObject {
         }
     }
 
+    // MARK: clipping
+
+    /// Show where highlights are blown (red) and shadows crushed (blue) on the photo.
+    @Published var clipWarnings = false { didSet { updateClipping() } }
+    @Published private(set) var clipOverlay: CGImage?
+    /// Whether the shown picture has blown highlights / crushed shadows anywhere (lit triangles on the histogram).
+    @Published private(set) var clipped: (highlights: Bool, shadows: Bool) = (false, false)
+    private var clipTask: Task<Void, Never>?
+
+    private func updateClipping() {
+        clipTask?.cancel()
+        guard let img = image else { return }
+        let on = clipWarnings
+        clipTask = Task { [weak self] in
+            let r = await Task.detached(priority: .utility) { Clipping.find(in: img, overlay: on) }.value
+            guard !Task.isCancelled, let self else { return }
+            self.clipped = (r.highlights, r.shadows)
+            self.clipOverlay = on ? r.overlay : nil
+        }
+    }
+
     /// The photo before any edit, for press-and-hold.
     func loadOriginal() {
         guard original == nil else { return }
@@ -1681,5 +1746,52 @@ final class EditorModel: ObservableObject {
         Task {
             original = await Task.detached(priority: .userInitiated) { Engine.shared.render(id, fitting: size, original: true)?.image }.value
         }
+    }
+}
+
+/// Blown highlights and crushed shadows in a rendered picture.
+enum Clipping {
+    struct Result {
+        var highlights = false
+        var shadows = false
+        var overlay: CGImage?
+    }
+
+    /// Where `image` has a channel at full brightness (highlights) or every channel at black (shadows), and, with
+    /// `overlay`, a picture of the same size marking them: red for highlights, blue for shadows.
+    static func find(in image: CGImage, overlay: Bool) -> Result {
+        // at most about a million pixels: the marks are drawn over the photo at screen size anyway
+        let k = Swift.min(1.0, (1_000_000.0 / Double(image.width * image.height)).squareRoot())
+        let w = Swift.max(1, Int(Double(image.width) * k)), h = Swift.max(1, Int(Double(image.height) * k))
+        var px = [UInt8](repeating: 0, count: w * h * 4)
+        let space = CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
+        let info = CGImageAlphaInfo.premultipliedLast.rawValue
+        let drawn = px.withUnsafeMutableBytes { buf -> Bool in
+            guard let ctx = CGContext(data: buf.baseAddress, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4, space: space, bitmapInfo: info) else { return false }
+            ctx.interpolationQuality = .none
+            ctx.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
+            return true
+        }
+        guard drawn else { return Result() }
+        var r = Result()
+        var marks = [UInt8](repeating: 0, count: overlay ? w * h * 4 : 0)
+        for i in 0..<(w * h) {
+            let (red, green, blue) = (px[i * 4], px[i * 4 + 1], px[i * 4 + 2])
+            if red >= 254 || green >= 254 || blue >= 254 {
+                r.highlights = true
+                if overlay { marks[i * 4] = 255; marks[i * 4 + 1] = 40; marks[i * 4 + 2] = 40; marks[i * 4 + 3] = 255 }
+            } else if red <= 1 && green <= 1 && blue <= 1 {
+                r.shadows = true
+                if overlay { marks[i * 4] = 40; marks[i * 4 + 1] = 110; marks[i * 4 + 2] = 255; marks[i * 4 + 3] = 255 }
+            }
+        }
+        if overlay, r.highlights || r.shadows {
+            let data = Data(marks) as CFData
+            if let provider = CGDataProvider(data: data) {
+                r.overlay = CGImage(width: w, height: h, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: w * 4, space: space,
+                                    bitmapInfo: CGBitmapInfo(rawValue: info), provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent)
+            }
+        }
+        return r
     }
 }

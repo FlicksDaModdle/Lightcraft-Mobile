@@ -157,6 +157,10 @@ pub struct DevelopSettings {
     pub effects: Effects,
     pub vignette: Vignette,
     pub grain: Grain,
+    /// Glow: light spreading softly from the brightest parts. Not written while off, so settings without it keep
+    /// their JSON and `hash64`.
+    #[serde(skip_serializing_if = "Glow::is_off")]
+    pub glow: Glow,
     pub detail: Detail,
     pub optics: Optics,
     pub geometry: Geometry,
@@ -193,6 +197,7 @@ impl Default for DevelopSettings {
             effects: Effects::default(),
             vignette: Vignette::default(),
             grain: Grain::default(),
+            glow: Glow::default(),
             detail: Detail::default(),
             optics: Optics::default(),
             geometry: Geometry::default(),
@@ -635,6 +640,58 @@ pub struct Vignette {
 impl Default for Vignette {
     fn default() -> Self {
         Self { amount: 0.0, midpoint: 50.0, roundness: 0.0, feather: 50.0, highlights: 0.0, style: VignetteStyle::HighlightPriority }
+    }
+}
+
+/// Glow: the brightest parts of the photo spread a soft light around them, as through a diffusion filter or
+/// on a hazy lens.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Glow {
+    /// How the light spreads.
+    pub style: GlowStyle,
+    /// How strong the glow is (0–100).
+    pub amount: f64,
+    /// Which parts glow (0–100: from only the brightest lights to the midtones as well).
+    pub range: f64,
+    /// How far it spreads (0–100: from a tight halo to a wide haze).
+    pub spread: f64,
+    /// The glow's colour (−100 cool … 100 warm).
+    pub warmth: f64,
+}
+
+impl Default for Glow {
+    fn default() -> Self {
+        Self { style: GlowStyle::Bloom, amount: 0.0, range: 50.0, spread: 50.0, warmth: 0.0 }
+    }
+}
+
+/// How [`Glow`]'s light spreads.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum GlowStyle {
+    /// Diffusion: the whole picture softens, its brighter parts most, as through a diffusion filter.
+    Diffusion,
+    /// Halation: a red-orange fringe around bright lights, as light scatters back through film.
+    Halation,
+    /// Motion: the light smears sideways, as from a moving camera.
+    Motion,
+    /// Streak: thin rays across and down from each bright light, as through a star filter.
+    Streak,
+    /// Bloom: a soft halo around bright lights, tight in the core and wide at its edge. Last, so an unknown style
+    /// reads as Bloom.
+    #[default]
+    #[serde(other)]
+    Bloom,
+}
+
+impl GlowStyle {
+    pub const ALL: [GlowStyle; 5] = [GlowStyle::Bloom, GlowStyle::Diffusion, GlowStyle::Halation, GlowStyle::Motion, GlowStyle::Streak];
+}
+
+impl Glow {
+    pub fn is_off(&self) -> bool {
+        *self == Glow::default()
     }
 }
 

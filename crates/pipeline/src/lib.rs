@@ -32,6 +32,7 @@ pub mod curve;
 pub mod dust;
 pub mod finish;
 pub mod geometry;
+pub mod glow;
 pub mod lens_blur;
 pub mod light_v3;
 // generated (`light_v3_params.rs`), kept in its own compact layout
@@ -514,7 +515,8 @@ pub fn plan<'a>(src: &Rgb32f, info: &SourceInfo, s: &'a DevelopSettings, req: &R
             // (spots grow the rendered window of 8-bit renders, the lens blur that of every
             // render; a grown window is cut back to the request)
             let work = if req.depth == OutputDepth::U8 { spots::window_for_reads(s, &frame, full_w, full_h, px_per_long, win) } else { win };
-            let mut work = lens_blur::window_for_reads(s, full_w, full_h, px_per_long, work);
+            let work = lens_blur::window_for_reads(s, full_w, full_h, px_per_long, work);
+            let mut work = glow::window_for_reads(s, full_w, full_h, px_per_long, work);
             if local::joint_colour_nr(s)
                 && let Some(params) = local::nrc_params(s, detail_scale)
             {
@@ -552,6 +554,8 @@ pub fn plan<'a>(src: &Rgb32f, info: &SourceInfo, s: &'a DevelopSettings, req: &R
         src_long,
         // and the lens blur (after noise reduction, but a draft must not reuse planes without it)
         lens_blur::key(s),
+        // and the glow after it
+        glow::key(s),
     ));
     let lin_key = hash_of((
         pre_nr_key,
@@ -756,6 +760,7 @@ fn render_impl(src: Src<'_>, info: &SourceInfo, s: &DevelopSettings, req: &Rende
             }
             local::denoise(&mut img, s, detail_scale, colour_noise.as_ref().map(|c| &c.1));
             lens_blur::apply_with(&mut img, s, frame, px_per_long, plan.mattes.as_deref(), plan.lens_subject.as_deref());
+            glow::apply(&mut img, s, px_per_long);
             Arc::new(img)
         }
     };
