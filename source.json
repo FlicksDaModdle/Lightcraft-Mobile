@@ -24,6 +24,15 @@
       },
       "versions": [
         {
+          "version": "0.1.66",
+          "buildVersion": "66",
+          "date": "2026-11-24T19:29:26Z",
+          "localizedDescription": "Build 66 of the main branch.",
+          "downloadURL": "https://github.com/FlicksDaModdle/Lightcraft-Mobile/releases/download/latent-v0.1.66/Latent.ipa",
+          "size": 23606220,
+          "minOSVersion": "26.0"
+        },
+        {
           "version": "0.1.65",
           "buildVersion": "65",
           "date": "2026-11-24T18:25:01Z",
@@ -103,22 +112,13 @@
           "downloadURL": "https://github.com/FlicksDaModdle/Lightcraft-Mobile/releases/download/latent-v0.1.57/Latent.ipa",
           "size": 22609922,
           "minOSVersion": "26.0"
-        },
-        {
-          "version": "0.1.56",
-          "buildVersion": "56",
-          "date": "2026-11-24T02:17:13Z",
-          "localizedDescription": "Build 56 of the main branch.",
-          "downloadURL": "https://github.com/FlicksDaModdle/Lightcraft-Mobile/releases/download/latent-v0.1.56/Latent.ipa",
-          "size": 22580270,
-          "minOSVersion": "26.0"
         }
       ],
-      "version": "0.1.65",
-      "versionDate": "2026-11-24T18:25:01Z",
-      "versionDescription": "Build 65 of the main branch.",
-      "downloadURL": "https://github.com/FlicksDaModdle/Lightcraft-Mobile/releases/download/latent-v0.1.65/Latent.ipa",
-      "size": 23529583
+      "version": "0.1.66",
+      "versionDate": "2026-11-24T19:29:26Z",
+      "versionDescription": "Build 66 of the main branch.",
+      "downloadURL": "https://github.com/FlicksDaModdle/Lightcraft-Mobile/releases/download/latent-v0.1.66/Latent.ipa",
+      "size": 23606220
     }
   ],
   "news": []
