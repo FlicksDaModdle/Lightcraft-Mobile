@@ -334,6 +334,9 @@ pub struct Session {
     /// generation that changes each time one is set: Lens Blur's Focus Range and Depth Range masks
     /// read them.
     pub depth_maps: std::collections::HashMap<PhotoId, (u64, Arc<lightcraft_raster::Image<u8>>)>,
+    /// Denoised pictures the host app made for photos (with a model of its own, [`Session::set_app_denoised`]):
+    /// the Denoise amount mixes them in where the engine's own denoise has none.
+    pub app_denoised: std::collections::HashMap<PhotoId, Arc<crate::media::AppTwin>>,
     /// Current time provider (ISO 8601); injectable for tests and wasm.
     pub clock: Box<dyn Fn() -> String + Send>,
     depth: u32,
@@ -474,6 +477,7 @@ impl Session {
         Session {
             library_generation: LIBRARY_GEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             depth_maps: Default::default(),
+            app_denoised: Default::default(),
             auto_sync: false,
             catalog: Catalog::new(),
             source: LibrarySource::All,

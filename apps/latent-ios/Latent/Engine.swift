@@ -161,6 +161,21 @@ final class Engine: @unchecked Sendable {
         }
     }
 
+    /// Denoise a photo with the app's model, tile by tile (see `latent_denoise`); blocks until done.
+    func denoise(_ id: UInt64, tile: Int, model: LatentDenoiseFn, progress: LatentProgressFn?) throws {
+        var error: UnsafeMutablePointer<CChar>?
+        if !latent_denoise(core, id, model, UInt32(tile), progress, &error) {
+            let message = error.map { String(cString: $0) } ?? "Denoising failed."
+            if let error { latent_string_free(error) }
+            throw EngineError(message: message)
+        }
+    }
+
+    func saveDenoised(_ id: UInt64, to url: URL) -> Bool { latent_save_denoised(core, id, url.path) }
+    func loadDenoised(_ id: UInt64, from url: URL) -> Bool { latent_load_denoised(core, id, url.path) }
+    func hasDenoised(_ id: UInt64) -> Bool { latent_has_denoised(core, id) }
+    func forgetDenoised(_ id: UInt64) { latent_forget_denoised(core, id) }
+
     /// The depth map as the photo is framed: near white, far black.
     func renderDepth(_ id: UInt64, fitting size: CGSize) -> CGImage? {
         let w = UInt32(max(1, size.width.rounded()))

@@ -141,6 +141,7 @@ final class EditorModel: ObservableObject {
     func open() {
         attempt("library.select", ["ids": [photo.id], "active": photo.id])
         loadDepth()
+        loadDenoised()
         refresh()
         render()
     }
@@ -1715,6 +1716,56 @@ final class EditorModel: ObservableObject {
                 render()
             }
         }
+    }
+
+    // MARK: AI denoise
+
+    /// How far denoising has got (0…1), while it runs.
+    @Published private(set) var denoiseProgress: Double?
+    /// The photo has a denoised picture for the Denoise amount to mix in.
+    @Published private(set) var hasDenoised = false
+    @Published var showDenoiseModel = false
+
+    private func loadDenoised() {
+        let id = photo.id
+        Task {
+            var ok = Engine.shared.hasDenoised(id)
+            if !ok { ok = await AIDenoise.load(id) }
+            hasDenoised = ok
+            if ok { render() }
+        }
+    }
+
+    /// Denoise the photo with the AI model (asking for the model first if it isn't installed).
+    func runDenoise() {
+        guard denoiseProgress == nil else { return }
+        guard DenoiseModel.installed else {
+            showDenoiseModel = true
+            return
+        }
+        let id = photo.id
+        denoiseProgress = 0
+        Task {
+            do {
+                try await AIDenoise.run(id) { [weak self] p in self?.denoiseProgress = p }
+                hasDenoised = true
+                if (controls["enhance.denoise"]?.value ?? 0) == 0 { setQuietly("enhance.denoise", 50) }
+                UINotificationFeedbackGenerator().notificationOccurred(.success)
+                toast = "Denoised"
+            } catch {
+                toast = error.localizedDescription
+            }
+            denoiseProgress = nil
+            refresh()
+            render()
+        }
+    }
+
+    /// Throw the denoised picture away (the Denoise amount then does nothing until the photo is denoised again).
+    func removeDenoise() {
+        AIDenoise.forget(photo.id)
+        hasDenoised = false
+        render()
     }
 
     // MARK: clipping

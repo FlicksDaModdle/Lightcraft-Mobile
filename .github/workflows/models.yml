@@ -1,0 +1,48 @@
+# Converts the optional AI models Silverbath downloads on request into Core ML packages and publishes them on a
+# release of this repository, where the app fetches them. Run it by hand (Actions › Models › Run workflow); each
+# model has its own release tag, so publishing one again replaces its file.
+name: Models
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  nafnet:
+    # AI denoise: NAFNet SIDD width 32 (megvii-research, MIT License)
+    runs-on: macos-15
+    env:
+      TAG: models-nafnet-sidd-w32-v1
+      FILE: NAFNet-SIDD-w32.mlpackage.zip
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install the converter
+        run: pip install "torch==2.5.1" "coremltools==8.1" "numpy<2" gdown
+      - name: Fetch the weights (the NAFNet project's own download)
+        run: |
+          gdown 1lsByk21Xw-6aW7epCwOQxvm6HYCQZPHZ -O NAFNet-SIDD-width32.pth
+          shasum -a 256 NAFNet-SIDD-width32.pth | tee weights.sha256
+      - name: Convert and check
+        run: python3 apps/latent-ios/models/convert_nafnet.py NAFNet-SIDD-width32.pth NAFNet-SIDD-w32.mlpackage
+      - name: Package
+        run: |
+          zip -r -q "$FILE" NAFNet-SIDD-w32.mlpackage
+          shasum -a 256 "$FILE" | tee package.sha256
+          ls -l "$FILE"
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          notes="NAFNet SIDD width 32 for Silverbath's AI denoise, converted to Core ML by apps/latent-ios/models/convert_nafnet.py.
+          Weights: megvii-research/NAFNet (MIT License, Copyright (c) 2022 megvii-model). Weights sha256: $(cut -d' ' -f1 weights.sha256). Package sha256: $(cut -d' ' -f1 package.sha256)."
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            gh release upload "$TAG" "$FILE" --clobber
+            gh release edit "$TAG" --notes "$notes"
+          else
+            gh release create "$TAG" "$FILE" --title "AI denoise model (NAFNet SIDD width 32)" --notes "$notes" --latest=false
+          fi

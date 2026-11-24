@@ -45,6 +45,9 @@ pub struct RenderJob {
     /// to a 64 px step) and the window would otherwise shrink the texture with 2-tap bilinear sampling, which blurs fine detail at
     /// small ratios and aliases it at large ones. The caches keep the full render.
     pub display_fit: Option<(usize, usize)>,
+    /// A denoised picture the host app made for this photo, mixed in by the Denoise amount where the source has no
+    /// denoised twin of its own.
+    pub app_twin: Option<Arc<super::AppTwin>>,
 }
 
 /// `img` shrunk to fit `max_w × max_h` with a Lanczos filter (see [`RenderJob::display_fit`]).
@@ -342,7 +345,12 @@ impl RenderJob {
             None => self.source.load_source().and_then(|s| closing().map_or(Ok(s), Err)),
         };
         match source {
-            Ok(source) => {
+            Ok(mut source) => {
+                if source.denoised.is_none()
+                    && let Some(t) = &self.app_twin
+                {
+                    source.denoised = t.twin_for(source.image.width, source.image.height);
+                }
                 // the plain picture, or (Denoise amount above 0 and a denoised picture cached) the mix the amount asks for
                 let src = &source.image_for(self.settings.denoise_amount());
                 let info = source.info_or(self.info);

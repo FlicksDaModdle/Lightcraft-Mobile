@@ -87,6 +87,17 @@ LatentImage *latent_profile_thumb(const LatentCore *core, uint64_t id, const cha
 typedef bool (*LatentInpaintFn)(const float *rgb, const float *hole, uint32_t size, float *out);
 void latent_set_inpainter(LatentInpaintFn model, uint32_t size);
 
+// AI denoise with the app's model: one tile of 3*size*size planar values (0..1, gamma encoded) in, the cleaned tile
+// written to out; false on failure. latent_denoise runs every tile of the photo (call it off the main thread) and
+// makes the result the photo's denoised picture, which the Denoise amount mixes in.
+typedef bool (*LatentDenoiseFn)(const float *input, uint32_t size, float *out);
+typedef void (*LatentProgressFn)(uint32_t done, uint32_t total);
+bool latent_denoise(const LatentCore *core, uint64_t id, LatentDenoiseFn model, uint32_t size, LatentProgressFn progress, char **error);
+bool latent_save_denoised(const LatentCore *core, uint64_t id, const char *path);
+bool latent_load_denoised(const LatentCore *core, uint64_t id, const char *path);
+bool latent_has_denoised(const LatentCore *core, uint64_t id);
+void latent_forget_denoised(const LatentCore *core, uint64_t id);
+
 // An object mask from the app's own selection (side*side coverage bytes over the uncropped,
 // oriented photo); added to `mask` with `op`, or a new mask when mask is 0. 0 on failure.
 uint32_t latent_object_from_coverage(const LatentCore *core, uint32_t mask, const char *op, uint32_t side, const uint8_t *probs, double x, double y, char **error);

@@ -444,7 +444,7 @@ struct AboutView: View {
                     Text("Open source")
                 }
                 Section {
-                    Text("Downloaded only if you ask: the SAM 3 model for AI masks (SAM License, from Meta) the depth model for blur by depth (Depth Anything V2 Small in Apple's Core ML conversion, Apache License 2.0), the AI remove model (Big LaMa, in a Core ML conversion, Apache License 2.0), and the object selection model (SAM 2.1 Small by Meta, in Apple's Core ML conversion, Apache License 2.0).")
+                    Text("Downloaded only if you ask: the SAM 3 model for AI masks (SAM License, from Meta), the depth model for blur by depth (Depth Anything V2 Small in Apple's Core ML conversion, Apache License 2.0), the AI remove model (Big LaMa, in a Core ML conversion, Apache License 2.0), the object selection model (SAM 2.1 Small by Meta, in Apple's Core ML conversion, Apache License 2.0), and the AI denoise model (NAFNet by megvii-research, MIT License, converted to Core ML for this app).")
                         .font(.system(size: 14))
                 } header: {
                     Text("AI models")

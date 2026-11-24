@@ -62,7 +62,7 @@ impl crate::Session {
         let settings_hash =
             if before { settings.hash64() ^ crate::files::hot_pixel_key(&settings) } else { self.media.settings_hashes.get(id, &settings) };
         // a new depth map renders afresh
-        let settings_hash = settings_hash ^ self.depth_salt(id);
+        let settings_hash = settings_hash ^ self.depth_salt(id) ^ self.app_denoise_salt(id, &settings);
         let salt = self.media.denoise_salt(id, &settings);
         let profile_salt = self.media.camera_profile_salt(&settings.profile.id);
         let lens = super::quick::lens_key(&p);
@@ -118,6 +118,7 @@ impl crate::Session {
             slide: None,
             preview_cut: None,
             display_fit: None,
+            app_twin: self.app_denoised.get(&id).cloned(),
         })
     }
 
@@ -208,6 +209,7 @@ impl crate::Session {
             slide: None,
             preview_cut: None,
             display_fit: None,
+            app_twin: self.app_denoised.get(&id).cloned(),
         })
     }
 
@@ -264,6 +266,7 @@ impl crate::Session {
             slide: None,
             preview_cut,
             display_fit: None,
+            app_twin: self.app_denoised.get(&id).cloned(),
         })
     }
 
@@ -638,6 +641,29 @@ impl crate::Session {
             None => lightcraft_pipeline::masks::Mattes::default().with_depth((**d).clone()),
         };
         SourceInfo { mattes: Some(Arc::new(mattes)), ..info }
+    }
+
+    /// Use `image` (the photo's source as decoded, denoised by the host app; `None` forgets it) as photo `id`'s
+    /// denoised picture: the Denoise amount (`enhance.denoise`) mixes it in.
+    pub fn set_app_denoised(&mut self, id: PhotoId, image: Option<lightcraft_raster::Rgb32f>) {
+        static GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        match image.filter(|d| d.width > 0 && d.height > 0 && d.data.len() == d.width * d.height) {
+            Some(d) => {
+                let g = GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                self.app_denoised.insert(id, Arc::new(super::AppTwin::new(g, Arc::new(d))));
+            }
+            None => {
+                self.app_denoised.remove(&id);
+            }
+        }
+    }
+
+    /// Changes whenever photo `id`'s app-made denoised picture does, while the Denoise amount uses it (0 otherwise).
+    fn app_denoise_salt(&self, id: PhotoId, s: &lightcraft_develop::DevelopSettings) -> u64 {
+        match self.app_denoised.get(&id) {
+            Some(t) if s.denoise_amount() > 0.0 => t.generation.wrapping_mul(0x2545_f491_4f6c_dd1d) | 1,
+            _ => 0,
+        }
     }
 
     /// Changes whenever photo `id`'s depth map does (0 without one).

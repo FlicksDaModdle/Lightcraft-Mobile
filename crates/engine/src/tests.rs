@@ -401,6 +401,34 @@ fn a_depth_map_drives_the_focus_range() {
     assert!(s.depth_maps.is_empty());
 }
 
+/// A denoised picture the host app made is mixed in by the Denoise amount: none at 0, all of it at 100 (a flat grey
+/// picture renders flat), in between for other amounts, and forgotten when the app takes it back.
+#[test]
+fn an_app_denoised_picture_follows_the_denoise_amount() {
+    let mut s = demo();
+    let id = s.active().unwrap();
+    let render = |s: &mut crate::Session| s.render_job(id, 96, 96, false, true).unwrap().run().rendered.unwrap().image;
+    let plain = render(&mut s);
+    let src = s.render_job(id, 100_000, 100_000, false, false).unwrap().source.load_source().unwrap().image;
+    s.set_app_denoised(id, Some(lightcraft_raster::Rgb32f::filled(src.width, src.height, [0.18; 3])));
+    assert_eq!(render(&mut s).data, plain.data, "Denoise at 0 shows the photo as it is");
+    s.execute("develop.set", &json!({"control": "enhance.denoise", "value": 100.0})).unwrap();
+    let full = render(&mut s);
+    let first = full.data[0];
+    assert!(full.data.iter().all(|p| p[..3].iter().zip(&first[..3]).all(|(a, b)| a.abs_diff(*b) <= 2)), "all of the flat picture");
+    s.execute("develop.set", &json!({"control": "enhance.denoise", "value": 50.0})).unwrap();
+    let half = render(&mut s);
+    assert!(half.data != plain.data && half.data != full.data, "a mix in between");
+    // a smaller copy of the same picture stands in, resampled
+    s.set_app_denoised(id, Some(lightcraft_raster::Rgb32f::filled(src.width / 2, src.height / 2, [0.18; 3])));
+    assert_ne!(render(&mut s).data, plain.data);
+    s.set_app_denoised(id, None);
+    assert_eq!(render(&mut s).data, plain.data, "without it the photo renders plain");
+    // a picture of another shape is not this photo's
+    s.set_app_denoised(id, Some(lightcraft_raster::Rgb32f::filled(src.width, src.width * 3 + 7, [0.18; 3])));
+    assert_eq!(render(&mut s).data, plain.data);
+}
+
 /// A Depth Range mask selects by the depth map: brightening only the near half changes the near
 /// half's pixels and leaves the far half's.
 #[test]

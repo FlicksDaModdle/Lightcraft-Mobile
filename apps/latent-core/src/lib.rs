@@ -221,6 +221,70 @@ impl Core {
         self.lock().set_depth_map(PhotoId(id), map);
     }
 
+    /// Denoise photo `id` with the app's model: `run` takes one tile, `3 × size × size` planar values 0…1 (gamma
+    /// encoded, about as a phone photo's are), and writes the cleaned tile to its second argument. The photo's source
+    /// is read at full size, balanced and brightened to the range the model knows, cut into overlapping tiles, and
+    /// only the model's change is taken back to the linear picture (so highlights beyond white keep their values).
+    /// The result becomes the photo's denoised picture, which the Denoise amount mixes in. `progress(done, total)`
+    /// is told after each tile; `run` returning false stops it with an error.
+    pub fn denoise(
+        &self,
+        id: u64,
+        size: usize,
+        run: &mut dyn FnMut(&[f32], &mut [f32]) -> bool,
+        progress: &mut dyn FnMut(usize, usize),
+    ) -> Result<(), String> {
+        if !(64..=2048).contains(&size) {
+            return Err(format!("the model's tile size {size} is not usable"));
+        }
+        // read the source with the session unlocked: decoding a large raw takes seconds
+        let job = self.lock().render_job(PhotoId(id), 1 << 20, 1 << 20, false, false).ok_or("no such photo")?;
+        let src = job.source.load_source()?.image;
+        let out = denoise_tiles(&src, size, run, progress)?;
+        self.lock().set_app_denoised(PhotoId(id), Some(out));
+        Ok(())
+    }
+
+    /// Save photo `id`'s denoised picture to `path` (half floats), to load it again next time. False without one.
+    pub fn save_denoised(&self, id: u64, path: &Path) -> Result<bool, String> {
+        let Some(t) = self.lock().app_denoised.get(&PhotoId(id)).cloned() else { return Ok(false) };
+        let img = &t.image;
+        let mut bytes = Vec::with_capacity(16 + img.data.len() * 6);
+        bytes.extend_from_slice(DENOISED_MAGIC);
+        bytes.extend_from_slice(&(img.width as u32).to_le_bytes());
+        bytes.extend_from_slice(&(img.height as u32).to_le_bytes());
+        for p in &img.data {
+            for v in p {
+                bytes.extend_from_slice(&half::f16::from_f32(*v).to_le_bytes());
+            }
+        }
+        let tmp = path.with_extension("tmp");
+        std::fs::write(&tmp, &bytes).and_then(|()| std::fs::rename(&tmp, path)).map_err(|e| format!("saving the denoised picture: {e}"))?;
+        Ok(true)
+    }
+
+    /// Load a denoised picture [`Self::save_denoised`] wrote for photo `id`. False when the file is not one.
+    pub fn load_denoised(&self, id: u64, path: &Path) -> bool {
+        let Ok(bytes) = std::fs::read(path) else { return false };
+        match parse_denoised(&bytes) {
+            Some(img) => {
+                self.lock().set_app_denoised(PhotoId(id), Some(img));
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Whether photo `id` has a denoised picture.
+    pub fn has_denoised(&self, id: u64) -> bool {
+        self.lock().app_denoised.contains_key(&PhotoId(id))
+    }
+
+    /// Take photo `id`'s denoised picture away.
+    pub fn forget_denoised(&self, id: u64) {
+        self.lock().set_app_denoised(PhotoId(id), None);
+    }
+
     /// Where the SAM 3 model (AI masks) is looked for: a folder holding `model.safetensors`,
     /// `vocab.json` and `merges.txt`.
     pub fn set_ai_model_dir(&self, dir: &Path) {
@@ -463,6 +527,111 @@ fn resample(src: &[u32], bins: usize) -> Vec<u32> {
     out
 }
 
+const DENOISED_MAGIC: &[u8; 8] = b"LTDN0001";
+
+fn parse_denoised(bytes: &[u8]) -> Option<lightcraft_raster::Rgb32f> {
+    let rest = bytes.strip_prefix(DENOISED_MAGIC.as_slice())?;
+    let w = u32::from_le_bytes(rest.get(0..4)?.try_into().ok()?) as usize;
+    let h = u32::from_le_bytes(rest.get(4..8)?.try_into().ok()?) as usize;
+    let data = rest.get(8..)?;
+    let n = w.checked_mul(h)?;
+    if w == 0 || h == 0 || n > 200_000_000 || data.len() != n.checked_mul(6)? {
+        return None;
+    }
+    let mut img = lightcraft_raster::Rgb32f::filled(w, h, [0.0; 3]);
+    for (p, c) in img.data.iter_mut().zip(data.chunks_exact(6)) {
+        *p = std::array::from_fn(|i| {
+            let v = half::f16::from_le_bytes([c[i * 2], c[i * 2 + 1]]).to_f32();
+            if v.is_finite() { v } else { 0.0 }
+        });
+    }
+    Some(img)
+}
+
+/// Context each tile reads around the part of it that is kept.
+const DENOISE_OVERLAP: usize = 32;
+
+/// [`Core::denoise`]'s work on picture `src`.
+fn denoise_tiles(
+    src: &lightcraft_raster::Rgb32f,
+    size: usize,
+    run: &mut dyn FnMut(&[f32], &mut [f32]) -> bool,
+    progress: &mut dyn FnMut(usize, usize),
+) -> Result<lightcraft_raster::Rgb32f, String> {
+    let (w, h) = (src.width, src.height);
+    if w == 0 || h == 0 {
+        return Err("the photo has no picture".into());
+    }
+    // balance the channels (a raw's are not yet white balanced) and set the brightness so that the brightest
+    // part (99.5 %) lands near white
+    let step_px = (w * h / 200_000).max(1);
+    let mut sums = [0f64; 3];
+    let mut lum: Vec<f32> = Vec::with_capacity(w * h / step_px + 1);
+    for p in src.data.iter().step_by(step_px) {
+        for c in 0..3 {
+            if p[c].is_finite() {
+                sums[c] += f64::from(p[c].max(0.0));
+            }
+        }
+        lum.push(p.iter().copied().filter(|v| v.is_finite()).fold(0f32, f32::max));
+    }
+    let gain: [f32; 3] = std::array::from_fn(|c| if sums[c] > 0.0 { ((sums[1] / sums[c]) as f32).clamp(0.25, 4.0) } else { 1.0 });
+    lum.sort_by(f32::total_cmp);
+    let top = lum.get(lum.len().saturating_sub(1) * 995 / 1000).copied().unwrap_or(1.0) * gain.iter().copied().fold(0f32, f32::max);
+    let k = if top > 1e-6 { (0.92 / top).clamp(0.02, 64.0) } else { 1.0 };
+    let scale: [f32; 3] = gain.map(|g| g * k);
+    let enc = |v: f32, c: usize| if v.is_finite() { (v * scale[c]).clamp(0.0, 1.0).powf(1.0 / 2.2) } else { 0.0 };
+    let dec = |e: f32, c: usize| e.clamp(0.0, 1.0).powf(2.2) / scale[c];
+
+    let keep = size - 2 * DENOISE_OVERLAP;
+    let (tx_n, ty_n) = (w.div_ceil(keep), h.div_ceil(keep));
+    let total = tx_n * ty_n;
+    let mut out = src.clone();
+    let plane = size * size;
+    let mut input = vec![0f32; plane * 3];
+    let mut cleaned = vec![0f32; plane * 3];
+    for ty in 0..ty_n {
+        for tx in 0..tx_n {
+            let (x0, y0) = (tx * keep, ty * keep);
+            let at = |i: usize, origin: usize, n: usize| (origin + i).saturating_sub(DENOISE_OVERLAP).min(n - 1);
+            for yy in 0..size {
+                let sy = at(yy, y0, h);
+                for xx in 0..size {
+                    let p = src.data[sy * w + at(xx, x0, w)];
+                    for c in 0..3 {
+                        input[c * plane + yy * size + xx] = enc(p[c], c);
+                    }
+                }
+            }
+            if !run(&input, &mut cleaned) {
+                return Err("the denoise model stopped".into());
+            }
+            for yy in DENOISE_OVERLAP..DENOISE_OVERLAP + keep {
+                let y = y0 + yy - DENOISE_OVERLAP;
+                if y >= h {
+                    break;
+                }
+                for xx in DENOISE_OVERLAP..DENOISE_OVERLAP + keep {
+                    let x = x0 + xx - DENOISE_OVERLAP;
+                    if x >= w {
+                        break;
+                    }
+                    let o = &mut out.data[y * w + x];
+                    for c in 0..3 {
+                        let (i, j) = (input[c * plane + yy * size + xx], cleaned[c * plane + yy * size + xx]);
+                        let d = dec(j, c) - dec(i, c);
+                        if d.is_finite() && o[c].is_finite() {
+                            o[c] += d;
+                        }
+                    }
+                }
+            }
+            progress(ty * tx_n + tx + 1, total);
+        }
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -685,6 +854,85 @@ mod tests {
         let photos = ok(&core.execute("catalog.query", ""));
         assert_eq!(photos["photos"].as_array().map_or(0, Vec::len), 0, "{photos}");
         drop(core);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The app's model sees every part of the picture once per tile and only its change comes back: a model that
+    /// changes nothing leaves the picture as it was, one that flattens each tile to grey makes the whole picture
+    /// one colour, tiles cover pictures of odd sizes, and a model that fails stops it.
+    #[test]
+    fn denoise_tiles_take_back_only_the_models_change() {
+        let mut src = lightcraft_raster::Rgb32f::filled(301, 157, [0.0; 3]);
+        for (i, p) in src.data.iter_mut().enumerate() {
+            *p = [(i % 7) as f32 * 0.05, 0.1 + (i % 3) as f32 * 0.02, 0.3];
+        }
+        let mut calls = 0;
+        let mut last = (0, 0);
+        let same = denoise_tiles(
+            &src,
+            96,
+            &mut |i, o| {
+                calls += 1;
+                o.copy_from_slice(i);
+                true
+            },
+            &mut |d, t| last = (d, t),
+        )
+        .unwrap();
+        assert!(same.data.iter().zip(&src.data).all(|(a, b)| (0..3).all(|c| (a[c] - b[c]).abs() < 1e-4)));
+        assert_eq!(last.0, last.1);
+        assert_eq!(calls, last.1);
+        let flat = denoise_tiles(
+            &src,
+            96,
+            &mut |_, o| {
+                o.fill(0.5);
+                true
+            },
+            &mut |_, _| {},
+        )
+        .unwrap();
+        let first = flat.data[0];
+        assert!(flat.data.iter().all(|p| (0..3).all(|c| (p[c] - first[c]).abs() < 1e-4)), "one colour");
+        assert!(denoise_tiles(&src, 96, &mut |_, _| false, &mut |_, _| {}).is_err());
+    }
+
+    /// A photo denoised with the app's model renders differently once Denoise is up, keeps that after saving
+    /// and loading the picture again, and a damaged file is refused.
+    #[test]
+    fn a_denoised_photo_renders_and_saves() {
+        let core = Core::demo();
+        let photos = ok(&core.execute("catalog.query", ""));
+        let id = photos["photos"][0]["id"].as_u64().unwrap();
+        ok(&core.execute("library.select", &json!({"ids": [id], "active": id}).to_string()));
+        let plain = core.render(id, 64, 64).unwrap().rgba;
+        core.denoise(
+            id,
+            128,
+            &mut |_, o| {
+                o.fill(0.4);
+                true
+            },
+            &mut |_, _| {},
+        )
+        .unwrap();
+        assert!(core.has_denoised(id));
+        assert_eq!(core.render(id, 64, 64).unwrap().rgba, plain, "Denoise at 0 changes nothing");
+        ok(&core.execute("develop.set", r#"{"control":"enhance.denoise","value":100}"#));
+        let cleaned = core.render(id, 64, 64).unwrap().rgba;
+        assert_ne!(cleaned, plain);
+        let dir = std::env::temp_dir().join(format!("latent-denoise-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("d.bin");
+        assert!(core.save_denoised(id, &file).unwrap());
+        core.forget_denoised(id);
+        assert_eq!(core.render(id, 64, 64).unwrap().rgba, plain);
+        assert!(core.load_denoised(id, &file));
+        assert_ne!(core.render(id, 64, 64).unwrap().rgba, plain);
+        let mut bytes = std::fs::read(&file).unwrap();
+        bytes.truncate(bytes.len() - 3);
+        std::fs::write(&file, &bytes).unwrap();
+        assert!(!core.load_denoised(id, &file));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

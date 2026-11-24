@@ -212,6 +212,10 @@ struct ModelSpec: Sendable {
     /// Set when the repository has the package zipped: that file's path (the packages are then
     /// the `.mlpackage` folders inside it).
     var archive: String? = nil
+    /// The archive's full address, when it is not in `repo`'s files (a release of this app's repository).
+    var archiveURL: String? = nil
+    /// Where the model may run: some lose precision on the Neural Engine.
+    var computeUnits: MLComputeUnits = .all
 
     var folder: URL {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -252,7 +256,7 @@ enum LoadedModels {
         if let m = models[url.path] { return m }
         guard FileManager.default.fileExists(atPath: url.path) else { return nil }
         let c = MLModelConfiguration()
-        c.computeUnits = .all
+        c.computeUnits = spec.computeUnits
         let m = try? MLModel(contentsOf: url, configuration: c)
         models[url.path] = m
         return m
@@ -311,6 +315,93 @@ let SelectionModel = ModelSpec(
     files: ModelSpec.coreFiles,
     size: "94 MB")
 
+/// NAFNet (megvii-research, MIT), trained on smartphone photos, converted to Core ML by this app's Models
+/// workflow and published on a release of its repository: AI denoise.
+let DenoiseModel = ModelSpec(
+    name: "NAFNetSIDDw32",
+    title: "AI denoise model",
+    blurb: "Cleans noise from photos taken in low light, keeping fine detail. Denoising a photo takes a little while (longer for large raw files); the Denoise slider then mixes the clean picture in. It runs on this iPhone; nothing is uploaded.",
+    credit: "NAFNet (Chen et al., megvii-research), trained on the SIDD smartphone photos, converted for Core ML from the NAFNet project's own weights. Licence: MIT.",
+    repo: "https://github.com/megvii-research/NAFNet",
+    packages: ["NAFNet-SIDD-w32.mlpackage"],
+    files: [],
+    size: "60 MB",
+    archive: "NAFNet-SIDD-w32.mlpackage.zip",
+    archiveURL: "https://github.com/FlicksDaModdle/Lightcraft-Mobile/releases/download/models-nafnet-sidd-w32-v1/NAFNet-SIDD-w32.mlpackage.zip",
+    computeUnits: .cpuAndGPU)
+
+/// AI denoise: runs the denoise model over a photo, tile by tile, through the engine (which cuts the tiles and
+/// takes the result back), and keeps the result so it is there next time.
+enum AIDenoise {
+    static let tile = 512
+    nonisolated(unsafe) private static var model: MLModel?
+    nonisolated(unsafe) private static var onProgress: ((Double) -> Void)?
+
+    static var folder: URL {
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        let dir = base.appendingPathComponent("Denoised", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }
+
+    static func file(_ id: UInt64) -> URL { folder.appendingPathComponent("\(id).ltdn") }
+
+    static func saved(_ id: UInt64) -> Bool { FileManager.default.fileExists(atPath: file(id).path) }
+
+    /// Load a photo's saved denoised picture into the engine (off the main thread: the file is large).
+    static func load(_ id: UInt64) async -> Bool {
+        guard saved(id) else { return false }
+        return await Task.detached(priority: .utility) { Engine.shared.loadDenoised(id, from: file(id)) }.value
+    }
+
+    static func forget(_ id: UInt64) {
+        Engine.shared.forgetDenoised(id)
+        try? FileManager.default.removeItem(at: file(id))
+    }
+
+    /// Denoise photo `id`; `progress` hears 0…1 on the main thread.
+    static func run(_ id: UInt64, progress: @escaping @MainActor (Double) -> Void) async throws {
+        guard let m = DenoiseModel.load() else { throw EngineError(message: "The AI denoise model isn't installed.") }
+        try await Task.detached(priority: .userInitiated) {
+            model = m
+            onProgress = { v in Task { @MainActor in progress(v) } }
+            defer { model = nil; onProgress = nil }
+            try Engine.shared.denoise(id, tile: tile, model: { input, size, out in
+                guard let input, let out, let m = AIDenoise.model else { return false }
+                return AIDenoise.predict(m, input, Int(size), out)
+            }, progress: { done, total in
+                AIDenoise.onProgress?(total > 0 ? Double(done) / Double(total) : 0)
+            })
+            _ = Engine.shared.saveDenoised(id, to: file(id))
+        }.value
+    }
+
+    /// One tile through the model: `3 × size × size` planar values in and out.
+    nonisolated static func predict(_ m: MLModel, _ input: UnsafePointer<Float>, _ size: Int, _ out: UnsafeMutablePointer<Float>) -> Bool {
+        let n = 3 * size * size
+        guard let arr = try? MLMultiArray(shape: [1, 3, NSNumber(value: size), NSNumber(value: size)], dataType: .float32) else { return false }
+        arr.withUnsafeMutableBufferPointer(ofType: Float.self) { b, _ in
+            b.baseAddress?.update(from: input, count: n)
+        }
+        guard let features = try? MLDictionaryFeatureProvider(dictionary: ["image": MLFeatureValue(multiArray: arr)]),
+              let result = try? m.prediction(from: features),
+              let y = result.featureValue(for: "denoised")?.multiArrayValue, y.count == n else { return false }
+        switch y.dataType {
+        case .float32:
+            y.withUnsafeBufferPointer(ofType: Float.self) { b in
+                if let base = b.baseAddress { out.update(from: base, count: n) }
+            }
+        case .float16:
+            y.withUnsafeBufferPointer(ofType: Float16.self) { b in
+                for i in 0..<n { out[i] = Float(b[i]) }
+            }
+        default:
+            for i in 0..<n { out[i] = y[i].floatValue }
+        }
+        return true
+    }
+}
+
 /// Downloads a model's files, then compiles it for this iPhone.
 @MainActor
 final class ModelDownload: ObservableObject {
@@ -336,7 +427,7 @@ final class ModelDownload: ObservableObject {
             do {
                 if let archive = spec.archive {
                     // one zip holding the package(s)
-                    guard let url = URL(string: "\(spec.repo)/resolve/main/\(archive)") else { throw EngineError(message: "Bad model address.") }
+                    guard let url = URL(string: spec.archiveURL ?? "\(spec.repo)/resolve/main/\(archive)") else { throw EngineError(message: "Bad model address.") }
                     let zip = try await fetch(url, tracked: true)
                     progress = 1
                     let out = FileManager.default.temporaryDirectory.appendingPathComponent("\(spec.name)-unzipped", isDirectory: true)

@@ -485,3 +485,95 @@ pub unsafe extern "C" fn latent_seg_from_coverage(side: u32, probs: *const u8) -
         Err(_) => std::ptr::null_mut(),
     }
 }
+
+/// The app's denoise model for one tile: `3 × size × size` planar values 0…1 in, the cleaned tile written to `out`;
+/// false on failure.
+pub type DenoiseCallback = unsafe extern "C" fn(input: *const f32, size: u32, out: *mut f32) -> bool;
+/// Told after each tile: how many are done of how many.
+pub type ProgressCallback = unsafe extern "C" fn(done: u32, total: u32);
+
+/// Denoise photo `id` with the app's model (see [`Core::denoise`]); runs until done, so call it off the main
+/// thread. False with `error` (if not null) saying why.
+///
+/// # Safety
+/// `core` from [`latent_open`]; `error` null or writable; `model` reads and writes the lengths described.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn latent_denoise(
+    core: *const Core,
+    id: u64,
+    model: DenoiseCallback,
+    size: u32,
+    progress: Option<ProgressCallback>,
+    error: *mut *mut c_char,
+) -> bool {
+    // SAFETY: as documented above
+    let Some(c) = (unsafe { self::core(core) }) else { return false };
+    let n = size as usize;
+    let mut run = |input: &[f32], out: &mut [f32]| {
+        if input.len() != n * n * 3 || out.len() != n * n * 3 {
+            return false;
+        }
+        // SAFETY: both buffers hold 3 × size × size values
+        unsafe { model(input.as_ptr(), size, out.as_mut_ptr()) }
+    };
+    let mut told = |done: usize, total: usize| {
+        if let Some(p) = progress {
+            // SAFETY: a plain callback with two numbers
+            unsafe { p(done as u32, total as u32) }
+        }
+    };
+    match c.denoise(id, n, &mut run, &mut told) {
+        Ok(()) => true,
+        Err(e) => {
+            if !error.is_null() {
+                // SAFETY: the caller promises `error` is writable
+                unsafe { *error = give_string(e) };
+            }
+            false
+        }
+    }
+}
+
+/// Save photo `id`'s denoised picture to the file at `path`; false without one or on failure.
+///
+/// # Safety
+/// `core` from [`latent_open`]; `path` NUL-terminated.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn latent_save_denoised(core: *const Core, id: u64, path: *const c_char) -> bool {
+    // SAFETY: as documented above
+    let (Some(c), Some(path)) = (unsafe { self::core(core) }, unsafe { text(path) }) else { return false };
+    c.save_denoised(id, std::path::Path::new(path)).unwrap_or(false)
+}
+
+/// Load a denoised picture saved for photo `id`; false when the file is missing or not one.
+///
+/// # Safety
+/// `core` from [`latent_open`]; `path` NUL-terminated.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn latent_load_denoised(core: *const Core, id: u64, path: *const c_char) -> bool {
+    // SAFETY: as documented above
+    let (Some(c), Some(path)) = (unsafe { self::core(core) }, unsafe { text(path) }) else { return false };
+    c.load_denoised(id, std::path::Path::new(path))
+}
+
+/// Whether photo `id` has a denoised picture.
+///
+/// # Safety
+/// `core` from [`latent_open`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn latent_has_denoised(core: *const Core, id: u64) -> bool {
+    // SAFETY: as documented above
+    unsafe { self::core(core) }.is_some_and(|c| c.has_denoised(id))
+}
+
+/// Take photo `id`'s denoised picture away.
+///
+/// # Safety
+/// `core` from [`latent_open`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn latent_forget_denoised(core: *const Core, id: u64) {
+    // SAFETY: as documented above
+    if let Some(c) = unsafe { self::core(core) } {
+        c.forget_denoised(id);
+    }
+}

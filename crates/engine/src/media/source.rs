@@ -145,6 +145,85 @@ impl Twin {
     }
 }
 
+/// A denoised picture of a photo's source that the host app made ([`crate::Session::set_app_denoised`]), and the
+/// last copy of it fitted to a source size.
+pub struct AppTwin {
+    /// Changes with every new picture, for render keys.
+    pub generation: u64,
+    pub image: Arc<Rgb32f>,
+    sized: std::sync::Mutex<Option<Arc<Twin>>>,
+}
+
+impl AppTwin {
+    pub fn new(generation: u64, image: Arc<Rgb32f>) -> AppTwin {
+        AppTwin { generation, image, sized: std::sync::Mutex::new(None) }
+    }
+
+    /// The picture as a [`Twin`] of a `w × h` source: itself at that size, else resampled to it (averaged when
+    /// smaller, bilinear when larger). `None` when the shapes differ (another crop of the file, a rotated decode).
+    pub fn twin_for(&self, w: usize, h: usize) -> Option<Arc<Twin>> {
+        let (iw, ih) = (self.image.width, self.image.height);
+        if w == 0 || h == 0 || iw == 0 || ih == 0 {
+            return None;
+        }
+        // the same picture: the aspect agrees within a couple of pixels
+        if ((iw as f64 / ih as f64) - (w as f64 / h as f64)).abs() * (w.max(h) as f64) > 2.5 {
+            return None;
+        }
+        let mut memo = self.sized.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(t) = memo.as_ref()
+            && t.image.width == w
+            && t.image.height == h
+        {
+            return Some(t.clone());
+        }
+        let image = if (iw, ih) == (w, h) { self.image.clone() } else { Arc::new(resample(&self.image, w, h)) };
+        let t = Arc::new(Twin::new(image));
+        *memo = Some(t.clone());
+        Some(t)
+    }
+}
+
+/// `img` at `w × h`: each output pixel the average of the input it covers (bilinear when enlarging).
+fn resample(img: &Rgb32f, w: usize, h: usize) -> Rgb32f {
+    use rayon::prelude::*;
+    let (iw, ih) = (img.width, img.height);
+    let (sx, sy) = (iw as f64 / w as f64, ih as f64 / h as f64);
+    let mut out = Rgb32f::filled(w, h, [0.0; 3]);
+    out.data.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
+        for (x, o) in row.iter_mut().enumerate() {
+            if sx <= 1.0 && sy <= 1.0 {
+                let fx = ((x as f64 + 0.5) * sx - 0.5).clamp(0.0, (iw - 1) as f64);
+                let fy = ((y as f64 + 0.5) * sy - 0.5).clamp(0.0, (ih - 1) as f64);
+                let (x0, y0) = (fx.floor() as usize, fy.floor() as usize);
+                let (x1, y1) = ((x0 + 1).min(iw - 1), (y0 + 1).min(ih - 1));
+                let (tx, ty) = ((fx - x0 as f64) as f32, (fy - y0 as f64) as f32);
+                let (a, b, c, d) = (img.get(x0, y0), img.get(x1, y0), img.get(x0, y1), img.get(x1, y1));
+                *o = std::array::from_fn(|i| {
+                    let top = a[i] + (b[i] - a[i]) * tx;
+                    let bottom = c[i] + (d[i] - c[i]) * tx;
+                    top + (bottom - top) * ty
+                });
+            } else {
+                let (x0, x1) = (((x as f64) * sx) as usize, (((x + 1) as f64 * sx).ceil() as usize).min(iw).max(1));
+                let (y0, y1) = (((y as f64) * sy) as usize, (((y + 1) as f64 * sy).ceil() as usize).min(ih).max(1));
+                let (x0, y0) = (x0.min(x1 - 1), y0.min(y1 - 1));
+                let mut acc = [0f32; 3];
+                for yy in y0..y1 {
+                    for p in &img.data[yy * iw + x0..yy * iw + x1] {
+                        for i in 0..3 {
+                            acc[i] += p[i];
+                        }
+                    }
+                }
+                let n = ((y1 - y0) * (x1 - x0)) as f32;
+                *o = acc.map(|v| v / n);
+            }
+        }
+    });
+    out
+}
+
 /// Pixels and the source interpretation learned while decoding; they must be cached together.
 #[derive(Clone)]
 pub struct DecodedSource {

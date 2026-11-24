@@ -224,7 +224,7 @@ enum Tool: String, CaseIterable, Identifiable {
         switch self {
         case .effects: [("Effects", ["effects."]), ("Vignette", ["vignette."]), ("Grain", ["grain."]), ("Glow", ["glow."])]
         case .detail:
-            [("Sharpening", ["detail.sharpen"]), ("Noise", ["detail.nrLuminance", "detail.nrDetail", "detail.nrContrast"]), ("Color noise", ["detail.nrColor"])]
+            [("Sharpening", ["detail.sharpen"]), ("Noise", ["detail.nrLuminance", "detail.nrDetail", "detail.nrContrast"]), ("Color noise", ["detail.nrColor"]), ("AI denoise", ["enhance.denoise"])]
         default: []
         }
     }

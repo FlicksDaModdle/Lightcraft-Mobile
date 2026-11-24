@@ -78,6 +78,9 @@ struct EditorView: View {
                 model.prepareSelection()
             }
         }
+        .sheet(isPresented: $model.showDenoiseModel) {
+            ModelSheet(DenoiseModel) { model.runDenoise() }
+        }
         .sheet(isPresented: $model.showInpaintModel) {
             ModelSheet(InpaintModel) { model.inpaintModelInstalled() }
         }
@@ -801,6 +804,7 @@ struct EditorView: View {
                 }
                 if !model.tool.tabs.isEmpty { tabs }
                 if model.tool == .effects, model.tool.tabs.indices.contains(model.tab), model.tool.tabs[model.tab].name == "Glow" { glowStyleRow }
+                if model.tool == .detail, model.tool.tabs.indices.contains(model.tab), model.tool.tabs[model.tab].name == "AI denoise" { aiDenoiseRow }
                 if model.tool == .mixer { bandChips }
                 if model.tool == .grading { rangeChips }
             }
@@ -900,6 +904,55 @@ struct EditorView: View {
         .padding(.horizontal, 16)
         .padding(.top, 12)
         .padding(.bottom, 4)
+    }
+
+    /// AI denoise: make the photo's denoised picture (the Amount slider below mixes it in), see how far it has got,
+    /// or do it again.
+    @ViewBuilder
+    private var aiDenoiseRow: some View {
+        HStack(spacing: 10) {
+            if let p = model.denoiseProgress {
+                ProgressView(value: p)
+                    .tint(Theme.accent)
+                    .accessibilityLabel(Text("Denoising"))
+                Text("\(Int((p * 100).rounded()))%")
+                    .font(.system(size: 13, weight: .semibold))
+                    .monospacedDigit()
+                    .foregroundStyle(.white)
+            } else if model.hasDenoised {
+                Label("Denoised", systemImage: "checkmark.circle.fill")
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundStyle(.white)
+                Spacer()
+                Menu {
+                    Button { model.runDenoise() } label: { Label("Denoise again", systemImage: "arrow.clockwise") }
+                    Button(role: .destructive) { model.removeDenoise() } label: { Label("Remove the denoised picture", systemImage: "trash") }
+                } label: {
+                    Image(systemName: "ellipsis").frame(width: 36, height: 32).latentGlass(in: Capsule(), interactive: true)
+                }
+                .foregroundStyle(.white)
+                .accessibilityLabel(Text("AI denoise options"))
+            } else {
+                Text("Clean noise with AI, then set how much with Amount.")
+                    .font(.system(size: 12))
+                    .foregroundStyle(Theme.secondaryText)
+                    .lineLimit(2)
+                Spacer(minLength: 6)
+                Button { model.runDenoise() } label: {
+                    Label("Denoise", systemImage: "sparkles")
+                        .font(.system(size: 13, weight: .semibold))
+                        .lineLimit(1)
+                        .fixedSize()
+                        .padding(.horizontal, 12)
+                        .frame(height: 32)
+                        .latentGlass(in: Capsule(), tint: Theme.accent, interactive: true)
+                }
+                .foregroundStyle(.white)
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, 20)
+        .padding(.top, 10)
     }
 
     /// How Glow spreads light.
