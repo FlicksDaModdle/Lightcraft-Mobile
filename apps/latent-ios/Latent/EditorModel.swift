@@ -1729,6 +1729,8 @@ final class EditorModel: ObservableObject {
     /// The photo has a denoised picture for the Denoise amount to mix in.
     @Published private(set) var hasDenoised = false
     @Published var showDenoiseModel = false
+    /// Why the last denoise failed, shown in the panel until the next try.
+    @Published private(set) var denoiseError: String?
 
     private func loadDenoised() {
         let id = photo.id
@@ -1749,15 +1751,18 @@ final class EditorModel: ObservableObject {
         }
         let id = photo.id
         denoiseProgress = 0
+        denoiseError = nil
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
         Task {
             do {
-                try await AIDenoise.run(id) { [weak self] p in self?.denoiseProgress = p }
+                try await AIDenoise.run(id) { [weak self] p in self?.denoiseProgress = Swift.max(p, 0.001) }
                 hasDenoised = true
                 if (controls["enhance.denoise"]?.value ?? 0) == 0 { setQuietly("enhance.denoise", 50) }
                 UINotificationFeedbackGenerator().notificationOccurred(.success)
                 toast = "Denoised"
             } catch {
-                toast = error.localizedDescription
+                denoiseError = error.localizedDescription
+                UINotificationFeedbackGenerator().notificationOccurred(.error)
             }
             denoiseProgress = nil
             refresh()

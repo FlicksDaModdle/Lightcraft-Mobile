@@ -336,6 +336,8 @@ enum AIDenoise {
     static let tile = 512
     nonisolated(unsafe) private static var model: MLModel?
     nonisolated(unsafe) private static var onProgress: ((Double) -> Void)?
+    /// Why the model last failed on a tile, to say so.
+    nonisolated(unsafe) private static var failure: String?
 
     static var folder: URL {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -361,17 +363,22 @@ enum AIDenoise {
 
     /// Denoise photo `id`; `progress` hears 0…1 on the main thread.
     static func run(_ id: UInt64, progress: @escaping @MainActor (Double) -> Void) async throws {
-        guard let m = DenoiseModel.load() else { throw EngineError(message: "The AI denoise model isn't installed.") }
+        guard let m = DenoiseModel.load() else { throw EngineError(message: "The AI denoise model couldn't be loaded. Delete it in Settings and download it again.") }
         try await Task.detached(priority: .userInitiated) {
             model = m
+            failure = nil
             onProgress = { v in Task { @MainActor in progress(v) } }
             defer { model = nil; onProgress = nil }
-            try Engine.shared.denoise(id, tile: tile, model: { input, size, out in
-                guard let input, let out, let m = AIDenoise.model else { return false }
-                return AIDenoise.predict(m, input, Int(size), out)
-            }, progress: { done, total in
-                AIDenoise.onProgress?(total > 0 ? Double(done) / Double(total) : 0)
-            })
+            do {
+                try Engine.shared.denoise(id, tile: tile, model: { input, size, out in
+                    guard let input, let out, let m = AIDenoise.model else { return false }
+                    return AIDenoise.predict(m, input, Int(size), out)
+                }, progress: { done, total in
+                    AIDenoise.onProgress?(total > 0 ? Double(done) / Double(total) : 0)
+                })
+            } catch {
+                throw EngineError(message: [error.localizedDescription, failure].compactMap { $0 }.joined(separator: ": "))
+            }
             _ = Engine.shared.saveDenoised(id, to: file(id))
         }.value
     }
@@ -379,13 +386,27 @@ enum AIDenoise {
     /// One tile through the model: `3 × size × size` planar values in and out.
     nonisolated static func predict(_ m: MLModel, _ input: UnsafePointer<Float>, _ size: Int, _ out: UnsafeMutablePointer<Float>) -> Bool {
         let n = 3 * size * size
-        guard let arr = try? MLMultiArray(shape: [1, 3, NSNumber(value: size), NSNumber(value: size)], dataType: .float32) else { return false }
-        arr.withUnsafeMutableBufferPointer(ofType: Float.self) { b, _ in
-            b.baseAddress?.update(from: input, count: n)
+        let y: MLMultiArray
+        do {
+            let arr = try MLMultiArray(shape: [1, 3, NSNumber(value: size), NSNumber(value: size)], dataType: .float32)
+            arr.withUnsafeMutableBufferPointer(ofType: Float.self) { b, _ in
+                b.baseAddress?.update(from: input, count: n)
+            }
+            let features = try MLDictionaryFeatureProvider(dictionary: ["image": MLFeatureValue(multiArray: arr)])
+            let result = try m.prediction(from: features)
+            guard let out = result.featureValue(for: "denoised")?.multiArrayValue else {
+                failure = "the model gave no picture (outputs: \(result.featureNames.sorted().joined(separator: ", ")))"
+                return false
+            }
+            guard out.count == n else {
+                failure = "the model gave a picture of the wrong size (\(out.shape))"
+                return false
+            }
+            y = out
+        } catch {
+            failure = error.localizedDescription
+            return false
         }
-        guard let features = try? MLDictionaryFeatureProvider(dictionary: ["image": MLFeatureValue(multiArray: arr)]),
-              let result = try? m.prediction(from: features),
-              let y = result.featureValue(for: "denoised")?.multiArrayValue, y.count == n else { return false }
         switch y.dataType {
         case .float32:
             y.withUnsafeBufferPointer(ofType: Float.self) { b in

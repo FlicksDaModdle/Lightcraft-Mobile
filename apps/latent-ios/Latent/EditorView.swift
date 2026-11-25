@@ -941,13 +941,37 @@ struct EditorView: View {
     private var aiDenoiseRow: some View {
         HStack(spacing: 10) {
             if let p = model.denoiseProgress {
-                ProgressView(value: p)
-                    .tint(Theme.accent)
-                    .accessibilityLabel(Text("Denoising"))
-                Text("\(Int((p * 100).rounded()))%")
-                    .font(.system(size: 13, weight: .semibold))
-                    .monospacedDigit()
-                    .foregroundStyle(.white)
+                if p == 0 {
+                    // the photo is read at full size before the first tile: a large raw takes a few seconds
+                    ProgressView().tint(.white)
+                    Text("Reading the photo\u{2026}").font(.system(size: 13)).foregroundStyle(.white)
+                    Spacer()
+                } else {
+                    ProgressView(value: p)
+                        .tint(Theme.accent)
+                        .accessibilityLabel(Text("Denoising"))
+                    Text("\(Int((p * 100).rounded()))%")
+                        .font(.system(size: 13, weight: .semibold))
+                        .monospacedDigit()
+                        .foregroundStyle(.white)
+                }
+            } else if let e = model.denoiseError {
+                Label(e, systemImage: "exclamationmark.triangle.fill")
+                    .font(.system(size: 12))
+                    .foregroundStyle(Color(red: 1, green: 0.45, blue: 0.4))
+                    .lineLimit(3)
+                    .textSelection(.enabled)
+                Spacer(minLength: 6)
+                Button { model.runDenoise() } label: {
+                    Text("Try again")
+                        .font(.system(size: 13, weight: .semibold))
+                        .fixedSize()
+                        .padding(.horizontal, 12)
+                        .frame(height: 32)
+                        .latentGlass(in: Capsule(), interactive: true)
+                }
+                .foregroundStyle(.white)
+                .buttonStyle(.plain)
             } else if model.hasDenoised {
                 Label("Denoised", systemImage: "checkmark.circle.fill")
                     .font(.system(size: 14, weight: .medium))
