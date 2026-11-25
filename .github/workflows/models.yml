@@ -31,7 +31,8 @@ jobs:
         run: python3 apps/latent-ios/models/convert_nafnet.py NAFNet-SIDD-width32.pth NAFNet-SIDD-w32.mlpackage
       - name: Package
         run: |
-          zip -r -q "$FILE" NAFNet-SIDD-w32.mlpackage
+          # stored, not compressed: the weights hardly compress, and the app then only copies the files out
+          zip -0 -r -q "$FILE" NAFNet-SIDD-w32.mlpackage
           shasum -a 256 "$FILE" | tee package.sha256
           ls -l "$FILE"
       - name: Publish
