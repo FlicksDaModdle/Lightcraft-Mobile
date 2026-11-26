@@ -196,6 +196,8 @@ struct AssetThumb: View {
                 }
             }
             .clipped()
+            // clipping hides the overflow of a filled picture but not its touches: keep them to the square
+            .contentShape(Rectangle())
             .overlay(alignment: .topLeading) {
                 if edited {
                     Image(systemName: "slider.horizontal.3")

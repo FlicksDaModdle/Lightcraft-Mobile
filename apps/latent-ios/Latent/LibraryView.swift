@@ -486,6 +486,8 @@ struct ThumbView: View {
                 }
             }
             .clipped()
+            // clipping hides the overflow of a filled picture but not its touches: keep them to the square
+            .contentShape(Rectangle())
             .task(id: photo.id) {
                 image = Thumbnails.shared.cached(photo.id)
                 if image == nil {
