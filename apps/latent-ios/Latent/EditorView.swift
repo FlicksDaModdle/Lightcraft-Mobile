@@ -1578,6 +1578,12 @@ struct EditorView: View {
         Button { model.maskCommand("mask.visible", ["visible": !m.visible]) } label: {
             Label(m.visible ? "Hide its effect" : "Show its effect", systemImage: m.visible ? "eye.slash" : "eye")
         }
+        if model.masks.count > 1 {
+            Button { model.maskCommand("mask.move", ["delta": -1]) } label: { Label("Move up the list", systemImage: "arrow.up") }
+                .disabled(model.masks.first?.id == m.id)
+            Button { model.maskCommand("mask.move", ["delta": 1]) } label: { Label("Move down the list", systemImage: "arrow.down") }
+                .disabled(model.masks.last?.id == m.id)
+        }
         Divider()
         Button(role: .destructive) { withAnimation(.glass) { model.maskCommand("mask.delete") } } label: { Label("Delete mask", systemImage: "trash") }
     }
@@ -3035,6 +3041,16 @@ struct MaskCanvas: View {
     var zoom: CGFloat = 1
     @State private var stroke: [CGPoint] = []
     @State private var start: (part: MaskPart, at: CGPoint)?
+    /// What the drag took hold of: a gradient's handle, its body, or nothing (a new gradient is drawn).
+    @State private var grip: Grip?
+
+    enum Grip {
+        case linearStart, linearEnd, linearMove, linearRotate, linearNew
+        case radialMove, radialWidth, radialHeight, radialSize, radialRotate, radialNew
+    }
+
+    /// How far from a handle a touch still takes it.
+    private let reach: CGFloat = 30
 
     /// Where the picture sits in the view, fitted.
     private var fitted: CGRect {
@@ -3092,40 +3108,15 @@ struct MaskCanvas: View {
                     case "brush":
                         if stroke.isEmpty { model.beginMask("Brush") }
                         stroke.append(g.location)
-                    case "linear":
+                    case "linear", "radial":
                         if start == nil {
                             start = (m, g.startLocation)
-                            model.beginMask("Linear Gradient")
+                            grip = grab(m, at: g.startLocation)
+                            model.beginMask(m.kind == "linear" ? "Linear Gradient" : "Radial Gradient")
+                            if grip != .linearNew && grip != .radialNew { UIImpactFeedbackGenerator(style: .light).impactOccurred() }
                         }
-                        let a = toMask(g.startLocation)
-                        let b = toMask(g.location)
-                        model.updateMaskShape(["kind": "linear", "start": ["x": a.x, "y": a.y], "end": ["x": b.x, "y": b.y]])
-                    case "radial":
-                        if start == nil {
-                            start = (m, g.startLocation)
-                            model.beginMask("Radial Gradient")
-                        }
-                        guard let s = start else { return }
-                        var shape = s.part.shape
-                        let c0 = s.part.point("center") ?? CGPoint(x: 0.5, y: 0.5)
-                        let cv = toView(c0)
-                        let rx = s.part.number("rx", 0.2)
-                        let inside = hypot(s.at.x - cv.x, s.at.y - cv.y) < CGFloat(rx) * perLongEdge * 0.8
-                        if inside {
-                            // move it
-                            let d0 = toMask(s.at)
-                            let d1 = toMask(g.location)
-                            shape["center"] = ["x": c0.x + d1.x - d0.x, "y": c0.y + d1.y - d0.y]
-                        } else {
-                            // draw a new one out from where the drag began
-                            let c = toMask(s.at)
-                            let r = Swift.max(Double(hypot(g.location.x - s.at.x, g.location.y - s.at.y) / perLongEdge), 0.02)
-                            let ratio = s.part.number("ry", 0.16) / Swift.max(rx, 1e-3)
-                            shape["center"] = ["x": c.x, "y": c.y]
-                            shape["rx"] = r
-                            shape["ry"] = r * ratio
-                        }
-                        model.updateMaskShape(shape)
+                        guard let s = start, let grip else { return }
+                        if let shape = reshape(s.part, grip, from: s.at, to: g.location) { model.updateMaskShape(shape) }
                     default:
                         break
                     }
@@ -3145,20 +3136,153 @@ struct MaskCanvas: View {
                     }
                     if start != nil {
                         start = nil
+                        grip = nil
                         model.end()
                     }
                 }
         )
         .accessibilityLabel(Text("Mask drawing area"))
+        .accessibilityHint(Text(model.currentPart.map { ["linear", "radial"].contains($0.kind) ? "Drag inside the gradient to move it, drag its round handles to resize or turn it, or drag elsewhere to draw a new one" : "" } ?? ""))
+    }
+
+    // MARK: gradient handles
+
+    private func rotate(_ v: CGPoint, _ degrees: Double) -> CGPoint {
+        let a = degrees * .pi / 180
+        return CGPoint(x: v.x * cos(a) - v.y * sin(a), y: v.x * sin(a) + v.y * cos(a))
+    }
+
+    private func add(_ a: CGPoint, _ b: CGPoint) -> CGPoint { CGPoint(x: a.x + b.x, y: a.y + b.y) }
+    private func dist(_ a: CGPoint, _ b: CGPoint) -> CGFloat { hypot(a.x - b.x, a.y - b.y) }
+
+    /// A linear gradient's ends, middle and rotation handle, in view points.
+    private func linearHandles(_ m: MaskPart) -> (a: CGPoint, b: CGPoint, mid: CGPoint, turn: CGPoint)? {
+        guard let a0 = m.point("start"), let b0 = m.point("end") else { return nil }
+        let a = toView(a0), b = toView(b0)
+        let mid = CGPoint(x: (a.x + b.x) / 2, y: (a.y + b.y) / 2)
+        let len = Swift.max(dist(a, b), 1)
+        // off to one side of the middle, across the gradient
+        let n = CGPoint(x: -(b.y - a.y) / len, y: (b.x - a.x) / len)
+        return (a, b, mid, CGPoint(x: mid.x + n.x * 56, y: mid.y + n.y * 56))
+    }
+
+    /// A radial gradient's centre and handles, in view points: width, height, size (both) and rotation.
+    private func radialHandles(_ m: MaskPart) -> (c: CGPoint, rx: CGFloat, ry: CGFloat, angle: Double, width: CGPoint, height: CGPoint, size: CGPoint, turn: CGPoint)? {
+        guard let c0 = m.point("center") else { return nil }
+        let c = toView(c0)
+        let rx = Swift.max(CGFloat(m.number("rx", 0.2)) * perLongEdge, 6)
+        let ry = Swift.max(CGFloat(m.number("ry", 0.16)) * perLongEdge, 6)
+        let angle = m.number("angle", 0)
+        return (c, rx, ry, angle,
+                add(c, rotate(CGPoint(x: rx, y: 0), angle)),
+                add(c, rotate(CGPoint(x: 0, y: ry), angle)),
+                add(c, rotate(CGPoint(x: rx * 0.7071, y: ry * 0.7071), angle)),
+                add(c, rotate(CGPoint(x: 0, y: -(ry + 44)), angle)))
+    }
+
+    /// What a touch at `p` takes hold of.
+    private func grab(_ m: MaskPart, at p: CGPoint) -> Grip {
+        if m.kind == "linear" {
+            guard let h = linearHandles(m) else { return .linearNew }
+            if dist(p, h.turn) < reach { return .linearRotate }
+            if dist(p, h.a) < reach { return .linearStart }
+            if dist(p, h.b) < reach { return .linearEnd }
+            // between the two lines: the whole gradient moves
+            let d = CGPoint(x: h.b.x - h.a.x, y: h.b.y - h.a.y)
+            let len2 = Swift.max(d.x * d.x + d.y * d.y, 1)
+            let t = ((p.x - h.a.x) * d.x + (p.y - h.a.y) * d.y) / len2
+            return (-0.15...1.15).contains(t) ? .linearMove : .linearNew
+        }
+        guard let h = radialHandles(m) else { return .radialNew }
+        if dist(p, h.turn) < reach { return .radialRotate }
+        if dist(p, h.size) < reach { return .radialSize }
+        if dist(p, h.width) < reach { return .radialWidth }
+        if dist(p, h.height) < reach { return .radialHeight }
+        // inside the ellipse: it moves
+        let q = rotate(CGPoint(x: p.x - h.c.x, y: p.y - h.c.y), -h.angle)
+        let inside = pow(q.x / h.rx, 2) + pow(q.y / h.ry, 2) <= 1.1
+        return inside ? .radialMove : .radialNew
+    }
+
+    /// The shape after dragging `grip` from `from` to `to`.
+    private func reshape(_ m: MaskPart, _ grip: Grip, from: CGPoint, to: CGPoint) -> [String: Any]? {
+        let pt = { (p: CGPoint) -> [String: Any] in ["x": p.x, "y": p.y] }
+        let delta = CGPoint(x: to.x - from.x, y: to.y - from.y)
+        var shape = m.shape
+        switch grip {
+        case .linearNew:
+            return ["kind": "linear", "start": pt(toMask(from)), "end": pt(toMask(to))]
+        case .linearStart, .linearEnd, .linearMove, .linearRotate:
+            guard let h = linearHandles(m) else { return nil }
+            var a = h.a, b = h.b
+            switch grip {
+            case .linearStart: a = add(h.a, delta)
+            case .linearEnd: b = add(h.b, delta)
+            case .linearMove:
+                a = add(h.a, delta)
+                b = add(h.b, delta)
+            default:
+                // turn about the middle by the angle the finger swept around it
+                let a0 = atan2(from.y - h.mid.y, from.x - h.mid.x), a1 = atan2(to.y - h.mid.y, to.x - h.mid.x)
+                let turn = Double(a1 - a0) * 180 / .pi
+                a = add(h.mid, rotate(CGPoint(x: h.a.x - h.mid.x, y: h.a.y - h.mid.y), turn))
+                b = add(h.mid, rotate(CGPoint(x: h.b.x - h.mid.x, y: h.b.y - h.mid.y), turn))
+            }
+            shape["kind"] = "linear"
+            shape["start"] = pt(toMask(a))
+            shape["end"] = pt(toMask(b))
+            return shape
+        case .radialNew:
+            let r = Swift.max(Double(dist(from, to) / perLongEdge), 0.02)
+            let ratio = m.number("ry", 0.16) / Swift.max(m.number("rx", 0.2), 1e-3)
+            shape["kind"] = "radial"
+            shape["center"] = pt(toMask(from))
+            shape["rx"] = r
+            shape["ry"] = r * ratio
+            return shape
+        case .radialMove, .radialWidth, .radialHeight, .radialSize, .radialRotate:
+            guard let h = radialHandles(m) else { return nil }
+            let local = rotate(CGPoint(x: to.x - h.c.x, y: to.y - h.c.y), -h.angle)
+            let floor: CGFloat = 8
+            switch grip {
+            case .radialMove:
+                shape["center"] = pt(toMask(add(h.c, delta)))
+            case .radialWidth:
+                shape["rx"] = Double(Swift.max(abs(local.x), floor) / perLongEdge)
+            case .radialHeight:
+                shape["ry"] = Double(Swift.max(abs(local.y), floor) / perLongEdge)
+            case .radialSize:
+                let k = dist(to, h.c) / Swift.max(dist(from, h.c), 1)
+                shape["rx"] = Double(Swift.max(h.rx * k, floor) / perLongEdge)
+                shape["ry"] = Double(Swift.max(h.ry * k, floor) / perLongEdge)
+            default:
+                var deg = Double(atan2(to.y - h.c.y, to.x - h.c.x)) * 180 / .pi + 90
+                // snaps to level and upright
+                for snap in [-180.0, -90, 0, 90, 180] where abs(deg - snap) < 4 { deg = snap }
+                shape["angle"] = deg
+            }
+            shape["kind"] = "radial"
+            return shape
+        }
+    }
+
+    /// A round handle: filled for one you drag, ringed for one you turn or size.
+    private func knob(_ at: CGPoint, filled: Bool = true, symbol: String? = nil) -> some View {
+        ZStack {
+            Circle().fill(filled ? Color.white : Color.black.opacity(0.35))
+            Circle().strokeBorder(Color.white, lineWidth: 2)
+            if let symbol { Image(systemName: symbol).font(.system(size: 9, weight: .bold)).foregroundStyle(.white) }
+        }
+        .frame(width: symbol == nil ? 16 : 22, height: symbol == nil ? 16 : 22)
+        .position(at)
     }
 
     @ViewBuilder
     private func outline(_ m: MaskPart) -> some View {
         switch m.kind {
         case "linear":
-            if let a = m.point("start"), let b = m.point("end") {
-                let va = toView(a)
-                let vb = toView(b)
+            if let h = linearHandles(m) {
+                let va = h.a, vb = h.b
                 let dx = vb.x - va.x
                 let dy = vb.y - va.y
                 let len = Swift.max(hypot(dx, dy), 1)
@@ -3174,12 +3298,16 @@ struct MaskCanvas: View {
                     Path { p in
                         p.move(to: va)
                         p.addLine(to: vb)
+                        p.move(to: h.mid)
+                        p.addLine(to: h.turn)
                     }
                     .stroke(Color.white.opacity(0.8), style: StrokeStyle(lineWidth: 1, dash: [5, 4]))
-                    Circle().fill(Color.white).frame(width: 12, height: 12).position(va)
-                    Circle().strokeBorder(Color.white, lineWidth: 2).frame(width: 12, height: 12).position(vb)
+                    knob(va)
+                    knob(vb, filled: false)
+                    knob(h.mid, filled: false, symbol: "arrow.up.and.down.and.arrow.left.and.right")
+                    knob(h.turn, filled: false, symbol: "arrow.trianglehead.2.clockwise.rotate.90")
                 }
-                .clipShape(Rectangle().path(in: fitted))
+                .clipShape(Rectangle().path(in: fitted.insetBy(dx: -30, dy: -30)))
                 .shadow(color: .black.opacity(0.5), radius: 1.5)
             }
         case "object":
@@ -3197,17 +3325,32 @@ struct MaskCanvas: View {
             }
             .shadow(color: .black.opacity(0.5), radius: 1.5)
         case "radial":
-            if let c = m.point("center") {
-                let vc = toView(c)
-                let rx = CGFloat(m.number("rx", 0.2)) * perLongEdge
-                let ry = CGFloat(m.number("ry", 0.16)) * perLongEdge
+            if let h = radialHandles(m) {
+                let feather = CGFloat(Swift.min(Swift.max(m.number("feather", 50), 0), 100) / 100)
                 ZStack {
                     Ellipse()
                         .stroke(Color.white, lineWidth: 1.5)
-                        .frame(width: rx * 2, height: ry * 2)
-                        .rotationEffect(.degrees(m.number("angle", 0)))
-                        .position(vc)
-                    Circle().fill(Color.white).frame(width: 10, height: 10).position(vc)
+                        .frame(width: h.rx * 2, height: h.ry * 2)
+                        .rotationEffect(.degrees(h.angle))
+                        .position(h.c)
+                    // where the feather starts: the inner edge of the soft fall-off
+                    if feather > 0.02 {
+                        Ellipse()
+                            .stroke(Color.white.opacity(0.5), style: StrokeStyle(lineWidth: 1, dash: [4, 4]))
+                            .frame(width: h.rx * 2 * (1 - feather), height: h.ry * 2 * (1 - feather))
+                            .rotationEffect(.degrees(h.angle))
+                            .position(h.c)
+                    }
+                    Path { p in
+                        p.move(to: add(h.c, rotate(CGPoint(x: 0, y: -h.ry), h.angle)))
+                        p.addLine(to: h.turn)
+                    }
+                    .stroke(Color.white.opacity(0.8), style: StrokeStyle(lineWidth: 1, dash: [3, 3]))
+                    knob(h.c, filled: false, symbol: "arrow.up.and.down.and.arrow.left.and.right")
+                    knob(h.width)
+                    knob(h.height)
+                    knob(h.size, filled: false, symbol: "arrow.up.left.and.arrow.down.right")
+                    knob(h.turn, filled: false, symbol: "arrow.trianglehead.2.clockwise.rotate.90")
                 }
                 .shadow(color: .black.opacity(0.5), radius: 1.5)
             }
