@@ -4,7 +4,7 @@ import UniformTypeIdentifiers
 
 /// The two places photos come from: Latent's own library, and the photos on this iPhone.
 enum HomeTab: String, Hashable {
-    case library, device, search
+    case library, device, people, places, search
 }
 
 /// The home screen: the system's Liquid Glass tab bar (Camera Roll first, Library, and Search on its own
@@ -37,13 +37,19 @@ struct LibraryView: View {
                 }
                 .background(Color.black.ignoresSafeArea())
             }
+            Tab("People", systemImage: "person.2", value: HomeTab.people) {
+                PeopleView(library: library, open: $open)
+            }
+            Tab("Places", systemImage: "map", value: HomeTab.places) {
+                PlacesView(library: library, open: $open)
+            }
             Tab(value: HomeTab.search, role: .search) {
                 NavigationStack {
                     SearchGrid(library: library, query: query, open: $open, sharing: $sharing)
                         .navigationTitle("Search")
                         .background(Color.black.ignoresSafeArea())
                 }
-                .searchable(text: $query, prompt: Text("File name, camera, title or keyword"))
+                .searchable(text: $query, prompt: Text("File name, camera, place, person or keyword"))
             }
         }
         .tabBarMinimizeBehavior(.onScrollDown)
@@ -161,6 +167,8 @@ struct LibraryGrid: View {
     @State private var selecting = false
     @State private var selected: Set<UInt64> = []
     @State private var exporting = false
+    @State private var merging = false
+    @State private var slideshow: [Photo]?
 
     private let columns = Array(repeating: GridItem(.flexible(), spacing: 2), count: 4)
 
@@ -219,6 +227,17 @@ struct LibraryGrid: View {
             if selecting { selectionBar.transition(.move(edge: .bottom).combined(with: .opacity)) }
         }
         .animation(.glass, value: selecting)
+        .fullScreenCover(item: Binding(get: { slideshow.map(SlideshowItem.init) }, set: { slideshow = $0?.photos })) { s in
+            SlideshowView(photos: s.photos)
+        }
+        .sheet(isPresented: $merging) {
+            MergeView(ids: library.shown.map(\.id).filter { selected.contains($0) }) { id in
+                library.reload()
+                selecting = false
+                selected = []
+                if let id { library.notice = nil; open = library.photos.first { $0.id == id } }
+            }
+        }
         .sheet(isPresented: $exporting) {
             let chosen = shown.filter { selected.contains($0.id) }
             ShareView(photos: chosen, current: chosen.first?.id ?? 0, all: true).presentationDragIndicator(.visible)
@@ -248,8 +267,13 @@ struct LibraryGrid: View {
             Button { exporting = true } label: { barIcon("square.and.arrow.up") }
                 .disabled(ids.isEmpty)
                 .accessibilityLabel(Text("Export"))
+            Button { merging = true } label: { barIcon("square.stack.3d.down.forward") }
+                .disabled(ids.count < 2)
+                .accessibilityLabel(Text("Merge to HDR or panorama"))
             Menu {
                 Button { selected = Set(library.shown.map(\.id)) } label: { Label("Choose all", systemImage: "checkmark.circle") }
+                Button { slideshow = library.shown.filter { selected.contains($0.id) } } label: { Label("Play as a slideshow", systemImage: "play.rectangle") }
+                    .disabled(ids.isEmpty)
                 Button { library.resetEdits(ids) } label: { Label("Reset edits", systemImage: "arrow.uturn.backward") }
                     .disabled(ids.isEmpty)
                 Button(role: .destructive) {
@@ -317,6 +341,9 @@ struct LibraryGrid: View {
                 Picker("Sort", selection: $library.sort) {
                     ForEach(LibrarySort.allCases) { Text($0.label).tag($0) }
                 }
+                Divider()
+                Button { slideshow = library.shown } label: { Label("Play as a slideshow", systemImage: "play.rectangle") }
+                    .disabled(library.shown.isEmpty)
             } label: {
                 Image(systemName: "arrow.up.arrow.down")
                     .font(.system(size: 16, weight: .semibold))
@@ -599,4 +626,10 @@ struct SearchGrid: View {
         }
         .scrollIndicators(.hidden)
     }
+}
+
+/// Photos to play as a slideshow, for a full-screen cover.
+struct SlideshowItem: Identifiable {
+    let photos: [Photo]
+    var id: String { photos.map { String($0.id) }.joined(separator: ",") }
 }

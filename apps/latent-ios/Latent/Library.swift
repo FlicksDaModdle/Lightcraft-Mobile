@@ -262,3 +262,26 @@ enum LibrarySort: String, CaseIterable, Identifiable {
         }
     }
 }
+
+/// Photo Merge: HDR from bracketed shots, a panorama from overlapping ones, or both.
+enum Merging {
+    nonisolated(unsafe) private static var onProgress: ((Double, String) -> Void)?
+    nonisolated(unsafe) static var cancelled = false
+
+    /// Run `command` (merge.hdr, merge.panorama, merge.hdrPanorama) with `options` on `ids`; returns the new photo.
+    static func run(_ command: String, ids: [UInt64], options: [String: Any], progress: @escaping @MainActor (Double, String) -> Void) async throws -> UInt64? {
+        var params = options
+        params["ids"] = ids
+        let p = params
+        cancelled = false
+        return try await Task.detached(priority: .userInitiated) {
+            onProgress = { f, stage in Task { @MainActor in progress(f, stage) } }
+            defer { onProgress = nil }
+            let out = try Engine.shared.merge(command, p) { fraction, stage in
+                Merging.onProgress?(Double(fraction), stage.map { String(cString: $0) } ?? "")
+                return !Merging.cancelled
+            }
+            return (out["id"] as? NSNumber)?.uint64Value
+        }.value
+    }
+}

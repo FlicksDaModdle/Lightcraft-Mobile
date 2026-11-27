@@ -577,3 +577,42 @@ pub unsafe extern "C" fn latent_forget_denoised(core: *const Core, id: u64) {
         c.forget_denoised(id);
     }
 }
+
+/// How far a merge has got (0…1) and what it is doing; false cancels it.
+pub type MergeProgressCallback = unsafe extern "C" fn(fraction: f32, stage: *const c_char) -> bool;
+
+/// Merge photos into a new one (see [`Core::merge`]); runs until done, so call it off the main thread. The
+/// result JSON (free with `latent_string_free`), or null with `error` (if not null) saying why.
+///
+/// # Safety
+/// `core` from [`latent_open`]; `command` and `params` NUL-terminated; `error` null or writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn latent_merge(
+    core: *const Core,
+    command: *const c_char,
+    params: *const c_char,
+    progress: Option<MergeProgressCallback>,
+    error: *mut *mut c_char,
+) -> *mut c_char {
+    // SAFETY: as documented above
+    let (c, command, params) = unsafe { (self::core(core), text(command), text(params)) };
+    let (Some(c), Some(command)) = (c, command) else { return std::ptr::null_mut() };
+    let told = |f: f32, stage: &str| match progress {
+        Some(p) => {
+            let stage = std::ffi::CString::new(stage.replace('\0', "")).unwrap_or_default();
+            // SAFETY: a plain callback; the text lives through the call
+            unsafe { p(f, stage.as_ptr()) }
+        }
+        None => true,
+    };
+    match c.merge(command, params.unwrap_or(""), &told) {
+        Ok(v) => give_string(v),
+        Err(e) => {
+            if !error.is_null() {
+                // SAFETY: the caller promises `error` is writable
+                unsafe { *error = give_string(e) };
+            }
+            std::ptr::null_mut()
+        }
+    }
+}

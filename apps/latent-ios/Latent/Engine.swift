@@ -171,6 +171,20 @@ final class Engine: @unchecked Sendable {
         }
     }
 
+    /// Merge photos (see `latent_merge`); blocks until done, so call it off the main thread.
+    func merge(_ command: String, _ params: [String: Any], progress: LatentMergeProgressFn?) throws -> [String: Any] {
+        let json = String(data: (try? JSONSerialization.data(withJSONObject: params)) ?? Data("{}".utf8), encoding: .utf8) ?? "{}"
+        var error: UnsafeMutablePointer<CChar>?
+        guard let out = latent_merge(core, command, json, progress, &error) else {
+            let message = error.map { String(cString: $0) } ?? "The merge failed."
+            if let error { latent_string_free(error) }
+            throw EngineError(message: message)
+        }
+        defer { latent_string_free(out) }
+        let text = String(cString: out)
+        return ((try? JSONSerialization.jsonObject(with: Data(text.utf8))) as? [String: Any]) ?? [:]
+    }
+
     func saveDenoised(_ id: UInt64, to url: URL) -> Bool { latent_save_denoised(core, id, url.path) }
     func loadDenoised(_ id: UInt64, from url: URL) -> Bool { latent_load_denoised(core, id, url.path) }
     func hasDenoised(_ id: UInt64) -> Bool { latent_has_denoised(core, id) }

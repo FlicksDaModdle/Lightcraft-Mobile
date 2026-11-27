@@ -92,6 +92,11 @@ void latent_set_inpainter(LatentInpaintFn model, uint32_t size);
 // makes the result the photo's denoised picture, which the Denoise amount mixes in.
 typedef bool (*LatentDenoiseFn)(const float *input, uint32_t size, float *out);
 typedef void (*LatentProgressFn)(uint32_t done, uint32_t total);
+// Photo Merge: command is merge.hdr, merge.panorama or merge.hdrPanorama; params its options with "ids". Runs until
+// done (call it off the main thread) with the library usable meanwhile; progress may return false to cancel. The
+// result JSON (free with latent_string_free; "id" is the new photo), or NULL with *error saying why.
+typedef bool (*LatentMergeProgressFn)(float fraction, const char *stage);
+char *latent_merge(const LatentCore *core, const char *command, const char *params, LatentMergeProgressFn progress, char **error);
 bool latent_denoise(const LatentCore *core, uint64_t id, LatentDenoiseFn model, uint32_t size, LatentProgressFn progress, char **error);
 bool latent_save_denoised(const LatentCore *core, uint64_t id, const char *path);
 bool latent_load_denoised(const LatentCore *core, uint64_t id, const char *path);

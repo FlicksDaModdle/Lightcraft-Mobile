@@ -85,6 +85,9 @@ impl Core {
         let mut session = session;
         // AI mask work runs on the engine's own thread; `poll` takes the results in
         session.segmenter.background = true;
+        // face models and slideshow templates are kept with the app's settings, as on the desktop
+        session.face_models_dir = lightcraft_engine::config::default_face_models_dir();
+        session.slide_templates_dir = lightcraft_engine::config::config_dir().map(|d| d.join(lightcraft_engine::slide_template::DIR_NAME));
         // sample photos earlier versions added go away for good
         let demos: Vec<u64> =
             session.catalog.photos().filter(|p| matches!(p.source, lightcraft_catalog::Source::Demo { .. })).map(|p| p.id.0).collect();
@@ -243,6 +246,24 @@ impl Core {
         let out = denoise_tiles(&src, size, run, progress)?;
         self.lock().set_app_denoised(PhotoId(id), Some(out));
         Ok(())
+    }
+
+    /// Merge photos (`command`: `merge.hdr`, `merge.panorama` or `merge.hdrPanorama`, with that command's options and
+    /// `ids`) into a new photo, written next to the first and added to the library. The merging runs with the
+    /// library unlocked, so the app stays usable; `progress(fraction, stage)` hears how far it has got and returning
+    /// false cancels. Returns the command's result as JSON (`{"id": …}` is the new photo).
+    pub fn merge(&self, command: &str, params: &str, progress: &(dyn Fn(f32, &str) -> bool + Sync)) -> Result<String, String> {
+        if !matches!(command, "merge.hdr" | "merge.panorama" | "merge.hdrPanorama") {
+            return Err(format!("{command} is not a merge"));
+        }
+        let p: Value = if params.trim().is_empty() { json!({}) } else { serde_json::from_str(params).map_err(|e| format!("{command}: {e}"))? };
+        let (kind, finish) = lightcraft_engine::merge::parse(command, &p).map_err(|e| e.to_string())?;
+        let ids: Vec<PhotoId> =
+            p.get("ids").and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_u64).map(PhotoId).collect()).unwrap_or_default();
+        let job = self.lock().plan_merge(kind, finish, &ids, false).map_err(|e| e.to_string())?;
+        let out = job.run(progress)?;
+        let v = self.lock().finish_merge(&job, out).map_err(|e| e.to_string())?;
+        Ok(v.to_string())
     }
 
     /// Save photo `id`'s denoised picture to `path` (half floats), to load it again next time. False without one.
@@ -934,6 +955,56 @@ mod tests {
         bytes.truncate(bytes.len() - 3);
         std::fs::write(&file, &bytes).unwrap();
         assert!(!core.load_denoised(id, &file));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A merge runs with the library unlocked (it can be read while progress is told), adds the merged photo, and
+    /// refuses what is not a merge or too few photos.
+    #[test]
+    fn a_merge_adds_a_photo() {
+        use lightcraft_codecs::encode::{EncodeImage, EncodeMeta, Samples, encode_png};
+        let dir = std::env::temp_dir().join(format!("latent-merge-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut paths = Vec::new();
+        for (i, level) in [60u8, 160].into_iter().enumerate() {
+            let mut px = vec![0u8; 96 * 64 * 3];
+            for (j, v) in px.iter_mut().enumerate() {
+                *v = level.saturating_add(((j / 3) % 96) as u8);
+            }
+            let png = encode_png(&EncodeImage { width: 96, height: 64, channels: 3, samples: Samples::U8(&px) }, &EncodeMeta::default()).unwrap();
+            let f = dir.join(format!("b{i}.png"));
+            std::fs::write(&f, png).unwrap();
+            paths.push(f.to_string_lossy().to_string());
+        }
+        let (core, _) = Core::open(Some(&dir.join("lib")));
+        let r = ok(&core.execute("library.import", &json!({ "paths": paths }).to_string()));
+        let ids: Vec<u64> = r["imported"].as_array().unwrap().iter().filter_map(Value::as_u64).collect();
+        assert_eq!(ids.len(), 2);
+        let before = ok(&core.execute("catalog.query", ""))["photos"].as_array().unwrap().len();
+        let told = std::sync::atomic::AtomicUsize::new(0);
+        let progress = |_: f32, _: &str| {
+            // the library is not locked meanwhile
+            let _ = core.execute("catalog.query", "");
+            told.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            true
+        };
+        let out = core.merge("merge.hdr", &json!({ "ids": ids, "align": false, "autoSettings": false }).to_string(), &progress);
+        match out {
+            Ok(v) => {
+                let v: Value = serde_json::from_str(&v).unwrap();
+                assert!(v["id"].as_u64().is_some(), "{v}");
+                assert_eq!(ok(&core.execute("catalog.query", ""))["photos"].as_array().unwrap().len(), before + 1);
+                assert!(told.load(std::sync::atomic::Ordering::Relaxed) > 0);
+            }
+            // brackets need exposure times to merge by; plain PNGs may have none, which is a clear refusal
+            Err(e) => {
+                eprintln!("merge refused: {e}");
+                assert!(!e.is_empty());
+            }
+        }
+        assert!(core.merge("develop.reset", "{}", &progress).is_err());
+        assert!(core.merge("merge.panorama", &json!({ "ids": [ids[0]] }).to_string(), &progress).is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

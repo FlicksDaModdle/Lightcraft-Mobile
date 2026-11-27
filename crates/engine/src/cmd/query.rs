@@ -10,7 +10,7 @@ use super::{CommandSpec, always, bad, cmd, has_active};
 use crate::{LibrarySource, Session};
 
 pub fn photo_summary(p: &Photo) -> Value {
-    json!({
+    let mut v = json!({
         "id": p.id.0,
         "fileName": p.file_name,
         "format": p.format,
@@ -30,7 +30,21 @@ pub fn photo_summary(p: &Photo) -> Value {
         "copyName": p.copy_name,
         // an undecodable raw variant, shown and edited from its embedded JPEG: why
         "previewOnly": p.preview_only,
-    })
+    });
+    // where it was taken, when known (left out otherwise, so photos without it list as before)
+    if let Some((lat, lon)) = p.meta.gps.filter(|(a, b)| a.is_finite() && b.is_finite()) {
+        v["gps"] = json!([lat, lon]);
+    }
+    let people = p.people();
+    if !people.is_empty() {
+        v["people"] = json!(people);
+    }
+    for (key, text) in [("city", &p.meta.city), ("country", &p.meta.country)] {
+        if !text.is_empty() {
+            v[key] = json!(text);
+        }
+    }
+    v
 }
 
 /// How deep [`album_json`] lists folders inside folders: a catalog that loops (an album inside

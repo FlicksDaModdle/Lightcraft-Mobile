@@ -14,8 +14,21 @@ struct Photo: Identifiable, Hashable {
     let format: String
     /// A camera raw file (the engine's kind "raw").
     let isRaw: Bool
-    /// What search looks in besides the file name: camera, title, keywords.
+    /// What search looks in besides the file name: camera, title, keywords, people and place.
     let searchText: String
+    /// Where it was taken (latitude, longitude), when known.
+    let gps: (lat: Double, lon: Double)?
+    let city: String
+    let country: String
+    /// The names on its faces.
+    let people: [String]
+
+    static func == (a: Photo, b: Photo) -> Bool {
+        a.id == b.id && a.fileName == b.fileName && a.edited == b.edited && a.captured == b.captured && a.rating == b.rating
+            && a.flag == b.flag && a.searchText == b.searchText && a.gps?.lat == b.gps?.lat && a.gps?.lon == b.gps?.lon
+    }
+
+    func hash(into h: inout Hasher) { h.combine(id) }
 
     func matches(_ q: String) -> Bool {
         fileName.localizedCaseInsensitiveContains(q) || searchText.localizedCaseInsensitiveContains(q)
@@ -31,7 +44,15 @@ struct Photo: Identifiable, Hashable {
         flag = (d["flag"] as? String)?.lowercased() ?? "none"
         format = (d["format"] as? String)?.lowercased() ?? ""
         isRaw = (d["kind"] as? String)?.lowercased() == "raw"
-        searchText = ([d["camera"] as? String, d["title"] as? String] + ((d["keywords"] as? [String]) ?? []).map { Optional($0) })
+        if let g = d["gps"] as? [NSNumber], g.count == 2 {
+            gps = (g[0].doubleValue, g[1].doubleValue)
+        } else {
+            gps = nil
+        }
+        city = d["city"] as? String ?? ""
+        country = d["country"] as? String ?? ""
+        people = d["people"] as? [String] ?? []
+        searchText = ([d["camera"] as? String, d["title"] as? String, city, country] + ((d["keywords"] as? [String]) ?? []).map { Optional($0) } + people.map { Optional($0) })
             .compactMap { $0 }.joined(separator: " ")
     }
 }
