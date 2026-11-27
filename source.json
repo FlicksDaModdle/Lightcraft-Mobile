@@ -2,8 +2,8 @@
   "name": "Silverbath",
   "identifier": "app.latent.source",
   "subtitle": "Silverbath builds, straight from the repository.",
-  "website": "https://github.com/FlicksDaModdle/Lightcraft-Mobile",
-  "iconURL": "https://raw.githubusercontent.com/FlicksDaModdle/Lightcraft-Mobile/main/apps/latent-ios/Latent/Assets.xcassets/AppIcon.appiconset/AppIcon-1024.png",
+  "website": "https://github.com/FlicksDaModdle/silverbath",
+  "iconURL": "https://raw.githubusercontent.com/FlicksDaModdle/silverbath/main/apps/latent-ios/Latent/Assets.xcassets/AppIcon.appiconset/AppIcon-1024.png",
   "tintColor": "#2978F5",
   "apps": [
     {
@@ -12,7 +12,7 @@
       "developerName": "Silverbath contributors",
       "subtitle": "A raw photo editor, built on the LightCraft engine.",
       "localizedDescription": "Silverbath edits photos on your iPhone and iPad: light, colour, curves, HDR, colour grading, effects, detail, crop and presets, all non-destructive. Built on the open-source LightCraft engine; every build of the main branch is published here.",
-      "iconURL": "https://raw.githubusercontent.com/FlicksDaModdle/Lightcraft-Mobile/main/apps/latent-ios/Latent/Assets.xcassets/AppIcon.appiconset/AppIcon-1024.png",
+      "iconURL": "https://raw.githubusercontent.com/FlicksDaModdle/silverbath/main/apps/latent-ios/Latent/Assets.xcassets/AppIcon.appiconset/AppIcon-1024.png",
       "tintColor": "#2978F5",
       "category": "photo-video",
       "screenshots": [],
@@ -23,6 +23,15 @@
         }
       },
       "versions": [
+        {
+          "version": "0.1.78",
+          "buildVersion": "78",
+          "date": "2026-11-27T17:24:11Z",
+          "localizedDescription": "Build 78 of the main branch.",
+          "downloadURL": "https://github.com/FlicksDaModdle/silverbath/releases/download/latent-v0.1.78/Latent.ipa",
+          "size": 24254818,
+          "minOSVersion": "26.0"
+        },
         {
           "version": "0.1.76",
           "buildVersion": "76",
@@ -103,22 +112,13 @@
           "downloadURL": "https://github.com/FlicksDaModdle/Lightcraft-Mobile/releases/download/latent-v0.1.66/Latent.ipa",
           "size": 23606220,
           "minOSVersion": "26.0"
-        },
-        {
-          "version": "0.1.65",
-          "buildVersion": "65",
-          "date": "2026-11-24T18:25:01Z",
-          "localizedDescription": "Build 65 of the main branch.",
-          "downloadURL": "https://github.com/FlicksDaModdle/Lightcraft-Mobile/releases/download/latent-v0.1.65/Latent.ipa",
-          "size": 23529583,
-          "minOSVersion": "26.0"
         }
       ],
-      "version": "0.1.76",
-      "versionDate": "2026-11-27T16:48:12Z",
-      "versionDescription": "Build 76 of the main branch.",
-      "downloadURL": "https://github.com/FlicksDaModdle/Lightcraft-Mobile/releases/download/latent-v0.1.76/Latent.ipa",
-      "size": 24255470
+      "version": "0.1.78",
+      "versionDate": "2026-11-27T17:24:11Z",
+      "versionDescription": "Build 78 of the main branch.",
+      "downloadURL": "https://github.com/FlicksDaModdle/silverbath/releases/download/latent-v0.1.78/Latent.ipa",
+      "size": 24254818
     }
   ],
   "news": []
