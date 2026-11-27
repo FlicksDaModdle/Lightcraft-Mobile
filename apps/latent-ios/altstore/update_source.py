@@ -13,7 +13,7 @@ import json
 import os
 import sys
 
-REPO = "FlicksDaModdle/Lightcraft-Mobile"
+REPO = "FlicksDaModdle/silverbath"
 RAW = f"https://raw.githubusercontent.com/{REPO}/main/apps/latent-ios"
 KEEP = 10
 

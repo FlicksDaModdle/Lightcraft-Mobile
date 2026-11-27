@@ -15,7 +15,7 @@ Latent is a SwiftUI app over the LightCraft engine:
 - Each build of `main` is also published as a GitHub Release (`latent-v0.1.N`) and added to the
   app source on the `altstore` branch (AltStore's format, which Feather reads too). In Feather or
   AltStore, add the source
-  `https://raw.githubusercontent.com/FlicksDaModdle/Lightcraft-Mobile/altstore/source.json` and
+  `https://raw.githubusercontent.com/FlicksDaModdle/silverbath/altstore/source.json` and
   install or update Latent from it (`apps/latent-ios/altstore/update_source.py` writes it).
 
 Latent keeps its library in its own Documents folder (shown in the Files app); photos you add are

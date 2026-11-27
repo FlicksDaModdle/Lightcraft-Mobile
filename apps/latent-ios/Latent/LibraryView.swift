@@ -625,7 +625,7 @@ struct AboutView: View {
                 Section {
                     Text("Silverbath is built on the open-source LightCraft engine, \u{00A9} 2026 ArtCraft Team and the LightCraft contributors, used under the MIT License (it is also available under the Apache License 2.0).")
                         .font(.system(size: 14))
-                    if let url = URL(string: "https://github.com/FlicksDaModdle/Lightcraft-Mobile") {
+                    if let url = URL(string: "https://github.com/FlicksDaModdle/silverbath") {
                         Link("LightCraft source and licence", destination: url)
                     }
                 } header: {

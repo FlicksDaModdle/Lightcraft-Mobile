@@ -75,7 +75,7 @@ jobs:
 
   # Every build of main becomes a GitHub Release and the newest entry in the AltStore source
   # (the `altstore` branch's source.json; add
-  # https://raw.githubusercontent.com/FlicksDaModdle/Lightcraft-Mobile/altstore/source.json in AltStore).
+  # https://raw.githubusercontent.com/FlicksDaModdle/silverbath/altstore/source.json in AltStore).
   publish:
     needs: ios
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'

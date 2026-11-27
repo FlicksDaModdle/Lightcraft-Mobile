@@ -327,7 +327,7 @@ let DenoiseModel = ModelSpec(
     files: [],
     size: "59 MB",
     archive: "NAFNet-SIDD-w32.mlpackage.zip",
-    archiveURL: "https://github.com/FlicksDaModdle/Lightcraft-Mobile/releases/download/models-nafnet-sidd-w32-v1/NAFNet-SIDD-w32.mlpackage.zip",
+    archiveURL: "https://github.com/FlicksDaModdle/silverbath/releases/download/models-nafnet-sidd-w32-v1/NAFNet-SIDD-w32.mlpackage.zip",
     computeUnits: .cpuAndGPU)
 
 /// AI denoise: runs the denoise model over a photo, tile by tile, through the engine (which cuts the tiles and
