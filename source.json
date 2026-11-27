@@ -24,6 +24,15 @@
       },
       "versions": [
         {
+          "version": "0.1.79",
+          "buildVersion": "79",
+          "date": "2026-11-27T17:55:50Z",
+          "localizedDescription": "Build 79 of the main branch.",
+          "downloadURL": "https://github.com/FlicksDaModdle/silverbath/releases/download/latent-v0.1.79/Latent.ipa",
+          "size": 24273802,
+          "minOSVersion": "26.0"
+        },
+        {
           "version": "0.1.78",
           "buildVersion": "78",
           "date": "2026-11-27T17:24:11Z",
@@ -103,22 +112,13 @@
           "downloadURL": "https://github.com/FlicksDaModdle/Lightcraft-Mobile/releases/download/latent-v0.1.67/Latent.ipa",
           "size": 23653829,
           "minOSVersion": "26.0"
-        },
-        {
-          "version": "0.1.66",
-          "buildVersion": "66",
-          "date": "2026-11-24T19:29:26Z",
-          "localizedDescription": "Build 66 of the main branch.",
-          "downloadURL": "https://github.com/FlicksDaModdle/Lightcraft-Mobile/releases/download/latent-v0.1.66/Latent.ipa",
-          "size": 23606220,
-          "minOSVersion": "26.0"
         }
       ],
-      "version": "0.1.78",
-      "versionDate": "2026-11-27T17:24:11Z",
-      "versionDescription": "Build 78 of the main branch.",
-      "downloadURL": "https://github.com/FlicksDaModdle/silverbath/releases/download/latent-v0.1.78/Latent.ipa",
-      "size": 24254818
+      "version": "0.1.79",
+      "versionDate": "2026-11-27T17:55:50Z",
+      "versionDescription": "Build 79 of the main branch.",
+      "downloadURL": "https://github.com/FlicksDaModdle/silverbath/releases/download/latent-v0.1.79/Latent.ipa",
+      "size": 24273802
     }
   ],
   "news": []
