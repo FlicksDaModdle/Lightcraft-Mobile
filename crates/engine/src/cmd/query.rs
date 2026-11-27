@@ -103,7 +103,20 @@ pub fn specs() -> Vec<CommandSpec> {
             };
             let off = pagination_usize(p.get("offset").and_then(Value::as_u64).unwrap_or(0));
             let lim = pagination_usize(p.get("limit").and_then(Value::as_u64).unwrap_or(200));
-            let items: Vec<Value> = ids.iter().skip(off).take(lim).filter_map(|id| s.catalog.photo(*id)).map(|p| photo_summary(p)).collect();
+            let items: Vec<Value> = ids
+                .iter()
+                .skip(off)
+                .take(lim)
+                .filter_map(|id| s.catalog.photo(*id))
+                .map(|p| {
+                    let mut v = photo_summary(p);
+                    // the stack it is in, so a grid can show a collapsed stack as its top photo
+                    if let Some(st) = s.catalog.stack_of(p.id) {
+                        v["stack"] = json!({"id": st.id.0, "top": st.top() == p.id, "count": st.photos.len(), "collapsed": st.collapsed});
+                    }
+                    v
+                })
+                .collect();
             Ok(json!({"total": ids.len(), "photos": items}))
         }),
         cmd!(query "catalog.stats", "Catalog Statistics", [], None, "{}", always, |s, _| {

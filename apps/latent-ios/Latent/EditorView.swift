@@ -34,6 +34,8 @@ struct EditorView: View {
     @State private var ambient: Color?
     @Namespace private var glass
     @State private var sharing = false
+    @State private var showVersions = false
+    @State private var showKeywords = false
     @State private var info: InfoBox?
     @State private var savingPreset = false
     @State private var presetName = ""
@@ -78,6 +80,10 @@ struct EditorView: View {
                 Sam2.forget()
                 model.prepareSelection()
             }
+        }
+        .sheet(isPresented: $showVersions) { VersionsSheet(model: model).presentationDetents([.medium, .large]) }
+        .sheet(isPresented: $showKeywords) {
+            KeywordSheet(ids: [model.photo.id], library: Library.current ?? Library()).presentationDetents([.medium, .large])
         }
         .sheet(isPresented: $model.showDenoiseModel) {
             ModelSheet(DenoiseModel) { model.runDenoise() }
@@ -376,6 +382,8 @@ struct EditorView: View {
                 Label(splitView ? "Hide before and after" : "Before and after", systemImage: "rectangle.split.2x1")
             }
             Toggle(isOn: $model.clipWarnings) { Label("Show clipping", systemImage: "exclamationmark.triangle") }
+            Button { showVersions = true } label: { Label("Versions", systemImage: "square.on.square") }
+            Button { showKeywords = true } label: { Label("Keywords", systemImage: "tag") }
             Menu {
                 Toggle(isOn: $showHistogram) { Label("Histogram", systemImage: "chart.bar.xaxis") }
                 Picker(selection: $background) {
@@ -834,6 +842,7 @@ struct EditorView: View {
                 if !model.tool.tabs.isEmpty { tabs }
                 if model.tool == .effects, model.tool.tabs.indices.contains(model.tab), model.tool.tabs[model.tab].name == "Glow" { glowStyleRow }
                 if model.tool == .detail, model.tool.tabs.indices.contains(model.tab), model.tool.tabs[model.tab].name == "AI denoise" { aiDenoiseRow }
+                if model.tool == .geometry { uprightRow }
                 if model.tool == .mixer { bandChips }
                 if model.tool == .grading { rangeChips }
             }
@@ -1005,6 +1014,44 @@ struct EditorView: View {
             }
         }
         .padding(.horizontal, 20)
+        .padding(.top, 10)
+    }
+
+    /// Automatic straightening: level the horizon and correct converging lines from the lines in the photo.
+    private var uprightRow: some View {
+        let modes: [(key: String, label: String, about: String)] = [
+            ("off", "Off", "No automatic correction"),
+            ("auto", "Auto", "A balanced fix of level and perspective"),
+            ("level", "Level", "Level the horizon only"),
+            ("vertical", "Vertical", "Level, and make upright lines parallel"),
+            ("full", "Full", "Level, upright and side-to-side lines all corrected"),
+        ]
+        return VStack(alignment: .leading, spacing: 6) {
+            ScrollView(.horizontal) {
+                HStack(spacing: 8) {
+                    ForEach(modes, id: \.key) { m in
+                        let on = model.upright == m.key
+                        Button { model.setUpright(m.key) } label: {
+                            Text(m.label)
+                                .font(.system(size: 13, weight: on ? .semibold : .regular))
+                                .padding(.horizontal, 14).frame(height: 32)
+                                .latentGlass(in: Capsule(), tint: on ? Theme.accent : nil, interactive: true)
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel(Text("Straighten: \(m.label)"))
+                        .accessibilityHint(Text(m.about))
+                        .accessibilityAddTraits(on ? .isSelected : [])
+                    }
+                }
+                .padding(.horizontal, 20)
+            }
+            .scrollIndicators(.hidden)
+            Text(modes.first { $0.key == model.upright }?.about ?? "")
+                .font(.system(size: 12))
+                .foregroundStyle(Theme.secondaryText)
+                .padding(.horizontal, 20)
+        }
+        .foregroundStyle(.white)
         .padding(.top, 10)
     }
 

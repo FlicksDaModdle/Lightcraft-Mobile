@@ -22,10 +22,16 @@ struct Photo: Identifiable, Hashable {
     let country: String
     /// The names on its faces.
     let people: [String]
+    let keywords: [String]
+    /// The stack it is in: whether it is the top photo, how many there are, and whether the stack is folded up.
+    let stack: (id: UInt64, top: Bool, count: Int, collapsed: Bool)?
+    /// Hidden in a grid: a photo under the top of a folded-up stack.
+    var hiddenInStack: Bool { stack.map { $0.collapsed && !$0.top } ?? false }
 
     static func == (a: Photo, b: Photo) -> Bool {
         a.id == b.id && a.fileName == b.fileName && a.edited == b.edited && a.captured == b.captured && a.rating == b.rating
             && a.flag == b.flag && a.searchText == b.searchText && a.gps?.lat == b.gps?.lat && a.gps?.lon == b.gps?.lon
+            && a.stack?.id == b.stack?.id && a.stack?.top == b.stack?.top && a.stack?.collapsed == b.stack?.collapsed && a.stack?.count == b.stack?.count
     }
 
     func hash(into h: inout Hasher) { h.combine(id) }
@@ -52,6 +58,12 @@ struct Photo: Identifiable, Hashable {
         city = d["city"] as? String ?? ""
         country = d["country"] as? String ?? ""
         people = d["people"] as? [String] ?? []
+        keywords = d["keywords"] as? [String] ?? []
+        if let st = d["stack"] as? [String: Any], let sid = (st["id"] as? NSNumber)?.uint64Value {
+            stack = (sid, st["top"] as? Bool ?? false, (st["count"] as? NSNumber)?.intValue ?? 1, st["collapsed"] as? Bool ?? false)
+        } else {
+            stack = nil
+        }
         searchText = ([d["camera"] as? String, d["title"] as? String, city, country] + ((d["keywords"] as? [String]) ?? []).map { Optional($0) } + people.map { Optional($0) })
             .compactMap { $0 }.joined(separator: " ")
     }
@@ -631,3 +643,38 @@ let glowStyles: [(key: String, label: String, about: String)] = [
 /// The fixed focus shapes' half-width and half-height, in units of the photo's long edge (as the engine's
 /// `FocusShape::radii`).
 let focusShapeRadii: [String: (Double, Double)] = ["round": (0.22, 0.22), "wide": (0.32, 0.17), "tall": (0.17, 0.32)]
+
+/// An album (or a folder of albums) in the library; smart albums fill themselves from rules.
+struct Album: Identifiable, Hashable {
+    let id: UInt64
+    let name: String
+    let folder: Bool
+    let smart: Bool
+    let count: Int
+    let cover: UInt64?
+    let rulesText: String
+    let children: [Album]
+
+    init?(_ json: Any) {
+        guard let d = json as? [String: Any], let id = (d["id"] as? NSNumber)?.uint64Value else { return nil }
+        self.id = id
+        name = d["name"] as? String ?? ""
+        folder = d["folder"] as? Bool ?? false
+        smart = d["smart"] as? Bool ?? false
+        count = (d["count"] as? NSNumber)?.intValue ?? 0
+        cover = (d["cover"] as? NSNumber)?.uint64Value
+        rulesText = d["rulesText"] as? String ?? ""
+        children = ((d["children"] as? [Any]) ?? []).compactMap(Album.init)
+    }
+
+    /// This album and every album inside it, folders left out.
+    var flattened: [Album] { (folder ? [] : [self]) + children.flatMap(\.flattened) }
+}
+
+/// A keyword in the library's keyword list, with how many photos have it.
+struct KeywordItem: Identifiable, Hashable {
+    let name: String
+    let path: String
+    let count: Int
+    var id: String { path }
+}

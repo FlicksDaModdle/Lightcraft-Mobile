@@ -437,11 +437,28 @@ struct ExportOptionsView: View {
     @Binding var settings: ExportSettings
     let count: Int
     let confirm: () -> Void
+    @State private var savingPreset = false
+    @State private var presetName = ""
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
         NavigationStack {
             Form {
+                Section {
+                    Menu {
+                        ForEach(ExportPresets.shared.presets) { p in
+                            Button(p.name) { settings = p.settings }
+                        }
+                        Divider()
+                        Button { presetName = ""; savingPreset = true } label: { Label("Save these settings as a preset", systemImage: "plus") }
+                    } label: {
+                        HStack {
+                            Label("Presets", systemImage: "square.stack")
+                            Spacer()
+                            Text(ExportPresets.shared.presets.first { $0.settings == settings }?.name ?? "Custom").foregroundStyle(.secondary)
+                        }
+                    }
+                }
                 Section {
                     Picker("File type", selection: $settings.format) {
                         ForEach(ExportSettings.formats, id: \.id) { Text($0.label).tag($0.id) }
@@ -476,7 +493,12 @@ struct ExportOptionsView: View {
             .pickerStyle(.menu)
             .tint(Theme.accent)
             .animation(.glass, value: settings)
-            .navigationTitle(count == 1 ? "Export as\u{2026}" : "Export as\u{2026} (\(count))")
+            .alert("Save preset", isPresented: $savingPreset) {
+                TextField("Name", text: $presetName)
+                Button("Save") { ExportPresets.shared.save(presetName, settings) }
+                Button("Cancel", role: .cancel) {}
+            }
+            .navigationTitle(count == 0 ? "Export settings" : count == 1 ? "Export as\u{2026}" : "Export as\u{2026} (\(count))")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {

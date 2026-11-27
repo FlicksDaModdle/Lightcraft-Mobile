@@ -13,9 +13,11 @@ final class Library: ObservableObject {
     @Published var filter: LibraryFilter = .all
     @Published var sort: LibrarySort = .newest
 
-    /// The photos the filter lets through, in the chosen order.
+    @Published private(set) var albums: [Album] = []
+
+    /// The photos the filter lets through, in the chosen order (a folded-up stack as its top photo).
     var shown: [Photo] {
-        let kept = photos.filter(filter.keeps)
+        let kept = photos.filter { filter.keeps($0) && !$0.hiddenInStack }
         switch sort {
         case .newest: return kept.sorted { ($0.captured, $0.id) > ($1.captured, $1.id) }
         case .oldest: return kept.sorted { ($0.captured, $0.id) < ($1.captured, $1.id) }
@@ -24,9 +26,13 @@ final class Library: ObservableObject {
         }
     }
 
+    /// The library the home screen shows, for screens opened from it (the editor's keywords).
+    static weak var current: Library?
+
     init() {
         notice = Engine.shared.problem
         reload()
+        Library.current = self
     }
 
     func reload() {
@@ -34,9 +40,101 @@ final class Library: ObservableObject {
             let r = try Engine.shared.run("catalog.query", ["limit": 1_000_000])
             let list = (r as? [String: Any])?["photos"] as? [Any] ?? []
             photos = list.compactMap(Photo.init)
+            albums = ((try? Engine.shared.run("albums.list")) as? [Any] ?? []).compactMap(Album.init)
         } catch {
             notice = error.localizedDescription
         }
+    }
+
+    // MARK: albums
+
+    /// The photos in album `id` (a smart album's photos are worked out from its rules).
+    func photos(inAlbum id: UInt64) -> [Photo] {
+        let r = (try? Engine.shared.run("catalog.query", ["filter": ["album": id], "limit": 1_000_000])) as? [String: Any]
+        return ((r?["photos"] as? [Any]) ?? []).compactMap(Photo.init)
+    }
+
+    @discardableResult
+    func createAlbum(_ name: String, adding ids: [UInt64] = []) -> UInt64? {
+        let n = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !n.isEmpty else { return nil }
+        do {
+            let r = try Engine.shared.run("album.create", ["name": n]) as? [String: Any]
+            let id = (r?["id"] as? NSNumber)?.uint64Value
+            if let id, !ids.isEmpty { _ = try Engine.shared.run("album.addPhotos", ["id": id, "ids": ids]) }
+            reload()
+            return id
+        } catch {
+            notice = error.localizedDescription
+            return nil
+        }
+    }
+
+    /// A smart album: `rules` is the engine's filter (rating, ratingOp, flag, kind, edited, keyword, camera,
+    /// dateFrom, dateTo, text…).
+    func createSmartAlbum(_ name: String, rules: [String: Any]) {
+        let n = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !n.isEmpty else { return }
+        change("album.createSmart", ["name": n, "rules": rules])
+    }
+
+    func add(_ ids: [UInt64], toAlbum album: UInt64) { change("album.addPhotos", ["id": album, "ids": ids]) }
+    func remove(_ ids: [UInt64], fromAlbum album: UInt64) { change("album.removePhotos", ["id": album, "ids": ids]) }
+    func renameAlbum(_ id: UInt64, _ name: String) { change("album.rename", ["id": id, "name": name]) }
+    func deleteAlbum(_ id: UInt64) { change("album.delete", ["id": id]) }
+
+    // MARK: keywords
+
+    /// Every keyword, most used first.
+    func keywords() -> [KeywordItem] {
+        func walk(_ list: [Any]) -> [KeywordItem] {
+            list.flatMap { (k: Any) -> [KeywordItem] in
+                guard let d = k as? [String: Any] else { return [] }
+                let me = KeywordItem(name: d["name"] as? String ?? "", path: d["path"] as? String ?? d["name"] as? String ?? "",
+                                     count: (d["count"] as? NSNumber)?.intValue ?? 0)
+                return [me] + walk(d["children"] as? [Any] ?? [])
+            }
+        }
+        return walk((try? Engine.shared.run("keyword.list")) as? [Any] ?? []).sorted { $0.count != $1.count ? $0.count > $1.count : $0.name < $1.name }
+    }
+
+    /// Keywords to suggest for photos `ids` (used with what they have, or starting with `prefix`).
+    func suggestKeywords(for ids: [UInt64], prefix: String = "") -> [String] {
+        var p: [String: Any] = ["ids": ids, "limit": 16]
+        if !prefix.isEmpty { p["prefix"] = prefix }
+        let r = (try? Engine.shared.run("keyword.suggest", p)) as Any
+        if let list = r as? [String] { return list }
+        if let list = r as? [[String: Any]] { return list.compactMap { $0["name"] as? String ?? $0["keyword"] as? String } }
+        return ((r as? [String: Any])?["keywords"] as? [Any] ?? []).compactMap { ($0 as? String) ?? (($0 as? [String: Any])?["name"] as? String) }
+    }
+
+    func addKeywords(_ words: [String], to ids: [UInt64]) { change("photo.setMeta", ["ids": ids, "addKeywords": words]) }
+    func removeKeywords(_ words: [String], from ids: [UInt64]) { change("photo.setMeta", ["ids": ids, "removeKeywords": words]) }
+
+    // MARK: stacks
+
+    /// Stack photos taken within `gap` seconds of each other (bursts and brackets).
+    func autoStack(_ ids: [UInt64], gap: Double = 10) -> Int {
+        do {
+            let r = try Engine.shared.run("stack.auto", ["ids": ids, "gap": gap]) as? [String: Any]
+            reload()
+            return (r?["stacks"] as? NSNumber)?.intValue ?? (r?["stacks"] as? [Any])?.count ?? 0
+        } catch {
+            notice = error.localizedDescription
+            return 0
+        }
+    }
+
+    // (the stack commands are offered for the selection, so the photos are selected first)
+    func stack(_ ids: [UInt64]) { select(ids); change("stack.group", ["ids": ids, "top": ids.first ?? 0, "collapsed": true]) }
+    func unstack(_ ids: [UInt64]) { select(ids); change("stack.ungroup", ["ids": ids]) }
+    /// Fold up or open photo `p`'s stack.
+    func toggleStack(_ p: Photo) { select([p.id]); change("stack.toggle", ["ids": [p.id], "collapsed": !(p.stack?.collapsed ?? false)]) }
+    func makeTop(_ p: Photo) { select([p.id]); change("stack.setTop", ["id": p.id]) }
+
+    private func select(_ ids: [UInt64]) {
+        guard let first = ids.first else { return }
+        _ = try? Engine.shared.run("library.select", ["ids": ids, "active": first])
     }
 
     /// Add files the picker copied into the Import folder.

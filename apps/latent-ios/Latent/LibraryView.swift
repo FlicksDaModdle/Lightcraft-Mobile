@@ -19,6 +19,8 @@ struct LibraryView: View {
     @State private var pickingFiles = false
     @State private var sharing: Photo?
     @State private var showAbout = false
+    @State private var showSettings = false
+    @State private var showAlbums = false
     @State private var query = ""
 
     var body: some View {
@@ -79,6 +81,8 @@ struct LibraryView: View {
             ShareView(photos: library.shown, current: photo.id).presentationDragIndicator(.visible)
         }
         .sheet(isPresented: $showAbout) { AboutView() }
+        .sheet(isPresented: $showSettings) { SettingsView(library: library) }
+        .sheet(isPresented: $showAlbums) { AlbumsView(library: library, open: $open) }
         .alert("Silverbath", isPresented: Binding(get: { library.notice != nil }, set: { if !$0 { library.notice = nil } })) {
             Button("OK", role: .cancel) {}
         } message: {
@@ -115,6 +119,10 @@ struct LibraryView: View {
                 .accessibilityLabel(Text("Silverbath"))
             Spacer()
             HStack(spacing: 0) {
+                Button { showAlbums = true } label: {
+                    Image(systemName: "rectangle.stack").frame(width: 48, height: 44)
+                }
+                .accessibilityLabel(Text("Albums"))
                 Menu {
                     Button { pickingPhotos = true } label: { Label("Add from Photos", systemImage: "photo.on.rectangle") }
                     Button { pickingFiles = true } label: { Label("Add from Files", systemImage: "folder") }
@@ -138,6 +146,7 @@ struct LibraryView: View {
                     }
                     .pickerStyle(.menu)
                     Divider()
+                    Button { showSettings = true } label: { Label("Settings", systemImage: "gearshape") }
                     Button { showAbout = true } label: { Label("About Silverbath", systemImage: "info.circle") }
                 } label: {
                     Image(systemName: "ellipsis").frame(width: 48, height: 44)
@@ -169,6 +178,8 @@ struct LibraryGrid: View {
     @State private var exporting = false
     @State private var merging = false
     @State private var slideshow: [Photo]?
+    @State private var addingToAlbum: [UInt64]?
+    @State private var keywording: [UInt64]?
 
     private let columns = Array(repeating: GridItem(.flexible(), spacing: 2), count: 4)
 
@@ -230,6 +241,12 @@ struct LibraryGrid: View {
         .fullScreenCover(item: Binding(get: { slideshow.map(SlideshowItem.init) }, set: { slideshow = $0?.photos })) { s in
             SlideshowView(photos: s.photos)
         }
+        .sheet(item: Binding(get: { addingToAlbum.map(IDList.init) }, set: { addingToAlbum = $0?.ids })) { l in
+            AddToAlbumSheet(ids: l.ids, library: library).presentationDetents([.medium, .large])
+        }
+        .sheet(item: Binding(get: { keywording.map(IDList.init) }, set: { keywording = $0?.ids })) { l in
+            KeywordSheet(ids: l.ids, library: library).presentationDetents([.medium, .large])
+        }
         .sheet(isPresented: $merging) {
             MergeView(ids: library.shown.map(\.id).filter { selected.contains($0) }) { id in
                 library.reload()
@@ -274,6 +291,22 @@ struct LibraryGrid: View {
                 Button { selected = Set(library.shown.map(\.id)) } label: { Label("Choose all", systemImage: "checkmark.circle") }
                 Button { slideshow = library.shown.filter { selected.contains($0.id) } } label: { Label("Play as a slideshow", systemImage: "play.rectangle") }
                     .disabled(ids.isEmpty)
+                Button { addingToAlbum = ids } label: { Label("Add to an album", systemImage: "rectangle.stack.badge.plus") }
+                    .disabled(ids.isEmpty)
+                Button { keywording = ids } label: { Label("Keywords", systemImage: "tag") }
+                    .disabled(ids.isEmpty)
+                Divider()
+                Button { library.stack(ids); selected = [] } label: { Label("Stack them", systemImage: "square.stack.3d.up") }
+                    .disabled(ids.count < 2)
+                Button { library.unstack(ids); selected = [] } label: { Label("Unstack", systemImage: "square.stack.3d.up.slash") }
+                    .disabled(ids.isEmpty)
+                Button {
+                    let n = library.autoStack(ids)
+                    library.notice = n > 0 ? "Made \(n) stack\(n == 1 ? "" : "s") of shots taken close together" : "No shots taken close together"
+                    selected = []
+                } label: { Label("Stack shots taken together", systemImage: "clock.badge.checkmark") }
+                    .disabled(ids.count < 2)
+                Divider()
                 Button { library.resetEdits(ids) } label: { Label("Reset edits", systemImage: "arrow.uturn.backward") }
                     .disabled(ids.isEmpty)
                 Button(role: .destructive) {
@@ -362,6 +395,14 @@ struct LibraryGrid: View {
     private func menu(_ photo: Photo) -> some View {
         Button { open = photo } label: { Label("Edit", systemImage: "slider.horizontal.3") }
         Button { sharing = photo } label: { Label("Share\u{2026}", systemImage: "square.and.arrow.up") }
+        if let st = photo.stack {
+            Button { library.toggleStack(photo) } label: {
+                Label(st.collapsed ? "Open the stack" : "Fold up the stack", systemImage: "square.stack.3d.up")
+            }
+            if !st.top {
+                Button { library.makeTop(photo) } label: { Label("Put on top of the stack", systemImage: "arrow.up.to.line") }
+            }
+        }
         Button { library.copyEdits(photo) } label: { Label("Copy edits", systemImage: "doc.on.doc") }
         if library.canPaste {
             Button { library.pasteEdits([photo.id]) } label: { Label("Paste edits", systemImage: "doc.on.clipboard") }
@@ -442,6 +483,20 @@ struct LibraryCell: View {
             }
             .overlay(alignment: .topTrailing) {
                 if photo.isRaw { RawBadge() }
+            }
+            .overlay(alignment: .bottomTrailing) {
+                if let st = photo.stack, st.top {
+                    HStack(spacing: 2) {
+                        Image(systemName: st.collapsed ? "square.stack.3d.up.fill" : "square.stack.3d.up")
+                        Text("\(st.count)")
+                    }
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 5).padding(.vertical, 3)
+                    .background(Color.black.opacity(0.55), in: Capsule())
+                    .padding(5)
+                    .accessibilityLabel(Text("Stack of \(st.count)"))
+                }
             }
             .overlay(alignment: .bottomLeading) {
                 HStack(spacing: 3) {
@@ -632,4 +687,10 @@ struct SearchGrid: View {
 struct SlideshowItem: Identifiable {
     let photos: [Photo]
     var id: String { photos.map { String($0.id) }.joined(separator: ",") }
+}
+
+/// Photo ids for a sheet.
+struct IDList: Identifiable {
+    let ids: [UInt64]
+    var id: String { ids.map(String.init).joined(separator: ",") }
 }

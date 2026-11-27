@@ -1648,6 +1648,7 @@ final class EditorModel: ObservableObject {
             focusShape = lb["shape"] as? String ?? "auto"
             bokeh = lb["bokeh"] as? String ?? "circle"
             glowStyle = (s["glow"] as? [String: Any])?["style"] as? String ?? "bloom"
+            upright = (s["geometry"] as? [String: Any])?["upright"] as? String ?? "off"
             focalDistance = (lb["focal_distance"] as? NSNumber)?.doubleValue ?? 0
             focalRange = (lb["focal_range"] as? NSNumber)?.doubleValue ?? 0
             if let a = lb["area"] as? [String: Any], let c = a["center"] as? [String: Any],
@@ -1719,6 +1720,57 @@ final class EditorModel: ObservableObject {
                 dirty = false
                 render()
             }
+        }
+    }
+
+    // MARK: versions
+
+    /// The photo's saved versions (oldest first).
+    @Published private(set) var versions: [(name: String, created: String)] = []
+
+    func loadVersions() {
+        let h = ((try? Engine.shared.run("history.list", ["id": photo.id])) as? [String: Any]) ?? [:]
+        versions = ((h["versions"] as? [[String: Any]]) ?? []).map { ($0["name"] as? String ?? "Version", Self.shortDate($0["created"])) }
+    }
+
+    func saveVersion(_ name: String) {
+        let n = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        attempt("version.create", n.isEmpty ? [:] : ["name": n])
+        loadVersions()
+        toast = "Saved \(n.isEmpty ? "a version" : n)"
+    }
+
+    /// Restore, update (to the current edits), rename or delete version `index`.
+    func versionAction(_ command: String, _ index: Int, name: String? = nil) {
+        var p: [String: Any] = ["index": index]
+        if let name { p["name"] = name }
+        if attempt(command, p) {
+            if command == "version.restore" {
+                refresh()
+                render()
+            }
+        }
+        loadVersions()
+    }
+
+    private static func shortDate(_ v: Any?) -> String {
+        guard let s = v as? String, !s.isEmpty else { return "" }
+        let iso = ISO8601DateFormatter()
+        guard let d = iso.date(from: s) else { return s }
+        return d.formatted(date: .abbreviated, time: .shortened)
+    }
+
+    // MARK: straighten
+
+    /// The automatic perspective and level correction in use (`geometry.upright`): off, auto, level, vertical or full.
+    @Published private(set) var upright = "off"
+
+    func setUpright(_ mode: String) {
+        UISelectionFeedbackGenerator().selectionChanged()
+        if attempt("geometry.upright", ["mode": mode]) {
+            upright = mode
+            refresh()
+            render()
         }
     }
 
