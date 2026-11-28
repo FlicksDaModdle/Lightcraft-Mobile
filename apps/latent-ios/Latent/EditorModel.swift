@@ -146,6 +146,11 @@ final class EditorModel: ObservableObject {
         attempt("library.select", ["ids": [photo.id], "active": photo.id])
         loadDepth()
         loadDenoised()
+        hasCameraTone = Engine.shared.hasCameraTone(photo.id)
+        // a ProRAW not yet edited starts as the camera rendered it: without its tone mapping it looks dark
+        if hasCameraTone, !photo.edited, Self.cameraToneByDefault, !cameraTone {
+            setCameraTone(true)
+        }
         refresh()
         render()
     }
@@ -1648,6 +1653,7 @@ final class EditorModel: ObservableObject {
             focusShape = lb["shape"] as? String ?? "auto"
             bokeh = lb["bokeh"] as? String ?? "circle"
             glowStyle = (s["glow"] as? [String: Any])?["style"] as? String ?? "bloom"
+            cameraTone = (s["profile"] as? [String: Any])?["camera_local_tone"] as? Bool ?? false
             upright = (s["geometry"] as? [String: Any])?["upright"] as? String ?? "off"
             focalDistance = (lb["focal_distance"] as? NSNumber)?.doubleValue ?? 0
             focalRange = (lb["focal_range"] as? NSNumber)?.doubleValue ?? 0
@@ -1720,6 +1726,27 @@ final class EditorModel: ObservableObject {
                 dirty = false
                 render()
             }
+        }
+    }
+
+    // MARK: camera tone mapping
+
+    /// The photo is a raw with its camera's own local tone mapping (Apple ProRAW).
+    @Published private(set) var hasCameraTone = false
+    /// That tone mapping is applied (`profile.camera_local_tone`).
+    @Published private(set) var cameraTone = false
+
+    /// Unedited ProRAW photos open with the camera's tone mapping on.
+    static var cameraToneByDefault: Bool {
+        get { UserDefaults.standard.object(forKey: "cameraToneByDefault") as? Bool ?? true }
+        set { UserDefaults.standard.set(newValue, forKey: "cameraToneByDefault") }
+    }
+
+    func setCameraTone(_ on: Bool) {
+        if attempt("develop.merge", ["settings": ["profile": ["camera_local_tone": on]], "label": "Camera Tone Mapping"]) {
+            cameraTone = on
+            refresh()
+            render()
         }
     }
 

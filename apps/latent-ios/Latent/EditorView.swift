@@ -843,6 +843,7 @@ struct EditorView: View {
                 if model.tool == .effects, model.tool.tabs.indices.contains(model.tab), model.tool.tabs[model.tab].name == "Glow" { glowStyleRow }
                 if model.tool == .detail, model.tool.tabs.indices.contains(model.tab), model.tool.tabs[model.tab].name == "AI denoise" { aiDenoiseRow }
                 if model.tool == .geometry { uprightRow }
+                if model.tool == .light && model.hasCameraTone { cameraToneRow }
                 if model.tool == .mixer { bandChips }
                 if model.tool == .grading { rangeChips }
             }
@@ -1013,6 +1014,23 @@ struct EditorView: View {
                 .buttonStyle(.plain)
             }
         }
+        .padding(.horizontal, 20)
+        .padding(.top, 10)
+    }
+
+    /// ProRAW's own tone mapping: on renders the photo as the iPhone did (shadows lifted, local contrast); off
+    /// is the plain raw, darker and flatter, with the most room to edit.
+    private var cameraToneRow: some View {
+        Toggle(isOn: Binding(get: { model.cameraTone }, set: { model.setCameraTone($0) })) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("iPhone tone mapping").font(.system(size: 15))
+                Text(model.cameraTone ? "As the iPhone rendered it" : "The plain raw: darker, with the most room to edit")
+                    .font(.system(size: 12)).foregroundStyle(Theme.secondaryText)
+            }
+        }
+        .toggleStyle(.switch)
+        .tint(Theme.accent)
+        .foregroundStyle(.white)
         .padding(.horizontal, 20)
         .padding(.top, 10)
     }

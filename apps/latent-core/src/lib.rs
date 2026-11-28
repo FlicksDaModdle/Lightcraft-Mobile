@@ -116,6 +116,13 @@ impl Core {
         Ok((out.file_name, out.bytes))
     }
 
+    /// Whether photo `id` is a raw carrying its camera's own local tone mapping (Apple ProRAW's gain table map),
+    /// which `profile.camera_local_tone` renders. Without it such a photo looks darker and flatter than the camera
+    /// showed it.
+    pub fn has_camera_tone(&self, id: u64) -> bool {
+        self.lock().source_info(PhotoId(id)).local_tone.is_some()
+    }
+
     /// The photo's depth map as the photo is framed (cropped, straightened, flipped): near white,
     /// far black, to fit `max_w` × `max_h`. Black all over without a depth map.
     pub fn render_depth(&self, id: u64, max_w: usize, max_h: usize) -> Result<Image, String> {

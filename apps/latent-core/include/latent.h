@@ -100,6 +100,9 @@ char *latent_merge(const LatentCore *core, const char *command, const char *para
 bool latent_denoise(const LatentCore *core, uint64_t id, LatentDenoiseFn model, uint32_t size, LatentProgressFn progress, char **error);
 bool latent_save_denoised(const LatentCore *core, uint64_t id, const char *path);
 bool latent_load_denoised(const LatentCore *core, uint64_t id, const char *path);
+// Whether the photo is a raw with its camera's own local tone mapping (Apple ProRAW); settings
+// profile.camera_local_tone renders it.
+bool latent_has_camera_tone(const LatentCore *core, uint64_t id);
 bool latent_has_denoised(const LatentCore *core, uint64_t id);
 void latent_forget_denoised(const LatentCore *core, uint64_t id);
 

@@ -16,6 +16,7 @@ struct SettingsView: View {
     @State private var gpu = true
     @State private var showAbout = false
     @State private var importAsShown = DeviceAlbum.asShown
+    @State private var cameraTone = EditorModel.cameraToneByDefault
 
     struct ModelState: Identifiable {
         let spec: ModelSpec
@@ -100,6 +101,14 @@ struct SettingsView: View {
                         }
                     }
                     .id(importAsShown)
+                    Toggle(isOn: Binding(get: { EditorModel.cameraToneByDefault }, set: { EditorModel.cameraToneByDefault = $0; cameraTone = $0 })) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Open ProRAW as the iPhone rendered it")
+                            Text("Applies the iPhone's own tone mapping to ProRAW photos you haven't edited, so they don't look dark. You can turn it off per photo in Light.")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
+                    .id(cameraTone)
                 } header: {
                     Text("Camera Roll")
                 }

@@ -186,6 +186,7 @@ final class Engine: @unchecked Sendable {
     }
 
     func saveDenoised(_ id: UInt64, to url: URL) -> Bool { latent_save_denoised(core, id, url.path) }
+    func hasCameraTone(_ id: UInt64) -> Bool { latent_has_camera_tone(core, id) }
     func loadDenoised(_ id: UInt64, from url: URL) -> Bool { latent_load_denoised(core, id, url.path) }
     func hasDenoised(_ id: UInt64) -> Bool { latent_has_denoised(core, id) }
     func forgetDenoised(_ id: UInt64) { latent_forget_denoised(core, id) }

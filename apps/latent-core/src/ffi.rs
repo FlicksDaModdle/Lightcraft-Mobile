@@ -616,3 +616,13 @@ pub unsafe extern "C" fn latent_merge(
         }
     }
 }
+
+/// Whether photo `id` carries its camera's own local tone mapping (Apple ProRAW), see [`Core::has_camera_tone`].
+///
+/// # Safety
+/// `core` from [`latent_open`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn latent_has_camera_tone(core: *const Core, id: u64) -> bool {
+    // SAFETY: as documented above
+    unsafe { self::core(core) }.is_some_and(|c| c.has_camera_tone(id))
+}
