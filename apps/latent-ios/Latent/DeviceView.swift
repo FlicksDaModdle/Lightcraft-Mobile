@@ -62,13 +62,25 @@ final class DeviceAlbum: ObservableObject {
         }
     }
 
-    /// Write the asset's original file (its raw file, if it has one) into the Import folder.
+    /// Bring photos in as Photos shows them (with their Photos edits and Photographic Style), not as first taken.
+    /// Raw files always come in as taken: their edits are made here.
+    static var asShown: Bool {
+        get { UserDefaults.standard.object(forKey: "importAsShown") as? Bool ?? true }
+        set { UserDefaults.standard.set(newValue, forKey: "importAsShown") }
+    }
+
+    /// Write the asset's file into the Import folder: its raw file if it has one; otherwise the picture as Photos
+    /// shows it (edits and Photographic Style applied) unless `asShown` is off, then the original.
     private static func copyOriginal(_ asset: PHAsset) async throws -> URL {
         let resources = PHAssetResource.assetResources(for: asset)
         let isRaw = { (r: PHAssetResource) in
             UTType(filenameExtension: (r.originalFilename as NSString).pathExtension)?.conforms(to: .rawImage) ?? false
         }
+        // a photo edited in Photos, or taken with a Photographic Style that can be undone, keeps its look in a
+        // separate full-size rendering; its original file looks flatter, brighter or darker than what Photos shows
+        let shown = asShown ? resources.first(where: { $0.type == .fullSizePhoto && !isRaw($0) }) : nil
         guard let resource = resources.first(where: { ($0.type == .alternatePhoto || $0.type == .photo) && isRaw($0) })
+            ?? shown
             ?? resources.first(where: { $0.type == .photo })
             ?? resources.first(where: { $0.type == .fullSizePhoto })
             ?? resources.first

@@ -15,6 +15,7 @@ struct SettingsView: View {
     @State private var notice: String?
     @State private var gpu = true
     @State private var showAbout = false
+    @State private var importAsShown = DeviceAlbum.asShown
 
     struct ModelState: Identifiable {
         let spec: ModelSpec
@@ -88,6 +89,19 @@ struct SettingsView: View {
                         }
                     }
                     NavigationLink("Export presets") { ExportPresetsView() }
+                }
+
+                Section {
+                    Toggle(isOn: Binding(get: { DeviceAlbum.asShown }, set: { DeviceAlbum.asShown = $0; importAsShown = $0 })) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Bring photos in as Photos shows them")
+                            Text("With the edits and Photographic Style you see in Photos. Off: the photo as first taken. Raw files always come in as taken.")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
+                    .id(importAsShown)
+                } header: {
+                    Text("Camera Roll")
                 }
 
                 Section {
